@@ -2,21 +2,23 @@ use std::cmp::PartialEq;
 use std::fmt::{Debug, Display, Formatter, Pointer, write};
 use std::ptr::read;
 use std::sync::Arc;
+use std::vec;
 use crate::{Column, ColumnType, global, parser, prefix_plus_plus, suffix_plus_plus, Table, TableType, throw};
 use anyhow::{Result};
 use serde_json::to_string;
-use crate::ColumnType::{LONG, UNKNOWN};
 
-pub fn parse(sql: &str) -> Result<Command> {
+pub fn parse(sql: &str) -> Result<Vec<Command>> {
     let mut parser = Parser::new(sql);
 
     parser.parseElement()?;
 
-    for a in &parser.elementVec {
-        println!("{}", a);
+    for elementVec in &parser.elementVecVec {
+        for element in elementVec {
+            println!("{}", element);
+        }
     }
 
-    Ok(Command::UNKNOWN)
+    parser.parse()
 }
 
 pub enum Command {
@@ -37,23 +39,23 @@ pub struct Parser {
     括号数量: usize,
     括号1数量: usize,
 
-    elementVec: Vec<Element>,
+    elementVecVec: Vec<Vec<Element>>,
+    currentElementVecIndex: usize,
     currentElementIndex: usize,
 }
 
 impl Parser {
     pub fn new(sql: &str) -> Self {
-        let sql = sql.to_string();
-        let chars = sql.chars().collect::<Vec<char>>();
-
         let mut parser = Parser::default();
-        parser.sql = sql;
-        parser.chars = chars;
+        parser.sql = sql.to_string();
+        parser.chars = parser.sql.chars().collect::<Vec<char>>();
 
         parser
     }
 
     fn parseElement(&mut self) -> Result<()> {
+        let mut currentElementVec: Vec<Element> = Vec::new();
+
         // 空格 逗号 单引号 括号
         loop {
             let mut advanceCount: usize = 0;
@@ -67,7 +69,7 @@ impl Parser {
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
                     } else {
-                        self.collectPendingChars();
+                        self.collectPendingChars(&mut currentElementVec);
                     }
 
                     advanceCount = 1;
@@ -77,7 +79,7 @@ impl Parser {
                         match self.nextChar() {
                             // 说明是末尾了,下边的文本结束是相同的 select a where name = 'a'
                             None => {
-                                self.collectPendingChars();
+                                self.collectPendingChars(&mut currentElementVec);
 
                                 self.单引号as文本边界的数量 = self.单引号as文本边界的数量 + 1;
                                 advanceCount = 1;
@@ -88,7 +90,7 @@ impl Parser {
                                     self.pendingChars.push(currentChar);
                                     advanceCount = 2;
                                 } else { // 说明文本结束的
-                                    self.collectPendingChars();
+                                    self.collectPendingChars(&mut currentElementVec);
 
                                     self.单引号as文本边界的数量 = self.单引号as文本边界的数量 + 1;
                                     advanceCount = 1;
@@ -97,7 +99,7 @@ impl Parser {
                         }
                     } else {
                         // 开启了1个文本读取 需要把老的了结掉
-                        self.collectPendingChars();
+                        self.collectPendingChars(&mut currentElementVec);
 
                         self.单引号as文本边界的数量 = self.单引号as文本边界的数量 + 1;
                         advanceCount = 1;
@@ -107,8 +109,8 @@ impl Parser {
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
                     } else {
-                        self.collectPendingChars();
-                        self.elementVec.push(Element::TextLiteral(currentChar.to_string()));
+                        self.collectPendingChars(&mut currentElementVec);
+                        currentElementVec.push(Element::TextLiteral(currentChar.to_string()));
                     }
 
                     advanceCount = 1;
@@ -119,6 +121,21 @@ impl Parser {
                         self.括号1数量 = self.括号1数量 + 1;
                     }
                 }
+                global::分号_char => { // 应对同时写了多个的sql
+                    // 单纯的是文本内容
+                    if self.whetherIn单引号() {
+                        self.pendingChars.push(currentChar);
+                    } else { // 说明是多个的sql的分隔的
+                        self.collectPendingChars(&mut currentElementVec);
+
+                        if currentElementVec.len() > 0 {
+                            self.elementVecVec.push(currentElementVec);
+                            currentElementVec = Vec::new();
+                        }
+                    }
+
+                    advanceCount = 1;
+                }
                 _ => {
                     self.pendingChars.push(currentChar);
                     advanceCount = 1;
@@ -127,7 +144,8 @@ impl Parser {
 
             let reachEnd = self.advanceChar(advanceCount);
             if reachEnd {
-                self.collectPendingChars();
+                self.collectPendingChars(&mut currentElementVec);
+                self.elementVecVec.push(currentElementVec);
                 break;
             }
         }
@@ -137,17 +155,17 @@ impl Parser {
             self.throwSyntaxError()?;
         }
 
-        if self.elementVec.len() == 0 {
+        if self.elementVecVec.len() == 0 {
             self.throwSyntaxErrorDetail("the sql is empty string")?;
         }
 
         Ok(())
     }
 
-    // 要是overflow的话返回true
+    /// 要是会已到末尾以外 返回true
     fn advanceChar(&mut self, count: usize) -> bool {
         if self.currentCharIndex + count >= self.sql.len() {
-            self.currentElementIndex = self.sql.len() - 1;
+            self.currentCharIndex = self.sql.len() - 1;
             return true;
             // throw!("当前已是sql的末尾不能advance了");
         }
@@ -177,7 +195,7 @@ impl Parser {
         }
     }
 
-    fn collectPendingChars(&mut self) {
+    fn collectPendingChars(&mut self, dest: &mut Vec<Element>) {
         let text: String = self.pendingChars.iter().collect();
 
         // 如果是空字符的话还是需要记录的
@@ -205,7 +223,7 @@ impl Parser {
             Element::TextLiteral(text)
         };
 
-        self.elementVec.push(element);
+        dest.push(element);
         self.pendingChars.clear();
     }
 
@@ -278,54 +296,158 @@ impl Parser {
         (true, decimal)
     }
 
-    fn parse(&mut self) -> Result<Command> {
-        match self.getCurrentElementAdvance().unwrap() {
-            Element::TextLiteral(text) => {
-                let text = text.to_uppercase();
+    fn parse(&mut self) -> Result<Vec<Command>> {
+        let mut commandVec = Vec::new();
 
-                match text.as_str() {
-                    "CREATE" => {
-                        self.parseCreate()
-                    }
-                    "INSERT" => {
-                        self.parseInsert()
-                    }
-                    _ => {
-                        self.throwSyntaxError()
+        loop {
+            let command = match self.getCurrentElementAdvance()? {
+                Element::TextLiteral(text) => {
+                    let text = text.to_uppercase();
+
+                    match text.as_str() {
+                        "CREATE" => {
+                            self.parseCreate()?
+                        }
+                        "INSERT" => {
+                            self.parseInsert()?
+                        }
+                        _ => {
+                            self.throwSyntaxError()?
+                        }
                     }
                 }
+                _ => self.throwSyntaxError()?
+            };
+
+            commandVec.push(command);
+
+            if prefix_plus_plus!(self.currentElementVecIndex) >= self.elementVecVec.len() {
+                break;
             }
-            _ => self.throwSyntaxError()
+
+            self.currentElementIndex = 0;
         }
+
+        Ok(commandVec)
     }
 
     fn parseCreate(&mut self) -> Result<Command> {
-        loop {
-            let mut advanceCount: usize = 0;
+        let element = self.getCurrentElementAdvance()?;
 
-            // 读取table name
-            if let Some(element) = self.getCurrentElementAdvance() {
-                match element {
-                    Element::TextLiteral(s) => {}
-                    _ => { // 表名不能是纯数字的
-                        self.throwSyntaxErrorDetail("")?;
+        // 不是table便是relation
+        if let Element::TextLiteral(text) = element {
+            let text = text.to_uppercase();
+            let text = text.as_str();
+            match text {
+                "TABLE" | "RELATION" => {
+                    let tableType = TableType::from(text);
+
+                    match tableType {
+                        TableType::UNKNOWN => {
+                            self.throwSyntaxError()
+                        }
+                        _ => {
+                            self.parseCreateTable(TableType::from(text))
+                        }
                     }
                 }
-            } else { // 说明已用光了
-                self.throwSyntaxError()?;
-            }
-
-            match self.elementVec.get(self.currentElementIndex) {
-                None => { // overflow了
-                    break;
+                _ => {
+                    self.throwSyntaxError()
                 }
-                Some(element) => {}
             }
+        } else {
+            self.throwSyntaxError()
+        }
+    }
 
-            break;
+    fn parseCreateTable(&mut self, tableType: TableType) -> Result<Command> {
+        let mut table = Table::default();
+
+        table.type0 = tableType;
+
+        // 读取table name
+        match self.getCurrentElementAdvance()? {
+            Element::TextLiteral(tableName) => {
+                table.name = tableName.to_string();
+            }
+            _ => { // 表名不能是纯数字的
+                self.throwSyntaxErrorDetail("table name can not be pure number")?;
+            }
         }
 
-        Ok(Command::UNKNOWN)
+        // 应该是"("
+        let element = self.getCurrentElementAdvance()?;
+        if element.expectTextLiteralContent("(") == false {
+            self.throwSyntaxError()?;
+        }
+
+        // 循环读取 column
+        enum ReadColumnState {
+            ReadColumnName,
+            ReadColumnType,
+            ReadComplete,
+        }
+
+        let mut readColumnState = ReadColumnState::ReadColumnName;
+        let mut column = Column::default();
+        loop {
+            let element = self.getCurrentElementOptionAdvance();
+            if element.is_none() {
+                break;
+            }
+
+            let element = element.unwrap();
+            match element {
+                Element::TextLiteral(text) => {
+                    // 砍断和text->element->&mut self联系 不然下边的throwSyntaxErrorDetail报错因为是&self的
+                    let text = text.to_string();
+
+                    match readColumnState {
+                        ReadColumnState::ReadColumnName => {
+                            column.name = text;
+                            readColumnState = ReadColumnState::ReadColumnType;
+                        }
+                        ReadColumnState::ReadColumnType => {
+                            let columnType = ColumnType::from(text.to_uppercase().as_str());
+                            match columnType {
+                                ColumnType::UNKNOWN => {
+                                    self.throwSyntaxErrorDetail(&format!("unknown column type:{}", text))?;
+                                }
+                                _ => {
+                                    column.type0 = columnType;
+                                }
+                            }
+
+                            readColumnState = ReadColumnState::ReadComplete;
+                        }
+                        ReadColumnState::ReadComplete => {
+                            match text.as_str() {
+                                global::逗号_STR => {
+                                    readColumnState = ReadColumnState::ReadColumnName;
+
+                                    table.columns.push(column);
+                                    column = Column::default();
+
+                                    continue;
+                                }
+                                ")" => {
+                                    table.columns.push(column);
+                                    break;
+                                }
+                                _ => {
+                                    self.throwSyntaxError()?;
+                                }
+                            }
+                        }
+                    }
+                }
+                Element::IntegerLiteral(_) | Element::DecimalLiteral(_) => {
+                    self.throwSyntaxErrorDetail("column name , column type can not be pure number")?;
+                }
+            }
+        }
+
+        Ok(Command::CreateTable(table))
     }
 
     fn parseInsert(&mut self) -> Result<Command> {
@@ -333,12 +455,22 @@ impl Parser {
     }
 
     /// 返回None的话说明当前已经是overflow了 和之前遍历char时候不同的是 当不能advance时候index是在最后的index还要向后1个的
-    fn getCurrentElementAdvance(&mut self) -> Option<&Element> {
-        let option = self.elementVec.get(self.currentElementIndex);
+    fn getCurrentElementOptionAdvance(&mut self) -> Option<&Element> {
+        let option = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex);
         if option.is_some() {
             suffix_plus_plus!(self.currentElementIndex);
         }
         option
+    }
+
+    fn getCurrentElementAdvance(&mut self) -> Result<&Element> {
+        let option = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex);
+        if option.is_some() {
+            suffix_plus_plus!(self.currentElementIndex);
+            Ok(option.unwrap())
+        } else {
+            self.throwSyntaxError()?
+        }
     }
 }
 
@@ -346,6 +478,24 @@ pub enum Element {
     TextLiteral(String),
     IntegerLiteral(i64),
     DecimalLiteral(f64),
+}
+
+impl Element {
+    fn expectTextLiteral(&self) -> bool {
+        if let Element::TextLiteral(_) = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expectTextLiteralContent(&self, expectContent: &str) -> bool {
+        if let Element::TextLiteral(content) = self {
+            content == expectContent
+        } else {
+            false
+        }
+    }
 }
 
 impl Display for Element {
@@ -360,7 +510,9 @@ impl Display for Element {
             Element::DecimalLiteral(s) => {
                 write!(f, "{}({})", "DecimalLiteral", s)
             }
-            _ => { write!(f, "{}", "UNKNOWN") }
+            _ => {
+                write!(f, "{}", "UNKNOWN")
+            }
         }
     }
 }
@@ -379,7 +531,7 @@ mod test {
 
     #[test]
     pub fn testParseCreateTable() {
-        parser::parse("CREATE    TABLE    TEST   ( COLUMN1 STRING   ,  COLUMN2 NUMBER)").unwrap();
+        let command = parser::parse("CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)").unwrap();
     }
 
     #[test]

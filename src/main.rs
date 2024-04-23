@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use crate::ColumnType::{DOUBLE, LONG, STRING, UNKNOWN};
 use crate::config::CONFIG;
 use crate::parser::Command;
 
@@ -28,7 +27,7 @@ lazy_static! {
             name: "column1".to_string(),
             type0: ColumnType::STRING,
         }],
-        type0: TableType::DATA,
+        type0: TableType::TABLE,
     };
 }
 
@@ -91,7 +90,7 @@ pub fn createTable(table: &Table) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+#[derive(Debug, Deserialize, Clone, Serialize, Default)]
 pub struct Table {
     pub name: String,
     pub columns: Vec<Column>,
@@ -100,11 +99,28 @@ pub struct Table {
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
 pub enum TableType {
-    DATA,
+    TABLE,
     RELATION,
+    UNKNOWN,
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+impl Default for TableType {
+    fn default() -> Self {
+        TableType::UNKNOWN
+    }
+}
+
+impl From<&str> for TableType {
+    fn from(value: &str) -> Self {
+        match value {
+            "TABLE" => TableType::TABLE,
+            "RELATION" => TableType::RELATION,
+            _ => TableType::UNKNOWN
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize, Default)]
 pub struct Column {
     pub name: String,
     pub type0: ColumnType,
@@ -113,18 +129,24 @@ pub struct Column {
 #[derive(Debug, Deserialize, Clone, Serialize, PartialEq)]
 pub enum ColumnType {
     STRING,
-    LONG,
-    DOUBLE,
+    INTEGER,
+    DECIMAL,
     UNKNOWN,
+}
+
+impl Default for ColumnType {
+    fn default() -> Self {
+        ColumnType::UNKNOWN
+    }
 }
 
 impl From<&str> for ColumnType {
     fn from(value: &str) -> Self {
         match value {
-            "STRING" => STRING,
-            "LONG" => LONG,
-            "DOUBLE" => DOUBLE,
-            _ => UNKNOWN
+            "STRING" => ColumnType::STRING,
+            "INTEGER" => ColumnType::INTEGER,
+            "DECIMAL" => ColumnType::DECIMAL,
+            _ => ColumnType::UNKNOWN
         }
     }
 }
