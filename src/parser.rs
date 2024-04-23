@@ -39,8 +39,11 @@ pub struct Parser {
     括号数量: usize,
     括号1数量: usize,
 
+    /// 因为可能会1趟写多个使用;分隔的sql 也会有多个Vec<Element>
     elementVecVec: Vec<Vec<Element>>,
+    /// ``` Vec<Vec<Element>>的index```
     currentElementVecIndex: usize,
+    /// ```Vec<Element>的index```
     currentElementIndex: usize,
 }
 
@@ -110,6 +113,8 @@ impl Parser {
                         self.pendingChars.push(currentChar);
                     } else {
                         self.collectPendingChars(&mut currentElementVec);
+
+                        // 本身也添加到elementVec
                         currentElementVec.push(Element::TextLiteral(currentChar.to_string()));
                     }
 
@@ -121,11 +126,11 @@ impl Parser {
                         self.括号1数量 = self.括号1数量 + 1;
                     }
                 }
-                global::分号_char => { // 应对同时写了多个的sql
+                global::分号_char => { // 应对同时写了多个以;分隔的sql
                     // 单纯的是文本内容
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
-                    } else { // 说明是多个的sql的分隔的
+                    } else { // 说明是多个的sql的分隔的 到了1个sql的收尾
                         self.collectPendingChars(&mut currentElementVec);
 
                         if currentElementVec.len() > 0 {
@@ -347,7 +352,7 @@ impl Parser {
                             self.throwSyntaxError()
                         }
                         _ => {
-                            self.parseCreateTable(TableType::from(text))
+                            self.parseCreateTable(tableType)
                         }
                     }
                 }
@@ -368,6 +373,7 @@ impl Parser {
         // 读取table name
         match self.getCurrentElementAdvance()? {
             Element::TextLiteral(tableName) => {
+                self.checkName(tableName)?;
                 table.name = tableName.to_string();
             }
             _ => { // 表名不能是纯数字的
@@ -404,6 +410,7 @@ impl Parser {
 
                     match readColumnState {
                         ReadColumnState::ReadColumnName => {
+                            self.checkName(&text)?;
                             column.name = text;
                             readColumnState = ReadColumnState::ReadColumnType;
                         }
@@ -441,8 +448,8 @@ impl Parser {
                         }
                     }
                 }
-                Element::IntegerLiteral(_) | Element::DecimalLiteral(_) => {
-                    self.throwSyntaxErrorDetail("column name , column type can not be pure number")?;
+                _ => {
+                    self.throwSyntaxErrorDetail("column name,column type can not be pure number")?;
                 }
             }
         }
@@ -471,6 +478,37 @@ impl Parser {
         } else {
             self.throwSyntaxError()?
         }
+    }
+
+    /// 字母数字 且 数字不能打头
+    fn checkName(&self, name: &str) -> Result<()> {
+        let chars: Vec<char> = name.chars().collect();
+
+        // 打头得要字母
+        let firstCharCorrect = match chars[0] {
+            'a'..='z' => {}
+            'A'..='Z' => {}
+            _ => {
+                self.throwSyntaxErrorDetail("table name should start with letter")?;
+            }
+        };
+
+        if name.len() == 1 {
+            return Ok(());
+        }
+
+        for char in chars[1..].iter() {
+            match char {
+                'a'..='z' => {}
+                'A'..='Z' => {}
+                '0'..='9' => {}
+                _ => {
+                    self.throwSyntaxErrorDetail("table name should only contain letter , number")?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
