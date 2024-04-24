@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use meta::Table;
 use crate::config::CONFIG;
 
+
 fn main() -> Result<()> {
     init()?;
     Ok(())
