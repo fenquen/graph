@@ -22,4 +22,5 @@ pub const 括号_CHAR: char = '(';
 pub const 括号1_CHAR: char = ')';
 pub const 分号_char: char = ';';
 
+
 pub const 临界_CHARS: &[char] = &[空格_CHAR, 逗号_CHAR, 单引号_CHAR, 括号_CHAR, 括号1_CHAR];
