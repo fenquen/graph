@@ -1,11 +1,8 @@
 use std::cmp::PartialEq;
-use std::fmt::{Debug, Display, Formatter, Pointer, write};
-use std::ptr::read;
-use std::sync::Arc;
-use std::vec;
-use crate::{Column, ColumnType, global, parser, prefix_plus_plus, suffix_plus_plus, Table, TableType, throw};
-use anyhow::{Result};
-use serde_json::to_string;
+use std::fmt::{Debug, Display, Formatter, Pointer};
+use crate::{global, prefix_plus_plus, suffix_plus_plus, throw};
+use anyhow::Result;
+use crate::meta::{Column, ColumnType, Table, TableType, ColumnValue};
 
 pub fn parse(sql: &str) -> Result<Vec<Command>> {
     let mut parser = Parser::new(sql);
@@ -23,7 +20,7 @@ pub fn parse(sql: &str) -> Result<Vec<Command>> {
 
 pub enum Command {
     CreateTable(Table),
-    INSERT,
+    INSERT(InsertValues),
     SELECT,
     UNKNOWN,
 }
@@ -116,15 +113,15 @@ impl Parser {
 
                         // 本身也添加到elementVec
                         currentElementVec.push(Element::TextLiteral(currentChar.to_string()));
+
+                        if currentChar == global::括号_CHAR {
+                            self.括号数量 = self.括号数量 + 1;
+                        } else if currentChar == global::括号1_CHAR {
+                            self.括号1数量 = self.括号1数量 + 1;
+                        }
                     }
 
                     advanceCount = 1;
-
-                    if currentChar == global::括号_CHAR {
-                        self.括号数量 = self.括号数量 + 1;
-                    } else if currentChar == global::括号1_CHAR {
-                        self.括号1数量 = self.括号1数量 + 1;
-                    }
                 }
                 global::分号_char => { // 应对同时写了多个以;分隔的sql
                     // 单纯的是文本内容
@@ -216,7 +213,7 @@ impl Parser {
         let element = if isPureNumberText {
             // 当前是不是在单引号的包围 是文本
             if self.whetherIn单引号() {
-                Element::TextLiteral(text)
+                Element::StringContent(text)
             } else {
                 if isDecimal {
                     Element::DecimalLiteral(text.parse::<f64>().unwrap())
@@ -225,7 +222,11 @@ impl Parser {
                 }
             }
         } else {
-            Element::TextLiteral(text)
+            if self.whetherIn单引号() {
+                Element::StringContent(text)
+            } else {
+                Element::TextLiteral(text)
+            }
         };
 
         dest.push(element);
@@ -336,6 +337,8 @@ impl Parser {
         Ok(commandVec)
     }
 
+    /// 当前不实现 default value
+    // CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)
     fn parseCreate(&mut self) -> Result<Command> {
         let element = self.getCurrentElementAdvance()?;
 
@@ -373,13 +376,14 @@ impl Parser {
         // 读取table name
         match self.getCurrentElementAdvance()? {
             Element::TextLiteral(tableName) => {
-                self.checkName(tableName)?;
                 table.name = tableName.to_string();
             }
             _ => { // 表名不能是纯数字的
                 self.throwSyntaxErrorDetail("table name can not be pure number")?;
             }
         }
+
+        self.checkName(&table.name)?;
 
         // 应该是"("
         let element = self.getCurrentElementAdvance()?;
@@ -457,8 +461,118 @@ impl Parser {
         Ok(Command::CreateTable(table))
     }
 
+    // insert   INTO TEST VALUES ( '0'  , ')')
+    // insert into test (column1) values ('a')
+    // a
     fn parseInsert(&mut self) -> Result<Command> {
-        Ok(Command::UNKNOWN)
+        let currentElement = self.getCurrentElementAdvance()?;
+        if currentElement.expectTextLiteralContentIgnoreCase("into") == false {
+            self.throwSyntaxErrorDetail("insert should followed by into")?;
+        }
+
+        let mut insertValues = InsertValues::default();
+
+        let tableNameElement = self.getCurrentElementAdvance()?;
+        if let Element::TextLiteral(tableName) = tableNameElement {
+            insertValues.tableName = tableName.to_string();
+        } else {
+            self.throwSyntaxErrorDetail("table name should not pure number")?;
+        }
+
+        loop { // loop 对应下边说的猥琐套路
+            let currentElement = self.getCurrentElementAdvance()?;
+            let currentText = currentElement.expectTextLiteral().map_or_else(|| { self.throwSyntaxError() }, |s| { Ok(s) })?.to_uppercase();
+            match currentText.as_str() {
+                "(" => { // 各column名
+                    insertValues.useExplicitColumnNames = true;
+
+                    loop {
+                        let currentElement = self.getCurrentElementAdvance()?;
+
+                        // columnName都要是TextLiteral 而不是StringContent
+                        match currentElement.expectTextLiteral() {
+                            Some(text) => {
+                                match text.as_str() {
+                                    global::逗号_STR => {
+                                        continue;
+                                    }
+                                    ")" => { // columnName读取结束了 下边应该是values
+                                        break;
+                                    }
+                                    _ => {
+                                        insertValues.columnNames.push(text);
+                                    }
+                                }
+                            }
+                            None => {
+                                self.throwSyntaxError()?;
+                            }
+                        }
+                    }
+
+                    // 后边应该到下边的 case "VALUES" 那边 因为rust的match默认有break效果不会到下边的case 需要使用猥琐的套路 把它们都包裹到loop
+                }
+                "VALUES" => { // values
+                    let currentElement = self.getCurrentElementAdvance()?;
+                    if currentElement.expectTextLiteralContentIgnoreCase("(") == false {
+                        self.throwSyntaxError()?;
+                    }
+
+                    loop {
+                        let currentElement = self.getCurrentElementAdvance()?;
+
+                        // columnValue 不能是TextLiteral
+                        match currentElement {
+                            Element::StringContent(stringContent) => {
+                                let a = *&1;
+                                insertValues.columnValues.push(ColumnValue::STRING(stringContent.to_string()));
+                            }
+                            Element::IntegerLiteral(int) => {
+                                insertValues.columnValues.push(ColumnValue::INTEGER(*int));
+                            }
+                            Element::DecimalLiteral(decimal) => {
+                                insertValues.columnValues.push(ColumnValue::DECIMAL(*decimal));
+                            }
+                            Element::TextLiteral(text) => {
+                                match text.as_str() {
+                                    global::逗号_STR => {
+                                        continue;
+                                    }
+                                    ")" => {
+                                        break;
+                                    }
+                                    _ => {
+                                        self.throwSyntaxErrorDetail("column value should not be text literal")?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    break;
+                }
+                _ => {
+                    self.throwSyntaxError()?;
+                }
+            }
+        }
+
+        // 如果是显式说明的columnName 需要确保columnName数量和value数量相同
+        if insertValues.useExplicitColumnNames {
+            if insertValues.columnNames.len() != insertValues.columnValues.len() {
+                self.throwSyntaxErrorDetail("column number should equal value number")?;
+            }
+
+            if insertValues.columnNames.len() == 0 {
+                self.throwSyntaxErrorDetail("you have not designate any column")?;
+            }
+        } else {
+            if insertValues.columnValues.len() == 0 {
+                self.throwSyntaxErrorDetail("you have not designate any column value")?;
+            }
+        }
+
+        Ok(Command::INSERT(insertValues))
     }
 
     /// 返回None的话说明当前已经是overflow了 和之前遍历char时候不同的是 当不能advance时候index是在最后的index还要向后1个的
@@ -489,7 +603,7 @@ impl Parser {
             'a'..='z' => {}
             'A'..='Z' => {}
             _ => {
-                self.throwSyntaxErrorDetail("table name should start with letter")?;
+                self.throwSyntaxErrorDetail("table,column name should start with letter")?;
             }
         };
 
@@ -503,7 +617,7 @@ impl Parser {
                 'A'..='Z' => {}
                 '0'..='9' => {}
                 _ => {
-                    self.throwSyntaxErrorDetail("table name should only contain letter , number")?;
+                    self.throwSyntaxErrorDetail("table,column name should only contain letter , number")?;
                 }
             }
         }
@@ -513,23 +627,37 @@ impl Parser {
 }
 
 pub enum Element {
+    /// 如果只有TextLiteral的话 还是不能区分 (')') 的两个右括号的
     TextLiteral(String),
+    /// 对应''包括起来的内容
+    StringContent(String),
     IntegerLiteral(i64),
     DecimalLiteral(f64),
 }
 
 impl Element {
-    fn expectTextLiteral(&self) -> bool {
-        if let Element::TextLiteral(_) = self {
-            true
+    fn expectTextLiteral(&self) -> Option<String> {
+        if let Element::TextLiteral(text) = self {
+            Some(text.to_string())
         } else {
-            false
+            None
         }
     }
 
     fn expectTextLiteralContent(&self, expectContent: &str) -> bool {
         if let Element::TextLiteral(content) = self {
             content == expectContent
+        } else {
+            false
+        }
+    }
+
+    fn expectTextLiteralContentIgnoreCase(&self, expectContent: &str) -> bool {
+        if let Element::TextLiteral(content) = self {
+            let expectContent = expectContent.to_uppercase();
+            let content = content.to_uppercase();
+
+            expectContent == content
         } else {
             false
         }
@@ -541,6 +669,9 @@ impl Display for Element {
         match self {
             Element::TextLiteral(s) => {
                 write!(f, "{}({})", "TextLiteral", s)
+            }
+            Element::StringContent(s) => {
+                write!(f, "{}({})", "StringContent", s)
             }
             Element::IntegerLiteral(s) => {
                 write!(f, "{}({})", "IntegerLiteral", s)
@@ -561,6 +692,15 @@ impl Debug for Element {
     }
 }
 
+#[derive(Default)]
+pub struct InsertValues {
+    pub tableName: String,
+    /// insert into table (column) values ('a')
+    pub useExplicitColumnNames: bool,
+    pub columnNames: Vec<String>,
+    pub columnValues: Vec<ColumnValue>,
+}
+
 // ------------------------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -574,10 +714,8 @@ mod test {
 
     #[test]
     pub fn testParseInsert() {
-        let a: usize = 0;
-        // println!("{:?}", vec![1].get(a - 1));
         // println!("{}", "".parse::<f64>().unwrap());
-        // parser::parse("insert   INTO TEST VALUES ( '0'  , 0'7").unwrap();
+        parser::parse("insert   INTO TEST VALUES ( 0  , ')')").unwrap();
     }
 }
 

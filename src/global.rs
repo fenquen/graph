@@ -2,7 +2,7 @@ use std::fs::File;
 use std::sync::{Arc, RwLock};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
-use crate::Table;
+use crate::meta::Table;
 
 
 pub static mut TABLE_RECORD_FILE: Option<Arc<RwLock<File>>> = None;
