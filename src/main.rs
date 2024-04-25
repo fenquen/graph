@@ -20,9 +20,26 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use meta::Table;
 use crate::config::CONFIG;
+use crate::parser::{Command, Parser};
 
 fn main() -> Result<()> {
     init()?;
+    // "create table user (id integer,name string);insert into user values (1,'tom')"
+    // "create table car (id integer,color string);insert into car values (1,'red')"
+    // "create relation usage (number integer)"
+    let commandVec = parser::parse("insert into usage values (1)")?;
+    for command in commandVec {
+        match command {
+            Command::CreateTable(table) => {
+                executor::createTable(table, false)?;
+            }
+            Command::INSERT(insertValues) => {
+                executor::insertValues(&insertValues)?;
+            }
+            _ => {}
+        }
+    }
+
     Ok(())
 }
 
@@ -33,7 +50,7 @@ fn init() -> Result<()> {
 
     // 用来记录表的文件
     let metaDirPath: &Path = CONFIG.metaDir.as_ref();
-    let tableRecordFile = OpenOptions::new().write(true).read(true).create(true).open(metaDirPath.join("table_record"))?;
+    let tableRecordFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join("table_record"))?;
 
     unsafe {
         global::TABLE_RECORD_FILE = Some(Arc::new(RwLock::new(tableRecordFile)));

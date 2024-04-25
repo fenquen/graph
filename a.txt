@@ -1,0 +1,54 @@
+link user{id:1} to car{color:'red'} by relation usage{number:2}
+link car{color:'red'} to wheel{code:6} by relation usage{number:7}
+
+user{id:1} - usage as usage1 -> car - usage as usage2 -> wheel
+
+
+user id是1的 对应的记录 1条
+car color是red的 对应的记录 2条
+wheel code是6的 对应的记录 1条
+
+
+
+
+{
+    "user": [
+        {
+            "_id": "0",
+            "id": 1,
+            "usage": {
+                "number": 2,
+                "car": [
+                    {
+                        "_id": "0",
+                        "brand": "toyota",
+                        "color": "red",
+                        "usage": {
+                            "number": 7,
+                            "wheel": [
+                                {
+                                    "_id": "0",
+                                    "code": 6
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "_id": "1",
+                        "brand": "honda",
+                        "color": "red",
+                        "usage": {
+                            "number": 7,
+                            "wheel": [
+                                {
+                                    "_id": "0",
+                                    "code": 6
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+    ]
+}

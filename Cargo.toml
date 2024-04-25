@@ -13,6 +13,8 @@ clap = { version = "4.3.1", features = ["derive"] }
 log4rs = "1.2.0"
 log = "0.4.17"
 dashmap = "5.5.3"
+strum = "0.26"
+strum_macros = "0.26"
 
 # https://course.rs/cargo/reference/profiles.html
 [profile.release]

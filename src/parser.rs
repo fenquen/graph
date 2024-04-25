@@ -2,6 +2,7 @@ use std::cmp::PartialEq;
 use std::fmt::{Debug, Display, Formatter, Pointer};
 use crate::{global, prefix_plus_plus, suffix_plus_plus, throw};
 use anyhow::Result;
+use strum_macros::{Display, EnumString};
 use crate::meta::{Column, ColumnType, Table, TableType, ColumnValue};
 
 pub fn parse(sql: &str) -> Result<Vec<Command>> {
@@ -13,6 +14,8 @@ pub fn parse(sql: &str) -> Result<Vec<Command>> {
         for element in elementVec {
             println!("{}", element);
         }
+
+        println!("{}", "\n");
     }
 
     parser.parse()
@@ -58,7 +61,7 @@ impl Parser {
 
         // 空格 逗号 单引号 括号
         loop {
-            let mut advanceCount: usize = 0;
+            let mut advanceCount: usize = 1;
 
             // "insert   INTO TEST VALUES ( ',',1 )"
             let currentChar = self.currentChar();
@@ -71,8 +74,6 @@ impl Parser {
                     } else {
                         self.collectPendingChars(&mut currentElementVec);
                     }
-
-                    advanceCount = 1;
                 }
                 global::单引号_CHAR => {
                     if self.whetherIn单引号() {
@@ -82,7 +83,6 @@ impl Parser {
                                 self.collectPendingChars(&mut currentElementVec);
 
                                 self.单引号as文本边界的数量 = self.单引号as文本边界的数量 + 1;
-                                advanceCount = 1;
                             }
                             Some(nextChar) => {
                                 // 连续的2个 单引号 对应1个
@@ -93,7 +93,6 @@ impl Parser {
                                     self.collectPendingChars(&mut currentElementVec);
 
                                     self.单引号as文本边界的数量 = self.单引号as文本边界的数量 + 1;
-                                    advanceCount = 1;
                                 }
                             }
                         }
@@ -102,7 +101,6 @@ impl Parser {
                         self.collectPendingChars(&mut currentElementVec);
 
                         self.单引号as文本边界的数量 = self.单引号as文本边界的数量 + 1;
-                        advanceCount = 1;
                     }
                 }
                 global::括号_CHAR | global::括号1_CHAR | global::逗号_CHAR => {
@@ -120,8 +118,6 @@ impl Parser {
                             self.括号1数量 = self.括号1数量 + 1;
                         }
                     }
-
-                    advanceCount = 1;
                 }
                 global::分号_char => { // 应对同时写了多个以;分隔的sql
                     // 单纯的是文本内容
@@ -135,12 +131,42 @@ impl Parser {
                             currentElementVec = Vec::new();
                         }
                     }
+                }
+                global::等号_char | global::小于_char | global::大于_char | global::感叹_char => { // 要解析数学符了
+                    // 单纯currentCharIndex的是文本内容
+                    if self.whetherIn单引号() {
+                        self.pendingChars.push(currentChar);
+                    } else {
+                        let operatorString: String =
+                            // 应对  "!=" ">=" "<=" 两个char的 目前的不容许有空格的
+                            if let Some(nextChar) = self.nextChar() {
+                                match nextChar {
+                                    global::等号_char | global::小于_char | global::大于_char | global::感叹_char => {
+                                        advanceCount = 2;
+                                        vec![currentChar, nextChar].iter().collect()
+                                    }
+                                    _ => { // 还是1元的operator
+                                        vec![currentChar].iter().collect()
+                                    }
+                                }
+                            } else {
+                                vec![currentChar].iter().collect()
+                            };
 
-                    advanceCount = 1;
+                        let operator = Operator::from(operatorString.as_str());
+
+                        if let Operator::Unknown = operator {
+                            self.throwSyntaxErrorDetail(&format!("unknown operator:{}", operatorString))?;
+                        }
+
+                        // 需要了断 pendingChars
+                        self.collectPendingChars(&mut currentElementVec);
+
+                        currentElementVec.push(Element::Operator(operator));
+                    }
                 }
                 _ => {
                     self.pendingChars.push(currentChar);
-                    advanceCount = 1;
                 }
             }
 
@@ -189,6 +215,7 @@ impl Parser {
         }
     }
 
+    /// peek而已不会变化currentCharIndex
     fn nextChar(&self) -> Option<char> {
         if self.currentCharIndex + 1 >= self.sql.len() {
             None
@@ -317,6 +344,9 @@ impl Parser {
                         "INSERT" => {
                             self.parseInsert()?
                         }
+                        "LINK" => {
+                            self.parseLink()?
+                        }
                         _ => {
                             self.throwSyntaxError()?
                         }
@@ -383,7 +413,7 @@ impl Parser {
             }
         }
 
-        self.checkName(&table.name)?;
+        self.checkDbObjectName(&table.name)?;
 
         // 应该是"("
         let element = self.getCurrentElementAdvance()?;
@@ -414,7 +444,7 @@ impl Parser {
 
                     match readColumnState {
                         ReadColumnState::ReadColumnName => {
-                            self.checkName(&text)?;
+                            self.checkDbObjectName(&text)?;
                             column.name = text;
                             readColumnState = ReadColumnState::ReadColumnType;
                         }
@@ -546,6 +576,7 @@ impl Parser {
                                     }
                                 }
                             }
+                            _ => {}
                         }
                     }
 
@@ -575,6 +606,11 @@ impl Parser {
         Ok(Command::INSERT(insertValues))
     }
 
+    // link user(id = 1) to car(color = 'red') by usage(number = 2)
+    fn parseLink(&mut self) -> Result<Command> {
+        Ok(Command::UNKNOWN)
+    }
+
     /// 返回None的话说明当前已经是overflow了 和之前遍历char时候不同的是 当不能advance时候index是在最后的index还要向后1个的
     fn getCurrentElementOptionAdvance(&mut self) -> Option<&Element> {
         let option = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex);
@@ -595,7 +631,7 @@ impl Parser {
     }
 
     /// 字母数字 且 数字不能打头
-    fn checkName(&self, name: &str) -> Result<()> {
+    fn checkDbObjectName(&self, name: &str) -> Result<()> {
         let chars: Vec<char> = name.chars().collect();
 
         // 打头得要字母
@@ -633,6 +669,8 @@ pub enum Element {
     StringContent(String),
     IntegerLiteral(i64),
     DecimalLiteral(f64),
+    A,
+    Operator(Operator),
 }
 
 impl Element {
@@ -679,8 +717,14 @@ impl Display for Element {
             Element::DecimalLiteral(s) => {
                 write!(f, "{}({})", "DecimalLiteral", s)
             }
+            Element::A => {
+                write!(f, "{}", "A")
+            }
+            Element::Operator(operator) => {
+                write!(f, "{}({})", "Operator", operator)
+            }
             _ => {
-                write!(f, "{}", "UNKNOWN")
+                write!(f, "{}", "Unknown")
             }
         }
     }
@@ -701,6 +745,33 @@ pub struct InsertValues {
     pub columnValues: Vec<ColumnValue>,
 }
 
+// https://note.qidong.name/2023/03/rust-enum-str/
+#[derive(Display)]
+pub enum Operator {
+    Equal,
+    GreaterThan,
+    GreaterEqual,
+    LessEqual,
+    LessThan,
+    NotEqual,
+    Unknown,
+}
+
+impl From<&str> for Operator {
+    fn from(str: &str) -> Self {
+        match str {
+            global::等号_str => { Operator::Equal }
+            global::小于_str => { Operator::LessThan }
+            global::大于_str => { Operator::GreaterThan }
+            global::小于等于 => { Operator::LessEqual }
+            global::大于等于 => { Operator::GreaterEqual }
+            global::不等_str => { Operator::NotEqual }
+            _ => { Operator::Unknown }
+        }
+    }
+}
+
+
 // ------------------------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -717,6 +788,12 @@ mod test {
         // println!("{}", "".parse::<f64>().unwrap());
         parser::parse("insert   INTO TEST VALUES ( 0  , ')')").unwrap();
     }
+
+    #[test]
+    pub fn testLink() {
+        parser::parse("link user(id > 1) to car(color='red') by usage(number = 2)").unwrap();
+    }
 }
+
 
 

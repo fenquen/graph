@@ -1,33 +1,47 @@
+use std::cell::UnsafeCell;
 use std::path::Path;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use crate::config::CONFIG;
 use crate::{global, throw};
-use crate::meta::{Column, Table};
+use crate::meta::{Column, Table, TableType};
 use crate::parser::InsertValues;
 use anyhow::Result;
 use serde_json::{json, Value};
 
 
-pub fn createTable(table: Table, replay: bool) -> Result<()> {
+pub fn createTable(mut table: Table, restore: bool) -> Result<()> {
     let dataDirPath: &Path = CONFIG.dataDir.as_ref();
 
+    // 表对应的data 文件
     let tableDataFilePath = dataDirPath.join(&table.name);
-    if tableDataFilePath.exists() {
-        throw!(&format!("table {} has already exist", table.name));
+    let tableDataFileExist = tableDataFilePath.exists();
+    if restore {
+        if tableDataFileExist == false {
+            throw!(&format!("data file of table:{} not exist", table.name));
+        }
+    } else {
+        if tableDataFileExist {
+            throw!(&format!("data file of table:{} has already exist", table.name));
+        }
+
+        File::create(tableDataFilePath)?;
     }
 
-    File::create(tableDataFilePath)?;
-
-    let jsonString = serde_json::to_string(&table)?;
-
-    if replay == false {
+    // table_record 文件
+    if restore == false {
+        let jsonString = serde_json::to_string(&table)?;
         unsafe {
             let mut tableRecordFile = global::TABLE_RECORD_FILE.as_ref().unwrap().write().unwrap();
             tableRecordFile.write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref())
         }?;
     }
 
+    let dataDirPath: &Path = CONFIG.dataDir.as_ref();
+    let tableDataFile = OpenOptions::new().write(true).read(true).create(true).open(dataDirPath.join(table.name.as_str()))?;
+    table.dataFile = Some(tableDataFile);
+
+    // map
     global::TABLE_NAME_TABLE.insert(table.name.to_string(), table);
 
     Ok(())
@@ -35,11 +49,16 @@ pub fn createTable(table: Table, replay: bool) -> Result<()> {
 
 pub fn insertValues(insertValues: &InsertValues) -> Result<()> {
     // 对应的表是不是exist
-    let option = global::TABLE_NAME_TABLE.get(&insertValues.tableName);
+    let option = global::TABLE_NAME_TABLE.get_mut(&insertValues.tableName);
     if option.is_none() {
         throw!(&format!("table {} not exist", insertValues.tableName));
     }
-    let table = &*option.unwrap();
+    let table = &mut *option.unwrap();
+
+    // 不能对relation使用insert into
+    if let TableType::RELATION = table.type0 {
+        throw!(&format!("{} is a RELATION , can not use insert into on RELATION", insertValues.tableName));
+    }
 
     let columns = {
         let mut columns = Vec::new();
@@ -71,7 +90,6 @@ pub fn insertValues(insertValues: &InsertValues) -> Result<()> {
     };
 
     let mut rowData = json!({});
-    rowData["1a"] = json!("a");
 
     for column_columnValue in columns.iter().zip(insertValues.columnValues.iter()) {
         let column = column_columnValue.0;
@@ -84,6 +102,9 @@ pub fn insertValues(insertValues: &InsertValues) -> Result<()> {
 
         rowData[column.name.as_str()] = json!(columnValue);
     }
+
+    let jsonString = serde_json::to_string(&rowData)?;
+    table.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref())?;
 
     Ok(())
 }
