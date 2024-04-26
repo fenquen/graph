@@ -52,3 +52,7 @@ wheel code是6的 对应的记录 1条
         }
     ]
 }
+
+column的定义要有 nullable
+ColumnValue 要有对应null的
+单单数括号的数量是不是偶数似乎是不够的
