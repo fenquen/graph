@@ -2,7 +2,7 @@ use std::cmp::PartialEq;
 use std::fmt::{Debug, Display, Formatter, Pointer};
 use crate::{global, prefix_plus_plus, suffix_plus_plus, throw};
 use anyhow::Result;
-use strum_macros::{Display, EnumString};
+use strum_macros::{Display as DisplayStrum, EnumString};
 use crate::meta::{Column, ColumnType, Table, TableType, ColumnValue};
 
 pub fn parse(sql: &str) -> Result<Vec<Command>> {
@@ -23,7 +23,8 @@ pub fn parse(sql: &str) -> Result<Vec<Command>> {
 
 pub enum Command {
     CreateTable(Table),
-    INSERT(InsertValues),
+    Insert(InsertValues),
+    Link(Link),
     SELECT,
     UNKNOWN,
 }
@@ -132,7 +133,8 @@ impl Parser {
                         }
                     }
                 }
-                global::等号_char | global::小于_char | global::大于_char | global::感叹_char => { // 要解析数学符了
+                // 要解析数学符了
+                global::等号_char | global::小于_char | global::大于_char | global::感叹_char => {
                     // 单纯currentCharIndex的是文本内容
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
@@ -153,16 +155,16 @@ impl Parser {
                                 vec![currentChar].iter().collect()
                             };
 
-                        let operator = Operator::from(operatorString.as_str());
+                        let mathCmpOp = MathCmpOp::from(operatorString.as_str());
 
-                        if let Operator::Unknown = operator {
+                        if let MathCmpOp::Unknown = mathCmpOp {
                             self.throwSyntaxErrorDetail(&format!("unknown operator:{}", operatorString))?;
                         }
 
                         // 需要了断 pendingChars
                         self.collectPendingChars(&mut currentElementVec);
 
-                        currentElementVec.push(Element::Operator(operator));
+                        currentElementVec.push(Element::Op(Op::MathCmpOp(mathCmpOp)));
                     }
                 }
                 _ => {
@@ -236,25 +238,35 @@ impl Parser {
 
         let (isPureNumberText, isDecimal) = Parser::isPureNumberText(&text);
 
-        // text是纯数字
-        let element = if isPureNumberText {
-            // 当前是不是在单引号的包围 是文本
-            if self.whetherIn单引号() {
-                Element::StringContent(text)
-            } else {
-                if isDecimal {
-                    Element::DecimalLiteral(text.parse::<f64>().unwrap())
+        let element =
+            // text是纯数字
+            if isPureNumberText {
+                // 当前是不是在单引号的包围 是文本
+                if self.whetherIn单引号() {
+                    Element::StringContent(text)
                 } else {
-                    Element::IntegerLiteral(text.parse::<i64>().unwrap())
+                    if isDecimal {
+                        Element::DecimalLiteral(text.parse::<f64>().unwrap())
+                    } else {
+                        Element::IntegerLiteral(text.parse::<i64>().unwrap())
+                    }
                 }
-            }
-        } else {
-            if self.whetherIn单引号() {
-                Element::StringContent(text)
             } else {
-                Element::TextLiteral(text)
-            }
-        };
+                if self.whetherIn单引号() {
+                    Element::StringContent(text)
+                } else {
+                    // parse 要求不能是大小写混合的
+                    match text.to_uppercase().as_str() {
+                        "FALSE" => { Element::Boolean(false) }
+                        "TRUE" => { Element::Boolean(true) }
+                        "OR" => { Element::Op(Op::LogicalOp(LogicalOp::Or)) }
+                        "AND" => { Element::Op(Op::LogicalOp(LogicalOp::And)) }
+                        "IS" => { Element::Op(Op::SqlOp(SqlOp::Is)) }
+                        "IN" => { Element::Op(Op::SqlOp(SqlOp::In)) }
+                        _ => { Element::TextLiteral(text) }
+                    }
+                }
+            };
 
         dest.push(element);
         self.pendingChars.clear();
@@ -603,12 +615,82 @@ impl Parser {
             }
         }
 
-        Ok(Command::INSERT(insertValues))
+        Ok(Command::Insert(insertValues))
     }
 
-    // link user(id = 1) to car(color = 'red') by usage(number = 2)
+    // link user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13)
     fn parseLink(&mut self) -> Result<Command> {
-        Ok(Command::UNKNOWN)
+        let mut link = Link::default();
+
+        let currentElement = self.getCurrentElementAdvance()?;
+        // link 后边应该是src的table name
+        if let Some(srcTableName) = currentElement.expectTextLiteral() {
+            link.srcTableName = srcTableName;
+        } else {
+            self.throwSyntaxErrorDetail("link should followed by table name")?;
+        }
+
+
+        let nextElement = self.peekNextElement()?;
+        match nextElement.expectTextLiteral() {
+            Some(text) => {
+                match text.to_uppercase().as_str() {
+                    // 说明后边是表的筛选条件的
+                    global::括号_STR => {
+                        self.parseCondition()?;
+                    }
+                    "TO" => {
+                        let currentElement = self.getCurrentElementAdvance()?;
+
+                        // 后边应该是dest的table name
+                        if let Some(destTableName) = currentElement.expectTextLiteral() {
+                            link.destTableName = destTableName;
+                        } else {
+                            self.throwSyntaxErrorDetail("to should followed by dest table name when use link sql")?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None => {
+                self.throwSyntaxError()?;
+            }
+        }
+
+        Ok(Command::Link(link))
+    }
+
+    // (id > 1 and (name in ('a') or code = null))
+    // (false and (name in ('a') or code = null))
+    /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个
+    fn parseCondition(&mut self) -> Result<Condition> {
+        let mut condition = Condition::default();
+
+        // assert!(self.getCurrentElementAdvance()?.expectTextLiteralContent(global::括号_STR));
+
+        // milestone 有 括号 Op
+        loop {
+            match self.getCurrentElementOptionAdvance() {
+                Some(element) => {
+                    match element {
+                        Element::Op(op) => {
+                            match op {
+                                Op::LogicalOp(a) => {}
+                                Op::MathCmpOp(m) => {}
+                                Op::SqlOp(s) => {}
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None => {
+                    break;
+                }
+            }
+        }
+
+        Ok(condition)
     }
 
     /// 返回None的话说明当前已经是overflow了 和之前遍历char时候不同的是 当不能advance时候index是在最后的index还要向后1个的
@@ -626,7 +708,28 @@ impl Parser {
             suffix_plus_plus!(self.currentElementIndex);
             Ok(option.unwrap())
         } else {
-            self.throwSyntaxError()?
+            self.throwSyntaxErrorDetail("unexpected end of sql")?
+        }
+    }
+
+    fn peekNextElement(&self) -> Result<&Element> {
+        let option = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex + 1);
+        if option.is_some() {
+            Ok(option.unwrap())
+        } else {
+            self.throwSyntaxErrorDetail("unexpected end of sql")?
+        }
+    }
+
+    /// 和parse toke 遍历char不同的是 要是越界了 index会是边界的后边1个 以符合当前的体系
+    fn skipElement(&mut self, step: usize) -> bool {
+        let currentElementVecLen = self.elementVecVec.get(self.currentElementVecIndex).unwrap().len();
+
+        if self.currentElementIndex + step >= self.elementVecVec.get(self.currentElementVecIndex).unwrap().len() {
+            self.currentElementIndex = currentElementVecLen;
+            true
+        } else {
+            false
         }
     }
 
@@ -662,6 +765,7 @@ impl Parser {
     }
 }
 
+#[derive(Clone)]
 pub enum Element {
     /// 如果只有TextLiteral的话 还是不能区分 (')') 的两个右括号的
     TextLiteral(String),
@@ -669,8 +773,8 @@ pub enum Element {
     StringContent(String),
     IntegerLiteral(i64),
     DecimalLiteral(f64),
-    A,
-    Operator(Operator),
+    Op(Op),
+    Boolean(bool),
 }
 
 impl Element {
@@ -717,11 +821,11 @@ impl Display for Element {
             Element::DecimalLiteral(s) => {
                 write!(f, "{}({})", "DecimalLiteral", s)
             }
-            Element::A => {
-                write!(f, "{}", "A")
+            Element::Boolean(bool) => {
+                write!(f, "{}({})", "Boolean", bool)
             }
-            Element::Operator(operator) => {
-                write!(f, "{}({})", "Operator", operator)
+            Element::Op(op) => {
+                write!(f, "{}({})", "Op", op)
             }
             _ => {
                 write!(f, "{}", "Unknown")
@@ -745,9 +849,42 @@ pub struct InsertValues {
     pub columnValues: Vec<ColumnValue>,
 }
 
+#[derive(Clone)]
+pub enum Op {
+    MathCmpOp(MathCmpOp),
+    LogicalOp(LogicalOp),
+    SqlOp(SqlOp),
+    Unknown,
+}
+
+impl Display for Op {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Op::MathCmpOp(s) => {
+                write!(f, "MathCmpOp({})", s)
+            }
+            Op::LogicalOp(s) => {
+                write!(f, "LogicalOp({})", s)
+            }
+            Op::SqlOp(s) => {
+                write!(f, "SqlOp({})", s)
+            }
+            _ => {
+                write!(f, "Unknown")
+            }
+        }
+    }
+}
+
+impl Default for Op {
+    fn default() -> Self {
+        Op::Unknown
+    }
+}
+
 // https://note.qidong.name/2023/03/rust-enum-str/
-#[derive(Display)]
-pub enum Operator {
+#[derive(DisplayStrum, Clone)]
+pub enum MathCmpOp {
     Equal,
     GreaterThan,
     GreaterEqual,
@@ -757,20 +894,55 @@ pub enum Operator {
     Unknown,
 }
 
-impl From<&str> for Operator {
+impl From<&str> for MathCmpOp {
     fn from(str: &str) -> Self {
         match str {
-            global::等号_str => { Operator::Equal }
-            global::小于_str => { Operator::LessThan }
-            global::大于_str => { Operator::GreaterThan }
-            global::小于等于 => { Operator::LessEqual }
-            global::大于等于 => { Operator::GreaterEqual }
-            global::不等_str => { Operator::NotEqual }
-            _ => { Operator::Unknown }
+            global::等号_str => { MathCmpOp::Equal }
+            global::小于_str => { MathCmpOp::LessThan }
+            global::大于_str => { MathCmpOp::GreaterThan }
+            global::小于等于 => { MathCmpOp::LessEqual }
+            global::大于等于 => { MathCmpOp::GreaterEqual }
+            global::不等_str => { MathCmpOp::NotEqual }
+            _ => { MathCmpOp::Unknown }
         }
     }
 }
 
+#[derive(DisplayStrum, Clone)]
+pub enum LogicalOp {
+    And,
+    Or,
+}
+
+#[derive(DisplayStrum, Clone)]
+pub enum SqlOp {
+    In,
+    Is,
+}
+
+/// link user(id = 1) to car(color = 'red') by usage(number = 2)
+#[derive(Default)]
+pub struct Link {
+    pub srcTableName: String,
+    pub srcTableCondition: Option<Condition>,
+
+    pub destTableName: String,
+    pub destTableCondition: Option<Condition>,
+
+    pub relationName: String,
+    pub columnNames: Vec<String>,
+    pub columnValues: Vec<ColumnValue>,
+}
+
+#[derive(Default)]
+pub struct Condition {
+    // Element 虽然能clone 不过是不是用 arc
+    pub left: Vec<Element>,
+    pub op: Op,
+    /// 为什么会是vec 因为需要应对 name in ('a','r')
+    pub right: Vec<Element>,
+    pub next: Option<(Op, Box<Condition>)>,
+}
 
 // ------------------------------------------------------------------------------------------
 
@@ -791,7 +963,8 @@ mod test {
 
     #[test]
     pub fn testLink() {
-        parser::parse("link user(id > 1) to car(color='red') by usage(number = 2)").unwrap();
+        "false".parse::<bool>().unwrap();
+        parser::parse("link user(id > 1 and name in ('a') and code = null) to car(color='red') by usage(number = 13)").unwrap();
     }
 }
 

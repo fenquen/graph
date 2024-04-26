@@ -89,6 +89,11 @@ pub fn insertValues(insertValues: &InsertValues) -> Result<()> {
         columns
     };
 
+    // 确保column数量和value数量相同
+    if columns.len()!=insertValues.columnValues.len() {
+        throw!("column count does not match value count");
+    }
+
     let mut rowData = json!({});
 
     for column_columnValue in columns.iter().zip(insertValues.columnValues.iter()) {

@@ -33,7 +33,7 @@ fn main() -> Result<()> {
             Command::CreateTable(table) => {
                 executor::createTable(table, false)?;
             }
-            Command::INSERT(insertValues) => {
+            Command::Insert(insertValues) => {
                 executor::insertValues(&insertValues)?;
             }
             _ => {}
