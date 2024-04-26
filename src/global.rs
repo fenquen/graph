@@ -27,6 +27,8 @@ pub const 括号_CHAR: char = '(';
 pub const 括号_STR: &str = "(";
 
 pub const 括号1_CHAR: char = ')';
+pub const 括号1_STR: &str = ")";
+
 pub const 分号_char: char = ';';
 pub const 冒号_char: char = ':';
 
