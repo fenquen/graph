@@ -9,7 +9,7 @@ appenders:
       pattern: "{d(%Y-%m-%d %H:%M:%S%.3f)} {level} {P} [{thread}] {target}:{L} - {m}{n}"
   file:
     kind: rolling_file
-    path: "prt2stp_remote.log"
+    path: "graph.log"
     append: true
     encoder:
       pattern: "{d(%Y-%m-%d %H:%M:%S%.3f)} {level} {P} [{thread}] {target}:{L} - {m}{n}"
@@ -20,7 +20,7 @@ appenders:
         limit: 50 mb
       roller:
         kind: fixed_window
-        pattern: '/data/rlink/log/job.log.{}'
+        pattern: 'graph.log.{}'
         base: 1
         count: 5
 # 对全局 log 进行配置
