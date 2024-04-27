@@ -971,7 +971,17 @@ impl Parser {
                     parseCondState = ParseCondState::ParseRightComplete;
                 }
                 ParseCondState::ParseRightComplete => {
+                    match currentElement {
+                        Element::TextLiteral(text) => {
 
+                        }
+                        Element::Op(Op::LogicalOp(logicalOp)) => {
+
+                        }
+                        _ => {
+
+                        }
+                    }
                 }
             }
         }
