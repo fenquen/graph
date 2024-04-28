@@ -3,7 +3,7 @@ use std::fmt::{Debug, Display, Formatter, Pointer};
 use crate::{global, prefix_plus_plus, suffix_minus_minus, suffix_plus_plus, throw};
 use anyhow::Result;
 use lazy_static::lazy_static;
-use strum_macros::{Display as DisplayStrum, EnumString};
+use strum_macros::{Display as DisplayStrum, Display, EnumString};
 use crate::meta::{Column, ColumnType, Table, TableType, ColumnValue};
 
 pub fn parse(sql: &str) -> Result<Vec<Command>> {
@@ -264,6 +264,10 @@ impl Parser {
                         "AND" => { Element::Op(Op::LogicalOp(LogicalOp::And)) }
                         "IS" => { Element::Op(Op::SqlOp(SqlOp::Is)) }
                         "IN" => { Element::Op(Op::SqlOp(SqlOp::In)) }
+                        "+" => { Element::Op(Op::MathCalcOp(MathCalcOp::Plus)) }
+                        "/" => { Element::Op(Op::MathCalcOp(MathCalcOp::Divide)) }
+                        "*" => { Element::Op(Op::MathCalcOp(MathCalcOp::Multiply)) }
+                        "-" => { Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) }
                         _ => { Element::TextLiteral(text) }
                     }
                 }
@@ -524,7 +528,7 @@ impl Parser {
 
         loop { // loop 对应下边说的猥琐套路
             let currentElement = self.getCurrentElementAdvance()?;
-            let currentText = currentElement.expectTextLiteral().map_or_else(|| { self.throwSyntaxError() }, |s| { Ok(s) })?.to_uppercase();
+            let currentText = currentElement.expectTextLiteralOpt().map_or_else(|| { self.throwSyntaxError() }, |s| { Ok(s) })?.to_uppercase();
             match currentText.as_str() {
                 "(" => { // 各column名
                     insertValues.useExplicitColumnNames = true;
@@ -533,7 +537,7 @@ impl Parser {
                         let currentElement = self.getCurrentElementAdvance()?;
 
                         // columnName都要是TextLiteral 而不是StringContent
-                        match currentElement.expectTextLiteral() {
+                        match currentElement.expectTextLiteralOpt() {
                             Some(text) => {
                                 match text.as_str() {
                                     global::逗号_STR => {
@@ -623,39 +627,30 @@ impl Parser {
     fn parseLink(&mut self) -> Result<Command> {
         let mut link = Link::default();
 
-        let currentElement = self.getCurrentElementAdvance()?;
-        // link 后边应该是src的table name
-        if let Some(srcTableName) = currentElement.expectTextLiteral() {
+        // link 后边是src table name
+        if let Some(srcTableName) = self.getCurrentElementAdvance()?.expectTextLiteralOpt() {
             link.srcTableName = srcTableName;
         } else {
             self.throwSyntaxErrorDetail("link should followed by table name")?;
         }
 
-        let currentElement = self.getCurrentElementAdvance()?;
-        match currentElement.expectTextLiteral() {
-            Some(text) => {
-                match text.to_uppercase().as_str() {
-                    // 说明后边是表的筛选条件的
-                    global::括号_STR => {
-                        // 返回1个
-                        suffix_minus_minus!(self.currentElementIndex);
-                        let condition = self.parseCondition(true)?;
-                        println!("aaaaaa");
-                    }
-                    "TO" => {
-                        let currentElement = self.getCurrentElementAdvance()?;
-
-                        // 后边应该是dest的table name
-                        if let Some(destTableName) = currentElement.expectTextLiteral() {
-                            link.destTableName = destTableName;
-                        } else {
-                            self.throwSyntaxErrorDetail("to should followed by dest table name when use link sql")?;
-                        }
-                    }
-                    _ => {}
+        match self.getCurrentElementAdvance()?.expectTextLiteral()?.to_uppercase().as_str() {
+            // 读取 src table的筛选condition
+            global::括号_STR => {
+                // 返回1个
+                assert_eq!(self.skipElement(-1), false);
+                let expr = self.parseExpr()?;
+                println!("{:?}", expr);
+            }
+            // 读取是dest table name
+            "TO" => {
+                if let Some(destTableName) = self.getCurrentElementAdvance()?.expectTextLiteralOpt() {
+                    link.destTableName = destTableName;
+                } else {
+                    self.throwSyntaxErrorDetail("to should followed by dest table name when use link sql")?;
                 }
             }
-            None => {
+            _ => {
                 self.throwSyntaxError()?;
             }
         }
@@ -663,123 +658,11 @@ impl Parser {
         Ok(Command::Link(link))
     }
 
-    // ((id > 1 and level=6 and code in ('a')) and true and (name in ('a') or code = null))
     /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个
-    fn parseCondition(&mut self, needDrain: bool) -> Result<Condition> {
-        let mut condition = Condition::default();
-
-        // 把该condition打头的"("消耗掉
-        // assert!(self.getCurrentElementAdvance()?.expectTextLiteralContent(global::括号_STR));
-
-        if self.getCurrentElement()?.expectTextLiteralContent(global::括号_STR) {
-            if self.skipElement(1) {
-                self.throwSyntaxErrorDetail("unexpected end of sql")?;
-            }
-        }
-
-        let mut pendingElementVec: Vec<&Element> = Vec::new();
-
-        enum ParseCondState {
-            ParsingLeft,
-            ParsingNoLogicalOp,
-            ParsingRight,
-            ParsingLogicalOp,
-            ParsingSibling,
-            ParseComplete,
-        }
-
-        let mut parseCondState = ParseCondState::ParsingLeft;
-
-        // milestone 有 括号 Op
-        // 当读取到")"时候 要是后边
-        loop {
-            let currentElement = match self.getCurrentElementOptionAdvance() {
-                None => { break; }
-                Some(currentElement) => { currentElement }
-            };
-
-            match parseCondState {
-                ParseCondState::ParsingLeft => {
-                    // 1上来便是 false true,本身便是个condition了
-                    match currentElement {
-                        Element::Boolean(bool) => {
-                            // 替换
-                            condition = Condition::falseTrueCondition(bool.clone());
-                        }
-                        _ => {
-                            condition.left = currentElement.clone();
-                        }
-                    }
-
-                    parseCondState = ParseCondState::ParsingNoLogicalOp;
-                }
-                ParseCondState::ParsingNoLogicalOp => {
-                    if let Element::Op(op) = currentElement {
-                        match op {
-                            Op::MathCmpOp(mathCmpOp) => {
-                                condition.op = Some(Op::MathCmpOp(mathCmpOp.clone()));
-                            }
-                            Op::SqlOp(sqlOp) => {
-                                condition.op = Some(Op::SqlOp(sqlOp.clone()))
-                            }
-                            _ => {
-                                self.throwSyntaxError()?;
-                            }
-                        }
-
-                        parseCondState = ParseCondState::ParsingRight;
-                    } else {
-                        self.throwSyntaxError()?;
-                    }
-                }
-                ParseCondState::ParsingRight => {
-                    condition.right.push(currentElement.clone());
-
-                    if self.peekNextElementOpt().is_some() {
-                        if needDrain == false {
-                            parseCondState = ParseCondState::ParseComplete;
-                            break;
-                        }
-
-                        parseCondState = ParseCondState::ParsingLogicalOp;
-                        // 其实不写break也是相同的 因为有上边的getCurrentElementOptionAdvance()保护
-                        // break;
-                    }
-                }
-                //  ParseCondState::AfterParsingRight => {}
-                ParseCondState::ParsingLogicalOp => { // 说明1个非复合(例如简单的a=0)的condition 已然解析了
-                    if let Element::Op(Op::LogicalOp(logicalOp)) = currentElement {
-                        parseCondState = ParseCondState::ParsingSibling;
-                    } else {
-                        self.throwSyntaxErrorDetail("expect a logical op")?;
-                    }
-                }
-                ParseCondState::ParsingSibling => {
-                    // 是不是用()包裹的也是需要区分的
-                    // 如果是的话那么是要嵌套的,如果不是的话是平铺的
-                    let needDrain = currentElement.expectTextLiteralContent(global::括号_STR);
-
-                    // 不管如何 返回前1个的index保持接下来的要parse的condition完全
-                    self.currentElementIndex = self.currentElementIndex - 1;
-
-                    let siblingCondition = self.parseCondition(needDrain)?;
-
-                    condition.siblings.push((LogicalOp::And, Box::new(siblingCondition)));
-
-                    parseCondState = ParseCondState::ParseComplete;
-                    break;
-                }
-                _ => {}
-            }
-        }
-
-        Ok(condition)
-    }
-
-    fn parseCondition0(&mut self) -> Result<ConditionEnum> {
-        // 把该condition打头的"("消耗掉
-        // assert!(self.getCurrentElementAdvance()?.expectTextLiteralContent(global::括号_STR));
-
+    //  ((id > 1 and level=6 and code in ('a')) and true and (name in ('a') or code = null))
+    // 当前不支持 a in ('a')
+    // 当前不支持 a = (1+0)
+    fn parseExpr(&mut self) -> Result<Expr> {
         if self.getCurrentElement()?.expectTextLiteralContent(global::括号_STR) {
             if self.skipElement(1) {
                 self.throwSyntaxErrorDetail("unexpected end of sql")?;
@@ -788,13 +671,12 @@ impl Parser {
 
         enum ParseCondState {
             ParsingLeft,
-            ParsingNoLogicalOp,
-            ParsingLogicalOp,
+            ParsingOp,
             ParsingRight,
             ParseRightComplete,
         }
 
-        let mut topLevelConditionEnum = ConditionEnum::default();
+        let mut expr0 = Expr::default();
 
         let mut parseCondState = ParseCondState::ParsingLeft;
 
@@ -804,168 +686,99 @@ impl Parser {
                     break;
                 }
                 Some(currentElement) => {
-                    currentElement
+                    currentElement.clone()
                 }
             };
 
             match parseCondState {
                 ParseCondState::ParsingLeft => {
                     match currentElement {
-                        Element::TextLiteral(text) => {
+                        Element::TextLiteral(ref text) => {
                             if text == global::括号_STR {
-                                suffix_minus_minus!(self.currentElementIndex);
-
-                                // 能够得到个全的condition,然后落地到上级的left
-                                topLevelConditionEnum = ConditionEnum::Composite {
-                                    left: Box::new(self.parseCondition0()?),
-                                    logicalOp: None,
-                                    right: None,
-                                };
-                                parseCondState = ParseCondState::ParsingLogicalOp;
-
+                                assert_eq!(self.skipElement(-1), false);
+                                expr0 = self.parseExpr()?;
+                                parseCondState = ParseCondState::ParsingOp;
                                 continue;
                             }
                         }
-                        // true and a=1
-                        // true = a
-                        Element::Boolean(bool) => {
-                            // 因为上边get但前的同时也会advance,故而getCurrent已然是next了
-                            let nextElement = self.getCurrentElement()?;
-
-                            // 可能是1个condition,也可能是base的1边
-                            // 需要看看后边跟的是什么
-                            match nextElement {
-                                // true and a=1
-                                Element::Op(Op::LogicalOp(_)) => {
-                                    topLevelConditionEnum = ConditionEnum::Composite {
-                                        left: Box::new(ConditionEnum::Bool(bool.clone())),
-                                        logicalOp: None,
-                                        right: None,
-                                    };
-                                    parseCondState = ParseCondState::ParsingLogicalOp;
-                                }
-                                // true = a
-                                Element::Op(Op::MathCmpOp(_)) | Element::Op(Op::SqlOp(_)) => {
-                                    topLevelConditionEnum = ConditionEnum::Base {
-                                        left: Element::Boolean(bool.clone()),
-                                        noLogicalOp: Op::Unknown,
-                                        right: Vec::default(),
-                                    };
-                                    parseCondState = ParseCondState::ParsingNoLogicalOp;
-                                }
-                                _ => {
-                                    self.throwSyntaxError()?;
-                                }
-                            }
-
-                            continue;
-                        }
                         _ => {}
                     }
 
-                    topLevelConditionEnum = ConditionEnum::Base {
-                        left: currentElement.clone(),
-                        noLogicalOp: Op::Unknown,
-                        right: Vec::default(),
-                    };
-                    parseCondState = ParseCondState::ParsingNoLogicalOp;
+                    expr0 = Expr::Single(currentElement);
+
+                    parseCondState = ParseCondState::ParsingOp;
                 }
-                ParseCondState::ParsingNoLogicalOp => {
-                    let mut ok = false;
-
-                    match currentElement {
-                        Element::Op(Op::MathCmpOp(mathCmpOp)) => {
-                            if let ConditionEnum::Base { left, right, .. } = topLevelConditionEnum {
-                                topLevelConditionEnum = ConditionEnum::Base {
-                                    left,
-                                    noLogicalOp: Op::MathCmpOp(mathCmpOp.clone()),
-                                    right,
-                                };
-                                ok = true;
+                ParseCondState::ParsingOp => {
+                    if let Element::Op(op) = currentElement {
+                        if let Expr::Single(_) = expr0 {
+                            expr0 = Expr::BiDirection {
+                                left: Box::new(expr0),
+                                op,
+                                right: vec![],
                             }
                         }
-                        Element::Op(Op::SqlOp(sqlOp)) => {
-                            if let ConditionEnum::Base { left, right, .. } = topLevelConditionEnum {
-                                topLevelConditionEnum = ConditionEnum::Base {
-                                    left,
-                                    noLogicalOp: Op::SqlOp(sqlOp.clone()),
-                                    right,
-                                };
-                                ok = true;
-                            }
+                    } else {
+                        // 应对 ...... and true )
+                        if let Expr::Single(Element::Boolean(_)) = expr0 {
+                            parseCondState = ParseCondState::ParseRightComplete;
+                            continue;
+                        } else {
+                            self.throwSyntaxError()?;
                         }
-                        _ => {}
-                    }
-
-                    if ok == false {
-                        self.throwSyntaxError()?;
                     }
 
                     parseCondState = ParseCondState::ParsingRight;
                 }
-                ParseCondState::ParsingLogicalOp => {
-                    match currentElement {
-                        Element::Op(Op::LogicalOp(logicalOp)) => {
-                            if let ConditionEnum::Composite { left, right, .. } = topLevelConditionEnum {
-                                topLevelConditionEnum = ConditionEnum::Composite {
-                                    left,
-                                    logicalOp: Some(logicalOp.clone()),
-                                    right,
-                                };
-                                parseCondState = ParseCondState::ParsingRight;
-                            }
-                        }
-                        _ => {
-                            self.throwSyntaxError()?;
-                        }
-                    }
-                }
                 ParseCondState::ParsingRight => {
                     match currentElement {
-                        Element::TextLiteral(text) => {
+                        Element::TextLiteral(ref text) => {
                             // 后续要支持 a in ('a') 和 a = (0+1)
                             if text == global::括号_STR {
-                                suffix_minus_minus!(self.currentElementIndex);
-                                let subCondition = self.parseCondition0()?;
+                                // 要应对 a in ('a'),那么碰到"("的话需要去看看前边的是不是 in
 
-                                // 要知道当前的topLevelCondition是哪类的
-                                if let ConditionEnum::Composite { left, logicalOp, .. } = topLevelConditionEnum {
-                                    topLevelConditionEnum = ConditionEnum::Composite {
-                                        left,
-                                        logicalOp,
-                                        right: Some(Box::new(subCondition)),
-                                    };
-                                } else {
+                                // 是不对的还是当前的和currentElement相同
+                                assert_eq!(self.skipElement(-1), false);
+                                let previousElement = self.peekPrevElement()?.clone();
+                                assert_eq!(self.skipElement(1), false);
+
+                                // 说明是 "... in ( ..." 这样的
+                                if let Element::Op(Op::SqlOp(SqlOp::In)) = previousElement {
+                                    //
+                                } else if let Element::Op(op) = previousElement { // 前边是 op
+                                    assert_eq!(self.skipElement(-1), false);
+
+                                    // 递归
+                                    let subExpr = self.parseExpr()?;
+
+                                    // 得要BiDirection
+                                    if let Expr::BiDirection { left, op, .. } = expr0 {
+                                        expr0 = Expr::BiDirection {
+                                            left,
+                                            op,
+                                            right: vec![Box::new(subExpr)],
+                                        }
+                                    } else {
+                                        self.throwSyntaxError()?;
+                                    }
+
+                                    parseCondState = ParseCondState::ParseRightComplete;
+                                    continue;
+                                } else {  // a = (0+1) 当前还不支持的 (0+1)需要落地为表达式
                                     self.throwSyntaxError()?;
                                 }
                             }
                         }
-                        Element::Boolean(bool) => {
-                            if let ConditionEnum::Base { left, noLogicalOp, .. } = topLevelConditionEnum {
-                                topLevelConditionEnum = ConditionEnum::Base {
-                                    left,
-                                    noLogicalOp,
-                                    right: vec![Element::Boolean(bool.clone())],
-                                }
-                            } else if let ConditionEnum::Composite { left, logicalOp, .. } = topLevelConditionEnum {
-                                topLevelConditionEnum = ConditionEnum::Composite {
-                                    left,
-                                    logicalOp,
-                                    right: Some(Box::new(ConditionEnum::Bool(bool.clone()))),
-                                }
-                            }
+                        _ => {}
+                    }
+
+                    if let Expr::BiDirection { left, op, .. } = expr0 {
+                        expr0 = Expr::BiDirection {
+                            left,
+                            op,
+                            right: vec![Box::new(Expr::Single(currentElement))],
                         }
-                        _ => {
-                            if let ConditionEnum::Base { left, noLogicalOp, .. } = topLevelConditionEnum {
-                                topLevelConditionEnum = ConditionEnum::Base {
-                                    left,
-                                    noLogicalOp,
-                                    right: vec![currentElement.clone()],
-                                }
-                            } else {
-                                self.throwSyntaxError()?;
-                            }
-                        }
+                    } else {
+                        self.throwSyntaxError()?;
                     }
 
                     parseCondState = ParseCondState::ParseRightComplete;
@@ -973,20 +786,32 @@ impl Parser {
                 ParseCondState::ParseRightComplete => {
                     match currentElement {
                         Element::TextLiteral(text) => {
-
+                            // (a = 1) 的 ")",说明要收了，递归结束要返回上轮
+                            if text == global::括号1_STR {
+                                break;
+                            }
                         }
-                        Element::Op(Op::LogicalOp(logicalOp)) => {
-
+                        // a = 1 and b= 0  的 "and",当前的condition变为又1个condition小弟
+                        Element::Op(op) => {
+                            expr0 = Expr::BiDirection {
+                                left: Box::new(expr0),
+                                op,
+                                // 需要递归下钻
+                                right: vec![Box::new(self.parseExpr()?)],
+                            };
+                            break;
+                            // parseCondState = ParseCondState::ParsingRight;
+                            // continue;
                         }
-                        _ => {
-
-                        }
+                        _ => {}
                     }
+
+                    self.throwSyntaxError()?;
                 }
             }
         }
 
-        self.throwSyntaxError()?
+        Ok(expr0)
     }
 
     /// 返回None的话说明当前已经是overflow了 和之前遍历char时候不同的是 当不能advance时候index是在最后的index还要向后1个的
@@ -1022,12 +847,11 @@ impl Parser {
         self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex - 1)
     }
 
-    fn peekNextElement(&self) -> Result<&Element> {
-        let option = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex + 1);
-        if option.is_some() {
-            Ok(option.unwrap())
+    fn peekPrevElement(&self) -> Result<&Element> {
+        if let Some(previousElement) = self.peekPrevElementOpt() {
+            Ok(previousElement)
         } else {
-            self.throwSyntaxErrorDetail("unexpected end of sql")?
+            self.throwSyntaxError()?
         }
     }
 
@@ -1035,14 +859,23 @@ impl Parser {
         self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex + 1)
     }
 
+    fn peekNextElement(&self) -> Result<&Element> {
+        if let Some(nextElement) = self.peekNextElementOpt() {
+            Ok(nextElement)
+        } else {
+            self.throwSyntaxErrorDetail("unexpected end of sql")?
+        }
+    }
+
     /// 和parse toke 遍历char不同的是 要是越界了 index会是边界的后边1个 以符合当前的体系
-    fn skipElement(&mut self, step: usize) -> bool {
+    fn skipElement(&mut self, delta: i32) -> bool {
         let currentElementVecLen = self.elementVecVec.get(self.currentElementVecIndex).unwrap().len();
 
-        if self.currentElementIndex + step >= self.elementVecVec.get(self.currentElementVecIndex).unwrap().len() {
+        if (self.currentElementIndex as i32 + delta) as usize >= self.elementVecVec.get(self.currentElementVecIndex).unwrap().len() {
             self.currentElementIndex = currentElementVecLen;
             true
         } else {
+            self.currentElementIndex = (self.currentElementIndex as i32 + delta) as usize;
             false
         }
     }
@@ -1093,11 +926,19 @@ pub enum Element {
 }
 
 impl Element {
-    fn expectTextLiteral(&self) -> Option<String> {
+    fn expectTextLiteralOpt(&self) -> Option<String> {
         if let Element::TextLiteral(text) = self {
             Some(text.to_string())
         } else {
             None
+        }
+    }
+
+    fn expectTextLiteral(&self) -> Result<String> {
+        if let Element::TextLiteral(text) = self {
+            Ok(text.to_string())
+        } else {
+            throw!(&format!("expect Element::TextLiteral but got {:?}", self))
         }
     }
 
@@ -1170,12 +1011,13 @@ pub struct InsertValues {
     pub columnValues: Vec<ColumnValue>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Op {
     MathCmpOp(MathCmpOp),
     SqlOp(SqlOp),
     LogicalOp(LogicalOp),
     Unknown,
+    MathCalcOp(MathCalcOp),
 }
 
 impl Display for Op {
@@ -1190,8 +1032,11 @@ impl Display for Op {
             Op::SqlOp(s) => {
                 write!(f, "SqlOp({})", s)
             }
-            _ => {
+            Op::Unknown => {
                 write!(f, "Unknown")
+            }
+            Op::MathCalcOp(mathCalcOp) => {
+                write!(f, "MathCalcOp({})", mathCalcOp)
             }
         }
     }
@@ -1204,7 +1049,7 @@ impl Default for Op {
 }
 
 // https://note.qidong.name/2023/03/rust-enum-str/
-#[derive(DisplayStrum, Clone)]
+#[derive(DisplayStrum, Clone, Debug)]
 pub enum MathCmpOp {
     Equal,
     GreaterThan,
@@ -1229,89 +1074,65 @@ impl From<&str> for MathCmpOp {
     }
 }
 
-#[derive(DisplayStrum, Clone)]
+#[derive(DisplayStrum, Clone, Debug)]
 pub enum LogicalOp {
     And,
     Or,
 }
 
-#[derive(DisplayStrum, Clone)]
+#[derive(DisplayStrum, Clone, Debug)]
 pub enum SqlOp {
     In,
     Is,
+}
+
+#[derive(DisplayStrum, Clone, Debug)]
+pub enum MathCalcOp {
+    Plus,
+    Divide,
+    Multiply,
+    Minus,
 }
 
 /// link user(id = 1) to car(color = 'red') by usage(number = 2)
 #[derive(Default)]
 pub struct Link {
     pub srcTableName: String,
-    pub srcTableCondition: Option<Condition>,
+    pub srcTableCondition: Option<Expr>,
 
     pub destTableName: String,
-    pub destTableCondition: Option<Condition>,
+    pub destTableCondition: Option<Expr>,
 
     pub relationName: String,
     pub columnNames: Vec<String>,
     pub columnValues: Vec<ColumnValue>,
 }
 
-#[derive(Default)]
-#[deprecated]
-// ((a=1 and b=0)or(c=3 and d=6) and m ='0')
-pub struct Condition {
-    // Element 虽然能clone 不过是不是用 arc
-    pub left: Element,
-    pub op: Option<Op>,
-    /// 为什么会是vec 因为需要应对 name in ('a','r')
-    pub right: Vec<Element>,
-    pub siblings: Vec<(LogicalOp, Box<Condition>)>,
-}
-
-impl Condition {
-    pub fn falseTrueCondition(bool: bool) -> Condition {
-        Condition {
-            left: Element::Boolean(bool),
-            op: None,
-            right: Vec::new(),
-            siblings: Vec::new(),
-        }
-    }
-}
-
 // ((a=1 and b=0)or(c=3 and d=6) and m ='0')
 // 碰到"(" 下钻递归 和 碰到and,or 返回得到ConditionEnum 把它落地到上级的ConditionEnum的left
-pub enum ConditionEnum {
-    /// 如果是单单的 false true
-    Bool(bool),
-    /// 普通的 a=1
-    Base {
-        left: Element,
-        noLogicalOp: Op,
-        right: Vec<Element>,
+#[derive(Debug)]
+pub enum Expr {
+    Single(Element),
+    BiDirection {
+        left: Box<Expr>,
+        op: Op,
+        right: Vec<Box<Expr>>,
     },
-    Composite {
-        left: Box<ConditionEnum>,
-        // ((a=1 and b=0)) 那么顶级的condition的op和right都是None
-        logicalOp: Option<LogicalOp>,
-        right: Option<Box<ConditionEnum>>,
-    },
+    None,
 }
 
-impl Default for ConditionEnum {
+impl Default for Expr {
     fn default() -> Self {
-        ConditionEnum::Bool(true)
+        Expr::None
     }
 }
-
-pub struct ConditionBase {}
-
-pub struct ConditionComposite {}
 
 // ------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod test {
     use crate::parser;
+    use crate::parser::Parser;
 
     #[test]
     pub fn testParseCreateTable() {
@@ -1326,10 +1147,7 @@ mod test {
 
     #[test]
     pub fn testLink() {
-        "false".parse::<bool>().unwrap();
-        parser::parse("link user(id > 1 and ( name = 'a' or code = 6)) to car(color='red') by usage(number = 13)").unwrap();
+        // "link user(id > 1 and ( name = 'a' or code = 6)) to car (color='red') by usage(number = 13)"
+        parser::parse("link user(id > 1 and ( name = 'a' or code = (1 + 0) and true))").unwrap();
     }
 }
-
-
-
