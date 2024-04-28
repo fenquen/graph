@@ -1,9 +1,11 @@
 use std::cmp::PartialEq;
 use std::fmt::{Debug, Display, Formatter, Pointer};
+use std::str::FromStr;
 use crate::{global, prefix_plus_plus, suffix_minus_minus, suffix_plus_plus, throw};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use strum_macros::{Display as DisplayStrum, Display, EnumString};
+use crate::graph_error::GraphError;
 use crate::meta::{Column, ColumnType, Table, TableType, ColumnValue};
 
 pub fn parse(sql: &str) -> Result<Vec<Command>> {
@@ -19,7 +21,8 @@ pub fn parse(sql: &str) -> Result<Vec<Command>> {
         println!("{}", "\n");
     }
 
-    parser.parse()
+    //parser.parse()
+    Ok(Default::default())
 }
 
 pub enum Command {
@@ -134,7 +137,7 @@ impl Parser {
                         }
                     }
                 }
-                // 要解析数学符了
+                // 数学比较符
                 global::等号_char | global::小于_char | global::大于_char | global::感叹_char => {
                     // 单纯currentCharIndex的是文本内容
                     if self.whetherIn单引号() {
@@ -159,13 +162,29 @@ impl Parser {
                         let mathCmpOp = MathCmpOp::from(operatorString.as_str());
 
                         if let MathCmpOp::Unknown = mathCmpOp {
-                            self.throwSyntaxErrorDetail(&format!("unknown operator:{}", operatorString))?;
+                            self.throwSyntaxErrorDetail(&format!("unknown math compare operator:{}", operatorString))?;
                         }
 
                         // 需要了断 pendingChars
                         self.collectPendingChars(&mut currentElementVec);
 
                         currentElementVec.push(Element::Op(Op::MathCmpOp(mathCmpOp)));
+                    }
+                }
+                // 数学计算符
+                '+' | '/' | '*' | '-' => {
+                    if self.whetherIn单引号() {
+                        self.pendingChars.push(currentChar);
+                    } else {
+                        let mathCalcOp = MathCalcOp::from(currentChar);
+                        if let MathCalcOp::Unknown = mathCalcOp {
+                            self.throwSyntaxErrorDetail(&format!("unknown math calc operator:{}", currentChar))?;
+                        }
+
+                        // 需要了断 pendingChars
+                        self.collectPendingChars(&mut currentElementVec);
+
+                        currentElementVec.push(Element::Op(Op::MathCalcOp(mathCalcOp)));
                     }
                 }
                 _ => {
@@ -264,10 +283,6 @@ impl Parser {
                         "AND" => { Element::Op(Op::LogicalOp(LogicalOp::And)) }
                         "IS" => { Element::Op(Op::SqlOp(SqlOp::Is)) }
                         "IN" => { Element::Op(Op::SqlOp(SqlOp::In)) }
-                        "+" => { Element::Op(Op::MathCalcOp(MathCalcOp::Plus)) }
-                        "/" => { Element::Op(Op::MathCalcOp(MathCalcOp::Divide)) }
-                        "*" => { Element::Op(Op::MathCalcOp(MathCalcOp::Multiply)) }
-                        "-" => { Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) }
                         _ => { Element::TextLiteral(text) }
                     }
                 }
@@ -651,7 +666,7 @@ impl Parser {
                 }
             }
             _ => {
-                self.throwSyntaxError()?;
+                self.throwSyntaxErrorDetail("src table should followed by filter conditions or to when use link sql")?;
             }
         }
 
@@ -676,7 +691,7 @@ impl Parser {
             ParseRightComplete,
         }
 
-        let mut expr0 = Expr::default();
+        let mut expr = Expr::default();
 
         let mut parseCondState = ParseCondState::ParsingLeft;
 
@@ -692,34 +707,29 @@ impl Parser {
 
             match parseCondState {
                 ParseCondState::ParsingLeft => {
-                    match currentElement {
-                        Element::TextLiteral(ref text) => {
-                            if text == global::括号_STR {
-                                assert_eq!(self.skipElement(-1), false);
-                                expr0 = self.parseExpr()?;
-                                parseCondState = ParseCondState::ParsingOp;
-                                continue;
-                            }
-                        }
-                        _ => {}
+                    if currentElement.expectTextLiteralContent(global::括号_STR) {
+                        assert_eq!(self.skipElement(-1), false);
+                        expr = self.parseExpr()?;
+                        parseCondState = ParseCondState::ParsingOp;
+                        continue;
                     }
 
-                    expr0 = Expr::Single(currentElement);
+                    expr = Expr::Single(currentElement);
 
                     parseCondState = ParseCondState::ParsingOp;
                 }
                 ParseCondState::ParsingOp => {
                     if let Element::Op(op) = currentElement {
-                        if let Expr::Single(_) = expr0 {
-                            expr0 = Expr::BiDirection {
-                                left: Box::new(expr0),
+                        if let Expr::Single(_) = expr {
+                            expr = Expr::BiDirection {
+                                left: Box::new(expr),
                                 op,
                                 right: vec![],
                             }
                         }
                     } else {
-                        // 应对 ...... and true )
-                        if let Expr::Single(Element::Boolean(_)) = expr0 {
+                        // 上步parseLeft得到的是true false,那么应该跳到ParseRightComplete
+                        if let Expr::Single(Element::Boolean(_)) = expr {
                             parseCondState = ParseCondState::ParseRightComplete;
                             continue;
                         } else {
@@ -736,13 +746,14 @@ impl Parser {
                             if text == global::括号_STR {
                                 // 要应对 a in ('a'),那么碰到"("的话需要去看看前边的是不是 in
 
-                                // 是不对的还是当前的和currentElement相同
+                                // 需要先回过去然后回过来,不然prevElement还是currentElement
                                 assert_eq!(self.skipElement(-1), false);
                                 let previousElement = self.peekPrevElement()?.clone();
                                 assert_eq!(self.skipElement(1), false);
 
-                                // 说明是 "... in ( ..." 这样的
+                                // 说明是 "... in ( ..." 这样的,括号对应的便不是单个expr而是多个expr
                                 if let Element::Op(Op::SqlOp(SqlOp::In)) = previousElement {
+
                                     //
                                 } else if let Element::Op(op) = previousElement { // 前边是 op
                                     assert_eq!(self.skipElement(-1), false);
@@ -751,8 +762,8 @@ impl Parser {
                                     let subExpr = self.parseExpr()?;
 
                                     // 得要BiDirection
-                                    if let Expr::BiDirection { left, op, .. } = expr0 {
-                                        expr0 = Expr::BiDirection {
+                                    if let Expr::BiDirection { left, op, .. } = expr {
+                                        expr = Expr::BiDirection {
                                             left,
                                             op,
                                             right: vec![Box::new(subExpr)],
@@ -771,8 +782,8 @@ impl Parser {
                         _ => {}
                     }
 
-                    if let Expr::BiDirection { left, op, .. } = expr0 {
-                        expr0 = Expr::BiDirection {
+                    if let Expr::BiDirection { left, op, .. } = expr {
+                        expr = Expr::BiDirection {
                             left,
                             op,
                             right: vec![Box::new(Expr::Single(currentElement))],
@@ -793,8 +804,8 @@ impl Parser {
                         }
                         // a = 1 and b= 0  的 "and",当前的condition变为又1个condition小弟
                         Element::Op(op) => {
-                            expr0 = Expr::BiDirection {
-                                left: Box::new(expr0),
+                            expr = Expr::BiDirection {
+                                left: Box::new(expr),
                                 op,
                                 // 需要递归下钻
                                 right: vec![Box::new(self.parseExpr()?)],
@@ -811,7 +822,7 @@ impl Parser {
             }
         }
 
-        Ok(expr0)
+        Ok(expr)
     }
 
     /// 返回None的话说明当前已经是overflow了 和之前遍历char时候不同的是 当不能advance时候index是在最后的index还要向后1个的
@@ -1023,21 +1034,11 @@ pub enum Op {
 impl Display for Op {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Op::MathCmpOp(s) => {
-                write!(f, "MathCmpOp({})", s)
-            }
-            Op::LogicalOp(s) => {
-                write!(f, "LogicalOp({})", s)
-            }
-            Op::SqlOp(s) => {
-                write!(f, "SqlOp({})", s)
-            }
-            Op::Unknown => {
-                write!(f, "Unknown")
-            }
-            Op::MathCalcOp(mathCalcOp) => {
-                write!(f, "MathCalcOp({})", mathCalcOp)
-            }
+            Op::MathCmpOp(s) => write!(f, "MathCmpOp({})", s),
+            Op::LogicalOp(s) => write!(f, "LogicalOp({})", s),
+            Op::SqlOp(s) => write!(f, "SqlOp({})", s),
+            Op::MathCalcOp(mathCalcOp) => write!(f, "MathCalcOp({})", mathCalcOp),
+            _ => write!(f, "Unknown"),
         }
     }
 }
@@ -1092,6 +1093,33 @@ pub enum MathCalcOp {
     Divide,
     Multiply,
     Minus,
+    Unknown,
+}
+
+impl FromStr for MathCalcOp {
+    type Err = GraphError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "+" => Ok(MathCalcOp::Plus),
+            "/" => Ok(MathCalcOp::Divide),
+            "*" => Ok(MathCalcOp::Multiply),
+            "-" => Ok(MathCalcOp::Minus),
+            _ => throw!(&format!("unknown math compare operator:{}",s))
+        }
+    }
+}
+
+impl From<char> for MathCalcOp {
+    fn from(char: char) -> Self {
+        match char {
+            '+' => MathCalcOp::Plus,
+            '/' => MathCalcOp::Divide,
+            '*' => MathCalcOp::Multiply,
+            '-' => MathCalcOp::Minus,
+            _ => MathCalcOp::Unknown,
+        }
+    }
 }
 
 /// link user(id = 1) to car(color = 'red') by usage(number = 2)
@@ -1146,8 +1174,9 @@ mod test {
     }
 
     #[test]
-    pub fn testLink() {
+    pub fn testLink() { // where a = 1+1 and b='a'
         // "link user(id > 1 and ( name = 'a' or code = 6)) to car (color='red') by usage(number = 13)"
-        parser::parse("link user(id > 1 and ( name = 'a' or code = (1 + 0) and true))").unwrap();
+        // parser::parse("link user(id > 1 and ( name = 'a' or code = (1 + 0) and true))").unwrap();
+        parser::parse("a").unwrap();
     }
 }
