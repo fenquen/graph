@@ -277,13 +277,13 @@ impl Parser {
                 } else {
                     // parse 要求不能是大小写混合的
                     match text.to_uppercase().as_str() {
-                        "FALSE" => { Element::Boolean(false) }
-                        "TRUE" => { Element::Boolean(true) }
-                        "OR" => { Element::Op(Op::LogicalOp(LogicalOp::Or)) }
-                        "AND" => { Element::Op(Op::LogicalOp(LogicalOp::And)) }
-                        "IS" => { Element::Op(Op::SqlOp(SqlOp::Is)) }
-                        "IN" => { Element::Op(Op::SqlOp(SqlOp::In)) }
-                        _ => { Element::TextLiteral(text) }
+                        "FALSE" => Element::Boolean(false),
+                        "TRUE" => Element::Boolean(true),
+                        "OR" => Element::Op(Op::LogicalOp(LogicalOp::Or)),
+                        "AND" => Element::Op(Op::LogicalOp(LogicalOp::And)),
+                        "IS" => Element::Op(Op::SqlOp(SqlOp::Is)),
+                        "IN" => Element::Op(Op::SqlOp(SqlOp::In)),
+                        _ => Element::TextLiteral(text),
                     }
                 }
             };
