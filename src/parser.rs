@@ -21,8 +21,8 @@ pub fn parse(sql: &str) -> Result<Vec<Command>> {
         println!("{}", "\n");
     }
 
-    //parser.parse()
-    Ok(Default::default())
+    parser.parse()
+    //Ok(Default::default())
 }
 
 pub enum Command {
@@ -124,7 +124,7 @@ impl Parser {
                         }
                     }
                 }
-                global::分号_char => { // 应对同时写了多个以;分隔的sql
+                global::分号_CHAR => { // 应对同时写了多个以;分隔的sql
                     // 单纯的是文本内容
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
@@ -137,8 +137,8 @@ impl Parser {
                         }
                     }
                 }
-                // 数学比较符
-                global::等号_char | global::小于_char | global::大于_char | global::感叹_char => {
+                // 数学比较符 因为是可以粘连的 需要到这边来parse
+                global::等号_CHAR | global::小于_CHAR | global::大于_CHAR | global::感叹_CHAR => {
                     // 单纯currentCharIndex的是文本内容
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
@@ -147,7 +147,7 @@ impl Parser {
                             // 应对  "!=" ">=" "<=" 两个char的 目前的不容许有空格的
                             if let Some(nextChar) = self.nextChar() {
                                 match nextChar {
-                                    global::等号_char | global::小于_char | global::大于_char | global::感叹_char => {
+                                    global::等号_CHAR | global::小于_CHAR | global::大于_CHAR | global::感叹_CHAR => {
                                         advanceCount = 2;
                                         vec![currentChar, nextChar].iter().collect()
                                     }
@@ -171,7 +171,7 @@ impl Parser {
                         currentElementVec.push(Element::Op(Op::MathCmpOp(mathCmpOp)));
                     }
                 }
-                // 数学计算符
+                // 数学计算符 因为是可以粘连的 需要到这边来parse
                 '+' | '/' | '*' | '-' => {
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
@@ -230,7 +230,7 @@ impl Parser {
     }
 
     fn previousChar(&self) -> Option<char> {
-        if 0 > self.currentCharIndex - 1 {
+        if self.currentCharIndex == 0 {
             None
         } else {
             Some(self.chars[self.currentCharIndex - 1])
@@ -275,7 +275,9 @@ impl Parser {
                 if self.whetherIn单引号() {
                     Element::StringContent(text)
                 } else {
-                    // parse 要求不能是大小写混合的
+                    // parse bool的时候文本的bool不能大小写混合的
+                    // 以下的op能够到这边解析的原因是,它们是不能粘连使用的,然而"+"是可以的, 0+2 和0 + 2 都是对的
+                    // 故而它们是不能到这边解析,需要和mathCmpOp那样到循环里边去parse
                     match text.to_uppercase().as_str() {
                         "FALSE" => Element::Boolean(false),
                         "TRUE" => Element::Boolean(true),
@@ -370,18 +372,10 @@ impl Parser {
                     let text = text.to_uppercase();
 
                     match text.as_str() {
-                        "CREATE" => {
-                            self.parseCreate()?
-                        }
-                        "INSERT" => {
-                            self.parseInsert()?
-                        }
-                        "LINK" => {
-                            self.parseLink()?
-                        }
-                        _ => {
-                            self.throwSyntaxError()?
-                        }
+                        "CREATE" => self.parseCreate()?,
+                        "INSERT" => self.parseInsert()?,
+                        "LINK" => self.parseLink()?,
+                        _ => self.throwSyntaxError()?,
                     }
                 }
                 _ => self.throwSyntaxError()?
@@ -555,20 +549,13 @@ impl Parser {
                         match currentElement.expectTextLiteralOpt() {
                             Some(text) => {
                                 match text.as_str() {
-                                    global::逗号_STR => {
-                                        continue;
-                                    }
-                                    ")" => { // columnName读取结束了 下边应该是values
-                                        break;
-                                    }
-                                    _ => {
-                                        insertValues.columnNames.push(text);
-                                    }
+                                    global::逗号_STR => continue,
+                                    // columnName读取结束了 下边应该是values
+                                    ")" => break,
+                                    _ => insertValues.columnNames.push(text),
                                 }
                             }
-                            None => {
-                                self.throwSyntaxError()?;
-                            }
+                            None => self.throwSyntaxError()?,
                         }
                     }
 
@@ -597,15 +584,9 @@ impl Parser {
                             }
                             Element::TextLiteral(text) => {
                                 match text.as_str() {
-                                    global::逗号_STR => {
-                                        continue;
-                                    }
-                                    ")" => {
-                                        break;
-                                    }
-                                    _ => {
-                                        self.throwSyntaxErrorDetail("column value should not be text literal")?;
-                                    }
+                                    global::逗号_STR => continue,
+                                    ")" => break,
+                                    _ => self.throwSyntaxErrorDetail("column value should not be text literal")?,
                                 }
                             }
                             _ => {}
@@ -653,8 +634,8 @@ impl Parser {
             // 读取 src table的筛选condition
             global::括号_STR => {
                 // 返回1个
-                assert_eq!(self.skipElement(-1), false);
-                let expr = self.parseExpr()?;
+                self.skipElement(-1)?;
+                let expr = self.parseExpr(false)?;
                 println!("{:?}", expr);
             }
             // 读取是dest table name
@@ -665,9 +646,7 @@ impl Parser {
                     self.throwSyntaxErrorDetail("to should followed by dest table name when use link sql")?;
                 }
             }
-            _ => {
-                self.throwSyntaxErrorDetail("src table should followed by filter conditions or to when use link sql")?;
-            }
+            _ => self.throwSyntaxErrorDetail("src table should followed by filter conditions or to when use link sql")?,
         }
 
         Ok(Command::Link(link))
@@ -677,11 +656,9 @@ impl Parser {
     //  ((id > 1 and level=6 and code in ('a')) and true and (name in ('a') or code = null))
     // 当前不支持 a in ('a')
     // 当前不支持 a = (1+0)
-    fn parseExpr(&mut self) -> Result<Expr> {
+    fn parseExpr(&mut self, stopWhenParseRightComplete: bool) -> Result<Expr> {
         if self.getCurrentElement()?.expectTextLiteralContent(global::括号_STR) {
-            if self.skipElement(1) {
-                self.throwSyntaxErrorDetail("unexpected end of sql")?;
-            }
+            self.skipElement(1)?;
         }
 
         enum ParseCondState {
@@ -708,8 +685,8 @@ impl Parser {
             match parseCondState {
                 ParseCondState::ParsingLeft => {
                     if currentElement.expectTextLiteralContent(global::括号_STR) {
-                        assert_eq!(self.skipElement(-1), false);
-                        expr = self.parseExpr()?;
+                        self.skipElement(-1)?;
+                        expr = self.parseExpr(false)?;
                         parseCondState = ParseCondState::ParsingOp;
                         continue;
                     }
@@ -724,17 +701,17 @@ impl Parser {
                             expr = Expr::BiDirection {
                                 left: Box::new(expr),
                                 op,
-                                right: vec![],
+                                right: Default::default(),
                             }
                         }
                     } else {
                         // 上步parseLeft得到的是true false,那么应该跳到ParseRightComplete
-                        if let Expr::Single(Element::Boolean(_)) = expr {
-                            parseCondState = ParseCondState::ParseRightComplete;
-                            continue;
-                        } else {
-                            self.throwSyntaxError()?;
-                        }
+                        //  if let Expr::Single(Element::Boolean(_)) = expr {
+                        //      parseCondState = ParseCondState::ParseRightComplete;
+                        //      continue;
+                        // } else {
+                        self.throwSyntaxError()?;
+                        // }
                     }
 
                     parseCondState = ParseCondState::ParsingRight;
@@ -747,19 +724,19 @@ impl Parser {
                                 // 要应对 a in ('a'),那么碰到"("的话需要去看看前边的是不是 in
 
                                 // 需要先回过去然后回过来,不然prevElement还是currentElement
-                                assert_eq!(self.skipElement(-1), false);
+                                self.skipElement(-1)?;
                                 let previousElement = self.peekPrevElement()?.clone();
-                                assert_eq!(self.skipElement(1), false);
+                                self.skipElement(1)?;
 
                                 // 说明是 "... in ( ..." 这样的,括号对应的便不是单个expr而是多个expr
                                 if let Element::Op(Op::SqlOp(SqlOp::In)) = previousElement {
-
-                                    //
+                                    self.skipElement(-1)?;
+                                    println!("{:?}", self.parseInExprs()?);
                                 } else if let Element::Op(op) = previousElement { // 前边是 op
-                                    assert_eq!(self.skipElement(-1), false);
+                                    self.skipElement(-1)?;
 
                                     // 递归
-                                    let subExpr = self.parseExpr()?;
+                                    let subExpr = self.parseExpr(false)?;
 
                                     // 得要BiDirection
                                     if let Expr::BiDirection { left, op, .. } = expr {
@@ -774,7 +751,7 @@ impl Parser {
 
                                     parseCondState = ParseCondState::ParseRightComplete;
                                     continue;
-                                } else {  // a = (0+1) 当前还不支持的 (0+1)需要落地为表达式
+                                } else {
                                     self.throwSyntaxError()?;
                                 }
                             }
@@ -795,6 +772,12 @@ impl Parser {
                     parseCondState = ParseCondState::ParseRightComplete;
                 }
                 ParseCondState::ParseRightComplete => {
+                    if stopWhenParseRightComplete {
+                        // 不要遗忘
+                        self.skipElement(-1)?;
+                        break;
+                    }
+
                     match currentElement {
                         Element::TextLiteral(text) => {
                             // (a = 1) 的 ")",说明要收了，递归结束要返回上轮
@@ -802,17 +785,52 @@ impl Parser {
                                 break;
                             }
                         }
-                        // a = 1 and b= 0  的 "and",当前的condition变为又1个condition小弟
                         Element::Op(op) => {
-                            expr = Expr::BiDirection {
-                                left: Box::new(expr),
-                                op,
-                                // 需要递归下钻
-                                right: vec![Box::new(self.parseExpr()?)],
-                            };
-                            break;
-                            // parseCondState = ParseCondState::ParsingRight;
-                            // continue;
+                            // 需要区分 原来是都是认为是logicalOp
+                            match op {
+                                // 它是之前能应对的情况 a = 1 and b= 0 的 and
+                                Op::LogicalOp(_) => {
+                                    expr = Expr::BiDirection {
+                                        left: Box::new(expr),
+                                        op,
+                                        // 需要递归下钻
+                                        right: vec![Box::new(self.parseExpr(false)?)],
+                                    };
+                                    break;
+                                }
+                                // a>0+6 and b=0 的 "+",当前的expr是a>0,需要打破现有的expr
+                                Op::MathCalcOp(_) => {
+                                    if let Expr::BiDirection { left, op, right } = expr {
+                                        // 需要先回到0+6的起始index
+                                        self.skipElement(-2)?;
+
+                                        expr = Expr::BiDirection {
+                                            left,
+                                            op,
+                                            // 递归的level不能用力太猛 不然应对不了 a > 0+6 and b=0 会把 0+6 and b=0 当成1个expr
+                                            right: vec![Box::new(self.parseExpr(true)?)],
+                                        };
+
+                                        parseCondState = ParseCondState::ParseRightComplete;
+                                        continue;
+                                    } else {
+                                        self.throwSyntaxError()?;
+                                    }
+                                }
+                                // 0+6>a and b=0的 ">" 当前的expr是0+6
+                                Op::MathCmpOp(_) => {
+                                    // 把现有的expr降级变为小弟
+                                    expr = Expr::BiDirection {
+                                        left: Box::new(expr),
+                                        op,
+                                        right: Default::default(),
+                                    };
+                                    // 不递归而是本level循环
+                                    parseCondState = ParseCondState::ParsingRight;
+                                    continue;
+                                }
+                                _ => {}
+                            }
                         }
                         _ => {}
                     }
@@ -823,6 +841,67 @@ impl Parser {
         }
 
         Ok(expr)
+    }
+
+    // 单独的生成小的parser,element只包含expr的
+    // 如何应对 a in (0,0+6,0+(a+1),)
+    fn parseInExprs(&mut self) -> Result<Vec<Expr>> {
+        // 要以(打头
+        if self.getCurrentElement()?.expectTextLiteralContent(global::括号_STR) == false {
+            self.throwSyntaxError()?;
+        }
+
+        let mut 括号count = 0;
+        let mut 括号1count = 0;
+
+        let mut pendingElementVec = Vec::new();
+        let mut exprParserVec = Vec::new();
+        let mut exprVec = Vec::new();
+
+        loop {
+            // 通过","分隔提取
+            let currentElement = self.getCurrentElementAdvance()?;
+
+            match currentElement {
+                Element::TextLiteral(text) => {
+                    match text.as_str() {
+                        global::括号_STR => {
+                            pendingElementVec.push(currentElement.clone());
+
+                            suffix_plus_plus!(括号count);
+                        }
+                        global::括号1_STR => {
+                            pendingElementVec.push(currentElement.clone());
+
+                            // 说明括号已然收敛了
+                            if prefix_plus_plus!(括号1count) == 括号count {
+                                break;
+                            }
+                        }
+                        global::逗号_STR => {
+                            let mut exprParser = Parser::default();
+                            exprParser.elementVecVec.push(pendingElementVec);
+
+                            exprParserVec.push(exprParser);
+
+                            pendingElementVec = Vec::new();
+                        }
+                        _ => {
+                            pendingElementVec.push(currentElement.clone());
+                        }
+                    }
+                }
+                _ => {
+                    pendingElementVec.push(currentElement.clone());
+                }
+            }
+        }
+
+        for exprParser in &mut exprParserVec {
+            exprVec.push(exprParser.parseExpr(false)?);
+        }
+
+        Ok(exprVec)
     }
 
     /// 返回None的话说明当前已经是overflow了 和之前遍历char时候不同的是 当不能advance时候index是在最后的index还要向后1个的
@@ -879,15 +958,15 @@ impl Parser {
     }
 
     /// 和parse toke 遍历char不同的是 要是越界了 index会是边界的后边1个 以符合当前的体系
-    fn skipElement(&mut self, delta: i32) -> bool {
+    fn skipElement(&mut self, delta: i32) -> Result<()> {
         let currentElementVecLen = self.elementVecVec.get(self.currentElementVecIndex).unwrap().len();
 
         if (self.currentElementIndex as i32 + delta) as usize >= self.elementVecVec.get(self.currentElementVecIndex).unwrap().len() {
             self.currentElementIndex = currentElementVecLen;
-            true
+            self.throwSyntaxError()
         } else {
             self.currentElementIndex = (self.currentElementIndex as i32 + delta) as usize;
-            false
+            Ok(())
         }
     }
 
@@ -982,27 +1061,13 @@ impl Default for Element {
 impl Display for Element {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Element::TextLiteral(s) => {
-                write!(f, "{}({})", "TextLiteral", s)
-            }
-            Element::StringContent(s) => {
-                write!(f, "{}({})", "StringContent", s)
-            }
-            Element::IntegerLiteral(s) => {
-                write!(f, "{}({})", "IntegerLiteral", s)
-            }
-            Element::DecimalLiteral(s) => {
-                write!(f, "{}({})", "DecimalLiteral", s)
-            }
-            Element::Boolean(bool) => {
-                write!(f, "{}({})", "Boolean", bool)
-            }
-            Element::Op(op) => {
-                write!(f, "{}({})", "Op", op)
-            }
-            _ => {
-                write!(f, "{}", "Unknown")
-            }
+            Element::TextLiteral(s) => write!(f, "{}({})", "TextLiteral", s),
+            Element::StringContent(s) => write!(f, "{}({})", "StringContent", s),
+            Element::IntegerLiteral(s) => write!(f, "{}({})", "IntegerLiteral", s),
+            Element::DecimalLiteral(s) => write!(f, "{}({})", "DecimalLiteral", s),
+            Element::Boolean(bool) => write!(f, "{}({})", "Boolean", bool),
+            Element::Op(op) => write!(f, "{}({})", "Op", op),
+            _ => write!(f, "{}", "Unknown"),
         }
     }
 }
@@ -1064,13 +1129,13 @@ pub enum MathCmpOp {
 impl From<&str> for MathCmpOp {
     fn from(str: &str) -> Self {
         match str {
-            global::等号_str => { MathCmpOp::Equal }
-            global::小于_str => { MathCmpOp::LessThan }
-            global::大于_str => { MathCmpOp::GreaterThan }
-            global::小于等于 => { MathCmpOp::LessEqual }
-            global::大于等于 => { MathCmpOp::GreaterEqual }
-            global::不等_str => { MathCmpOp::NotEqual }
-            _ => { MathCmpOp::Unknown }
+            global::等号_STR => MathCmpOp::Equal,
+            global::小于_STR => MathCmpOp::LessThan,
+            global::大于_STR => MathCmpOp::GreaterThan,
+            global::小于等于_STR => MathCmpOp::LessEqual,
+            global::大于等于_STR => MathCmpOp::GreaterEqual,
+            global::不等_STR => MathCmpOp::NotEqual,
+            _ => MathCmpOp::Unknown,
         }
     }
 }
@@ -1137,7 +1202,7 @@ pub struct Link {
 }
 
 // ((a=1 and b=0)or(c=3 and d=6) and m ='0')
-// 碰到"(" 下钻递归 和 碰到and,or 返回得到ConditionEnum 把它落地到上级的ConditionEnum的left
+// 碰到"(" 下钻递归,返回后落地到上级的left right
 #[derive(Debug)]
 pub enum Expr {
     Single(Element),
@@ -1177,6 +1242,9 @@ mod test {
     pub fn testLink() { // where a = 1+1 and b='a'
         // "link user(id > 1 and ( name = 'a' or code = 6)) to car (color='red') by usage(number = 13)"
         // parser::parse("link user(id > 1 and ( name = 'a' or code = (1 + 0) and true))").unwrap();
-        parser::parse("a").unwrap();
+        // parser::parse("link user (a>0+6+1>a)").unwrap();
+        parser::parse("link user (a in (0,0+6,0+(a+1),))").unwrap();
     }
 }
+
+

@@ -29,25 +29,25 @@ pub const 括号_STR: &str = "(";
 pub const 括号1_CHAR: char = ')';
 pub const 括号1_STR: &str = ")";
 
-pub const 分号_char: char = ';';
-pub const 冒号_char: char = ':';
+pub const 分号_CHAR: char = ';';
+pub const 冒号_CHAR: char = ':';
 
-pub const 等号_char: char = '=';
-pub const 等号_str: &str = "=";
+pub const 等号_CHAR: char = '=';
+pub const 等号_STR: &str = "=";
 
-pub const 小于_char: char = '<';
-pub const 小于_str: &str = "<";
+pub const 小于_CHAR: char = '<';
+pub const 小于_STR: &str = "<";
 
-pub const 大于_char: char = '>';
-pub const 大于_str: &str = ">";
+pub const 大于_CHAR: char = '>';
+pub const 大于_STR: &str = ">";
 
-pub const 感叹_char: char = '!';
-pub const 感叹_str: &str = "!";
+pub const 感叹_CHAR: char = '!';
+pub const 感叹_STR: &str = "!";
 
-pub const 不等_str: &str = "!=";
+pub const 不等_STR: &str = "!=";
 
-pub const 小于等于: &str = "<=";
+pub const 小于等于_STR: &str = "<=";
 
-pub const 大于等于: &str = ">=";
+pub const 大于等于_STR: &str = ">=";
 
 pub const 临界_CHARS: &[char] = &[空格_CHAR, 逗号_CHAR, 单引号_CHAR, 括号_CHAR, 括号1_CHAR];
