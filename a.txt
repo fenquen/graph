@@ -62,3 +62,4 @@ parseExpr要能支持 (id in (0,0+6,0+(a+1),)) 完成
 parseExpr (((a = 1)))
 values (0+2,'a','0')
 by usage(a=0+1,d=0)
+(a and b or d) 会解析变成 a and (b or d) 不对 应该是 (a and b) or d

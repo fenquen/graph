@@ -593,9 +593,9 @@ impl Parser {
 
         self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("by", "missing 'by'")?;
 
-        link.relationName = self.getCurrentElementAdvance()?.expectTextLiteral("link name")?;
+        link.relationName = self.getCurrentElementAdvance()?.expectTextLiteral("relation name")?;
 
-        // by usage (a=1,a=(1212+1)) 的 (
+        // 下边要解析 by usage (a=0,a=(1212+0))的后边的括号部分了
         if let Some(element) = self.getCurrentElementOptionAdvance() {
             element.expectTextLiteralContent(global::括号_STR)?;
         } else { // 未写link的value
@@ -607,14 +607,19 @@ impl Parser {
             ParseColumnName,
             ParseEqual,
             ParseColumnExpr,
-            A,
+            AfterParseColumnExpr,
         }
 
         let mut parseState = ParseState::ParseColumnName;
 
+        // 和parseInExprs使用相同的套路,当(数量和)数量相同的时候说明结束了
+        let mut 括号数量 = 0;
+        let mut 括号1数量 = 0;
+
         // 会以")"收尾
         let mut exprElementVec = Default::default();
         loop {
+            break;
             let currentElement = self.getCurrentElementAdvance()?;
 
             match (parseState, currentElement) {
@@ -626,25 +631,37 @@ impl Parser {
                     parseState = ParseState::ParseColumnExpr;
                 }
                 (ParseState::ParseColumnExpr, currentElement) => {
+                    // 说明右半部分的expr结束了
                     if currentElement.expectTextLiteralContentBool(global::逗号_STR) {
                         let mut parser = Parser::default();
                         parser.elementVecVec.push(exprElementVec);
                         link.columnValues.push(parser.parseExpr(false)?);
                         exprElementVec = Default::default();
 
+                        // 到下轮的parseColumnName
                         parseState = ParseState::ParseColumnName;
-                    } else if currentElement.expectTextLiteralContentBool(global::括号_STR) {
-
-                    } else if currentElement.expectTextLiteralContentBool(global::括号1_STR){
-
-                    } else {
-                        exprElementVec.push(currentElement.clone());
+                        continue;
                     }
+
+                    if currentElement.expectTextLiteralContentBool(global::括号_STR) {
+                        括号数量 = 括号数量 + 1;
+                    } else if currentElement.expectTextLiteralContentBool(global::括号1_STR) {
+                        括号1数量 = 括号1数量 + 1;
+
+                        // 说明到了last的)
+                        if 括号数量 == 括号1数量 {
+                            let mut parser = Parser::default();
+                            parser.elementVecVec.push(exprElementVec);
+                            link.columnValues.push(parser.parseExpr(false)?);
+                            exprElementVec = Default::default();
+                            break;
+                        }
+                    }
+
+                    exprElementVec.push(currentElement.clone());
                 }
                 _ => self.throwSyntaxError()?,
             }
-
-            break;
         }
 
         println!("{:?}", link);
@@ -654,7 +671,10 @@ impl Parser {
     /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个 <br>
     /// stopWhenParseRightComplete 用来应对(a>0+6),0+6未被括号保护,不然的话会解析成  (a>1)+6
     fn parseExpr(&mut self, stopWhenParseRightComplete: bool) -> Result<Expr> {
+        let mut hasLeading括号 = false;
+
         if self.getCurrentElement()?.expectTextLiteralContentBool(global::括号_STR) {
+            hasLeading括号 = true;
             self.skipElement(1)?;
         }
 
@@ -697,11 +717,14 @@ impl Parser {
                         }
                     } else {
                         // 应对 (((a = 1)))  因为递归结束后返回到上1级的时候currentElement是")"
-                        if currentElement.expectTextLiteralContentBool(global::括号1_STR) {
-                            break;
-                        }
+                        // if currentElement.expectTextLiteralContentBool(global::括号1_STR) {
+                        //   break;
+                        //}
 
-                        self.throwSyntaxError()?;
+                        parseCondState = ParseCondState::ParseRightComplete;
+                        self.skipElement(-1)?;
+                        continue;
+                        // self.throwSyntaxError()?;
                     }
 
                     parseCondState = ParseCondState::ParsingRight;
@@ -780,6 +803,11 @@ impl Parser {
 
                     match currentElement {
                         Element::TextLiteral(text) => {
+                            if hasLeading括号 == false {
+                                self.skipElement(-1)?;
+                                break;
+                            }
+
                             // (a = 1) 的 ")",说明要收了，递归结束要返回上轮
                             if text == global::括号1_STR {
                                 break;
@@ -789,14 +817,20 @@ impl Parser {
                             // 需要区分 原来是都是认为是logicalOp
                             match op {
                                 // 它是之前能应对的情况 a = 1 and b= 0 的 and
+                                // (a and b or d) 会解析变成 a and (b or d) 不对 应该是 (a and b) or d
                                 Op::LogicalOp(_) => {
+                                    let a = self.getCurrentElement()?.expectTextLiteralContentBool(global::括号_STR);
+
                                     expr = Expr::BiDirection {
                                         left: Box::new(expr),
                                         op,
                                         // 需要递归下钻
-                                        right: vec![Box::new(self.parseExpr(false)?)],
+                                        right: vec![Box::new(self.parseExpr(!a)?)],
                                     };
-                                    break;
+                                    // (m and (a = 0 and (b = 1))) 这个时候解析到的是1后边的那个")"而已 还有")"残留
+                                    // (a=0 and (b=1) and 1 or 0)
+                                    parseCondState = ParseCondState::ParseRightComplete;
+                                    continue;
                                 }
                                 // a>0+6 and b=0 的 "+",当前的expr是a>0,需要打破现有的expr
                                 Op::MathCalcOp(_) => {
@@ -868,20 +902,28 @@ impl Parser {
 
                             suffix_plus_plus!(括号count);
                         }
+                        // 要以)收尾
                         global::括号1_STR => {
-                            pendingElementVec.push(currentElement.clone());
-
-                            // 说明括号已然收敛了
+                            // 说明括号已然收敛了 是last的)
                             if prefix_plus_plus!(括号1count) == 括号count {
                                 // pending的不要忘了
-                                let mut exprParser = Parser::default();
-                                exprParser.elementVecVec.push(pendingElementVec);
-                                exprParserVec.push(exprParser);
-                                pendingElementVec = Vec::new();
+                                if pendingElementVec.len() > 0 {
+                                    let mut exprParser = Parser::default();
+                                    exprParser.elementVecVec.push(pendingElementVec);
+                                    exprParserVec.push(exprParser);
+                                    pendingElementVec = Vec::new();
+                                }
                                 break;
+                            } else {
+                                // 当不是last的)可以添加
+                                pendingElementVec.push(currentElement.clone());
                             }
                         }
                         global::逗号_STR => {
+                            if pendingElementVec.len() == 0 {
+                                continue;
+                            }
+
                             let mut exprParser = Parser::default();
                             exprParser.elementVecVec.push(pendingElementVec);
                             exprParserVec.push(exprParser);
@@ -910,6 +952,7 @@ impl Parser {
         option
     }
 
+    /// 得到current element 然后 advance
     fn getCurrentElementAdvance(&mut self) -> Result<&Element> {
         let option = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex);
         if option.is_some() {
@@ -1273,7 +1316,7 @@ mod test {
         // parser::parse("link user ((a = 1) = true)").unwrap();
         // parser::parse("link user (((a = 1)) = true)").unwrap();
         // parser::parse("link user ( a in (a,b,d))").unwrap();
-        parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true))").unwrap();
+        parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
     }
 }
 
