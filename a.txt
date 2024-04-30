@@ -57,5 +57,8 @@ column的定义要有 nullable
 ColumnValue 要有对应null的
 parseElement的时候 1+0 会变成1个TextLiteral(1+0) 不对的 已完成
     matchCalcOp不能到collectPendingChars()来处理,需要和mathCmpOp相同应对 已完成
-parseExpr要能支持 (a > 0+6 and b=0) 目前的话必须写成 (id > (0+6) and b=0)
-parseExpr要能支持 (id in (0,0+6,0+(a+1),))
+parseExpr要能支持 (a > 0+6 and b=0) 目前的话必须写成 (id > (0+6) and b=0) 完成
+parseExpr要能支持 (id in (0,0+6,0+(a+1),)) 完成
+parseExpr (((a = 1)))
+values (0+2,'a','0')
+by usage(a=0+1,d=0)

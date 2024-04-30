@@ -151,19 +151,14 @@ impl Parser {
                                         advanceCount = 2;
                                         vec![currentChar, nextChar].iter().collect()
                                     }
-                                    _ => { // 还是1元的operator
-                                        vec![currentChar].iter().collect()
-                                    }
+                                    // 还是1元的operator
+                                    _ => vec![currentChar].iter().collect(),
                                 }
                             } else {
                                 vec![currentChar].iter().collect()
                             };
 
-                        let mathCmpOp = MathCmpOp::from(operatorString.as_str());
-
-                        if let MathCmpOp::Unknown = mathCmpOp {
-                            self.throwSyntaxErrorDetail(&format!("unknown math compare operator:{}", operatorString))?;
-                        }
+                        let mathCmpOp = operatorString.as_str().parse()?;
 
                         // 需要了断 pendingChars
                         self.collectPendingChars(&mut currentElementVec);
@@ -187,9 +182,7 @@ impl Parser {
                         currentElementVec.push(Element::Op(Op::MathCalcOp(mathCalcOp)));
                     }
                 }
-                _ => {
-                    self.pendingChars.push(currentChar);
-                }
+                _ => self.pendingChars.push(currentChar),
             }
 
             let reachEnd = self.advanceChar(advanceCount);
@@ -322,9 +315,7 @@ impl Parser {
 
         for char in text.chars() {
             match char {
-                '0'..='9' => {
-                    continue;
-                }
+                '0'..='9' => continue,
                 '.' => {
                     // 可以是打头和末尾 不能有多个的
                     if hasMetDot { // 说明有多个的
@@ -340,9 +331,7 @@ impl Parser {
                         return (false, false);
                     }
                 }
-                _ => {
-                    return (false, false);
-                }
+                _ => return (false, false),
             }
 
             currentIndex = currentIndex + 1;
@@ -367,18 +356,11 @@ impl Parser {
         let mut commandVec = Vec::new();
 
         loop {
-            let command = match self.getCurrentElementAdvance()? {
-                Element::TextLiteral(text) => {
-                    let text = text.to_uppercase();
-
-                    match text.as_str() {
-                        "CREATE" => self.parseCreate()?,
-                        "INSERT" => self.parseInsert()?,
-                        "LINK" => self.parseLink()?,
-                        _ => self.throwSyntaxError()?,
-                    }
-                }
-                _ => self.throwSyntaxError()?
+            let command = match self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str() {
+                "CREATE" => self.parseCreate()?,
+                "INSERT" => self.parseInsert()?,
+                "LINK" => self.parseLink()?,
+                _ => self.throwSyntaxError()?,
             };
 
             commandVec.push(command);
@@ -396,32 +378,9 @@ impl Parser {
     /// 当前不实现 default value
     // CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)
     fn parseCreate(&mut self) -> Result<Command> {
-        let element = self.getCurrentElementAdvance()?;
-
         // 不是table便是relation
-        if let Element::TextLiteral(text) = element {
-            let text = text.to_uppercase();
-            let text = text.as_str();
-            match text {
-                "TABLE" | "RELATION" => {
-                    let tableType = TableType::from(text);
-
-                    match tableType {
-                        TableType::UNKNOWN => {
-                            self.throwSyntaxError()
-                        }
-                        _ => {
-                            self.parseCreateTable(tableType)
-                        }
-                    }
-                }
-                _ => {
-                    self.throwSyntaxError()
-                }
-            }
-        } else {
-            self.throwSyntaxError()
-        }
+        let tableType = self.getCurrentElement()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str().parse()?;
+        self.parseCreateTable(tableType)
     }
 
     fn parseCreateTable(&mut self, tableType: TableType) -> Result<Command> {
@@ -430,22 +389,12 @@ impl Parser {
         table.type0 = tableType;
 
         // 读取table name
-        match self.getCurrentElementAdvance()? {
-            Element::TextLiteral(tableName) => {
-                table.name = tableName.to_string();
-            }
-            _ => { // 表名不能是纯数字的
-                self.throwSyntaxErrorDetail("table name can not be pure number")?;
-            }
-        }
+        table.name = self.getCurrentElementAdvance()?.expectTextLiteral("table name can not be pure number")?;
 
         self.checkDbObjectName(&table.name)?;
 
         // 应该是"("
-        let element = self.getCurrentElementAdvance()?;
-        if element.expectTextLiteralContent("(") == false {
-            self.throwSyntaxError()?;
-        }
+        self.getCurrentElementAdvance()?.expectTextLiteralContent(global::括号_STR)?;
 
         // 循环读取 column
         enum ReadColumnState {
@@ -477,12 +426,8 @@ impl Parser {
                         ReadColumnState::ReadColumnType => {
                             let columnType = ColumnType::from(text.to_uppercase().as_str());
                             match columnType {
-                                ColumnType::UNKNOWN => {
-                                    self.throwSyntaxErrorDetail(&format!("unknown column type:{}", text))?;
-                                }
-                                _ => {
-                                    column.type0 = columnType;
-                                }
+                                ColumnType::UNKNOWN => self.throwSyntaxErrorDetail(&format!("unknown column type:{}", text))?,
+                                _ => column.type0 = columnType,
                             }
 
                             readColumnState = ReadColumnState::ReadComplete;
@@ -497,20 +442,16 @@ impl Parser {
 
                                     continue;
                                 }
-                                ")" => {
+                                global::括号1_STR => {
                                     table.columns.push(column);
                                     break;
                                 }
-                                _ => {
-                                    self.throwSyntaxError()?;
-                                }
+                                _ => self.throwSyntaxError()?,
                             }
                         }
                     }
                 }
-                _ => {
-                    self.throwSyntaxErrorDetail("column name,column type can not be pure number")?;
-                }
+                _ => self.throwSyntaxErrorDetail("column name,column type can not be pure number")?,
             }
         }
 
@@ -522,22 +463,16 @@ impl Parser {
     // a
     fn parseInsert(&mut self) -> Result<Command> {
         let currentElement = self.getCurrentElementAdvance()?;
-        if currentElement.expectTextLiteralContentIgnoreCase("into") == false {
+        if currentElement.expectTextLiteralContentIgnoreCaseBool("into") == false {
             self.throwSyntaxErrorDetail("insert should followed by into")?;
         }
 
         let mut insertValues = InsertValues::default();
 
-        let tableNameElement = self.getCurrentElementAdvance()?;
-        if let Element::TextLiteral(tableName) = tableNameElement {
-            insertValues.tableName = tableName.to_string();
-        } else {
-            self.throwSyntaxErrorDetail("table name should not pure number")?;
-        }
+        insertValues.tableName = self.getCurrentElementAdvance()?.expectTextLiteral("table name should not pure number")?.to_string();
 
         loop { // loop 对应下边说的猥琐套路
-            let currentElement = self.getCurrentElementAdvance()?;
-            let currentText = currentElement.expectTextLiteralOpt().map_or_else(|| { self.throwSyntaxError() }, |s| { Ok(s) })?.to_uppercase();
+            let currentText = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase();
             match currentText.as_str() {
                 "(" => { // 各column名
                     insertValues.useExplicitColumnNames = true;
@@ -546,26 +481,19 @@ impl Parser {
                         let currentElement = self.getCurrentElementAdvance()?;
 
                         // columnName都要是TextLiteral 而不是StringContent
-                        match currentElement.expectTextLiteralOpt() {
-                            Some(text) => {
-                                match text.as_str() {
-                                    global::逗号_STR => continue,
-                                    // columnName读取结束了 下边应该是values
-                                    ")" => break,
-                                    _ => insertValues.columnNames.push(text),
-                                }
-                            }
-                            None => self.throwSyntaxError()?,
+                        let text = currentElement.expectTextLiteral(global::EMPTY_STR)?;
+                        match text.as_str() {
+                            global::逗号_STR => continue,
+                            // columnName读取结束了 下边应该是values
+                            ")" => break,
+                            _ => insertValues.columnNames.push(text),
                         }
                     }
 
                     // 后边应该到下边的 case "VALUES" 那边 因为rust的match默认有break效果不会到下边的case 需要使用猥琐的套路 把它们都包裹到loop
                 }
                 "VALUES" => { // values
-                    let currentElement = self.getCurrentElementAdvance()?;
-                    if currentElement.expectTextLiteralContentIgnoreCase("(") == false {
-                        self.throwSyntaxError()?;
-                    }
+                    self.getCurrentElementAdvance()?.expectTextLiteralContent(global::括号_STR)?;
 
                     loop {
                         let currentElement = self.getCurrentElementAdvance()?;
@@ -573,7 +501,6 @@ impl Parser {
                         // columnValue 不能是TextLiteral
                         match currentElement {
                             Element::StringContent(stringContent) => {
-                                let a = *&1;
                                 insertValues.columnValues.push(ColumnValue::STRING(stringContent.to_string()));
                             }
                             Element::IntegerLiteral(int) => {
@@ -585,7 +512,7 @@ impl Parser {
                             Element::TextLiteral(text) => {
                                 match text.as_str() {
                                     global::逗号_STR => continue,
-                                    ")" => break,
+                                    global::括号1_STR => break,
                                     _ => self.throwSyntaxErrorDetail("column value should not be text literal")?,
                                 }
                             }
@@ -623,41 +550,111 @@ impl Parser {
     fn parseLink(&mut self) -> Result<Command> {
         let mut link = Link::default();
 
-        // link 后边是src table name
-        if let Some(srcTableName) = self.getCurrentElementAdvance()?.expectTextLiteralOpt() {
-            link.srcTableName = srcTableName;
-        } else {
-            self.throwSyntaxErrorDetail("link should followed by table name")?;
+        #[derive(Clone, Copy)]
+        enum ParseSrcDestState {
+            ParseSrcTableName,
+            ParseSrcTableCondition,
+            ParseDestTableName,
+            ParseDestTableCondition,
         }
 
-        match self.getCurrentElementAdvance()?.expectTextLiteral()?.to_uppercase().as_str() {
-            // 读取 src table的筛选condition
-            global::括号_STR => {
-                // 返回1个
-                self.skipElement(-1)?;
-                let expr = self.parseExpr(false)?;
-                println!("{:?}", expr);
-            }
-            // 读取是dest table name
-            "TO" => {
-                if let Some(destTableName) = self.getCurrentElementAdvance()?.expectTextLiteralOpt() {
-                    link.destTableName = destTableName;
-                } else {
-                    self.throwSyntaxErrorDetail("to should followed by dest table name when use link sql")?;
+        let mut parseSrcDestState = ParseSrcDestState::ParseSrcTableName;
+
+        loop {
+            match (parseSrcDestState, self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str()) {
+                (ParseSrcDestState::ParseSrcTableName, tableName) => {
+                    link.srcTableName = tableName.to_string();
+                    parseSrcDestState = ParseSrcDestState::ParseSrcTableCondition;
                 }
+                (ParseSrcDestState::ParseSrcTableCondition, global::括号_STR) => {
+                    // 返回1个确保当前的element是"("
+                    self.skipElement(-1)?;
+                    link.srcTableCondition = Some(self.parseExpr(false)?);
+
+                    parseSrcDestState = ParseSrcDestState::ParseDestTableName;
+                }
+                // src table的筛选条件不存在
+                (ParseSrcDestState::ParseSrcTableCondition, "TO") => {
+                    self.skipElement(-1)?;
+                    parseSrcDestState = ParseSrcDestState::ParseDestTableName;
+                }
+                (ParseSrcDestState::ParseDestTableName, "TO") => {
+                    link.destTableName = self.getCurrentElementAdvance()?.expectTextLiteral("to should followed by dest table name when use link sql")?;
+                    parseSrcDestState = ParseSrcDestState::ParseDestTableCondition;
+                }
+                (ParseSrcDestState::ParseDestTableCondition, global::括号_STR) => {
+                    self.skipElement(-1)?;
+                    link.destTableCondition = Some(self.parseExpr(false)?);
+                    break;
+                }
+                _ => self.throwSyntaxError()?,
             }
-            _ => self.throwSyntaxErrorDetail("src table should followed by filter conditions or to when use link sql")?,
         }
 
+        self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("by", "missing 'by'")?;
+
+        link.relationName = self.getCurrentElementAdvance()?.expectTextLiteral("link name")?;
+
+        // by usage (a=1,a=(1212+1)) 的 (
+        if let Some(element) = self.getCurrentElementOptionAdvance() {
+            element.expectTextLiteralContent(global::括号_STR)?;
+        } else { // 未写link的value
+            return Ok(Command::Link(link));
+        }
+
+        #[derive(Clone, Copy)]
+        enum ParseState {
+            ParseColumnName,
+            ParseEqual,
+            ParseColumnExpr,
+            A,
+        }
+
+        let mut parseState = ParseState::ParseColumnName;
+
+        // 会以")"收尾
+        let mut exprElementVec = Default::default();
+        loop {
+            let currentElement = self.getCurrentElementAdvance()?;
+
+            match (parseState, currentElement) {
+                (ParseState::ParseColumnName, Element::TextLiteral(columnName)) => {
+                    link.columnNames.push(columnName.to_string());
+                    parseState = ParseState::ParseEqual;
+                }
+                (ParseState::ParseEqual, Element::Op(Op::MathCmpOp(MathCmpOp::Equal))) => {
+                    parseState = ParseState::ParseColumnExpr;
+                }
+                (ParseState::ParseColumnExpr, currentElement) => {
+                    if currentElement.expectTextLiteralContentBool(global::逗号_STR) {
+                        let mut parser = Parser::default();
+                        parser.elementVecVec.push(exprElementVec);
+                        link.columnValues.push(parser.parseExpr(false)?);
+                        exprElementVec = Default::default();
+
+                        parseState = ParseState::ParseColumnName;
+                    } else if currentElement.expectTextLiteralContentBool(global::括号_STR) {
+
+                    } else if currentElement.expectTextLiteralContentBool(global::括号1_STR){
+
+                    } else {
+                        exprElementVec.push(currentElement.clone());
+                    }
+                }
+                _ => self.throwSyntaxError()?,
+            }
+
+            break;
+        }
+
+        println!("{:?}", link);
         Ok(Command::Link(link))
     }
 
-    /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个
-    //  ((id > 1 and level=6 and code in ('a')) and true and (name in ('a') or code = null))
-    // 当前不支持 a in ('a')
-    // 当前不支持 a = (1+0)
+    /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个 <br>
+    /// stopWhenParseRightComplete 用来应对(a>0+6),0+6未被括号保护,不然的话会解析成  (a>1)+6
     fn parseExpr(&mut self, stopWhenParseRightComplete: bool) -> Result<Expr> {
-        if self.getCurrentElement()?.expectTextLiteralContent(global::括号_STR) {
+        if self.getCurrentElement()?.expectTextLiteralContentBool(global::括号_STR) {
             self.skipElement(1)?;
         }
 
@@ -674,17 +671,13 @@ impl Parser {
 
         loop {
             let currentElement = match self.getCurrentElementOptionAdvance() {
-                None => {
-                    break;
-                }
-                Some(currentElement) => {
-                    currentElement.clone()
-                }
+                None => break,
+                Some(currentElement) => currentElement.clone(),
             };
 
             match parseCondState {
                 ParseCondState::ParsingLeft => {
-                    if currentElement.expectTextLiteralContent(global::括号_STR) {
+                    if currentElement.expectTextLiteralContentBool(global::括号_STR) {
                         self.skipElement(-1)?;
                         expr = self.parseExpr(false)?;
                         parseCondState = ParseCondState::ParsingOp;
@@ -697,21 +690,18 @@ impl Parser {
                 }
                 ParseCondState::ParsingOp => {
                     if let Element::Op(op) = currentElement {
-                        if let Expr::Single(_) = expr {
-                            expr = Expr::BiDirection {
-                                left: Box::new(expr),
-                                op,
-                                right: Default::default(),
-                            }
+                        expr = Expr::BiDirection {
+                            left: Box::new(expr),
+                            op,
+                            right: Default::default(),
                         }
                     } else {
-                        // 上步parseLeft得到的是true false,那么应该跳到ParseRightComplete
-                        //  if let Expr::Single(Element::Boolean(_)) = expr {
-                        //      parseCondState = ParseCondState::ParseRightComplete;
-                        //      continue;
-                        // } else {
+                        // 应对 (((a = 1)))  因为递归结束后返回到上1级的时候currentElement是")"
+                        if currentElement.expectTextLiteralContentBool(global::括号1_STR) {
+                            break;
+                        }
+
                         self.throwSyntaxError()?;
-                        // }
                     }
 
                     parseCondState = ParseCondState::ParsingRight;
@@ -731,8 +721,18 @@ impl Parser {
                                 // 说明是 "... in ( ..." 这样的,括号对应的便不是单个expr而是多个expr
                                 if let Element::Op(Op::SqlOp(SqlOp::In)) = previousElement {
                                     self.skipElement(-1)?;
-                                    println!("{:?}", self.parseInExprs()?);
-                                } else if let Element::Op(op) = previousElement { // 前边是 op
+
+                                    // 得要BiDirection
+                                    if let Expr::BiDirection { left, op, .. } = expr {
+                                        expr = Expr::BiDirection {
+                                            left,
+                                            op,
+                                            right: self.parseInExprs()?.into_iter().map(|expr| { Box::new(expr) }).collect(),
+                                        }
+                                    } else {
+                                        self.throwSyntaxError()?;
+                                    }
+                                } else if let Element::Op(_) = previousElement { // 前边是别的op
                                     self.skipElement(-1)?;
 
                                     // 递归
@@ -748,12 +748,12 @@ impl Parser {
                                     } else {
                                         self.throwSyntaxError()?;
                                     }
-
-                                    parseCondState = ParseCondState::ParseRightComplete;
-                                    continue;
                                 } else {
                                     self.throwSyntaxError()?;
                                 }
+
+                                parseCondState = ParseCondState::ParseRightComplete;
+                                continue;
                             }
                         }
                         _ => {}
@@ -800,7 +800,7 @@ impl Parser {
                                 }
                                 // a>0+6 and b=0 的 "+",当前的expr是a>0,需要打破现有的expr
                                 Op::MathCalcOp(_) => {
-                                    if let Expr::BiDirection { left, op, right } = expr {
+                                    if let Expr::BiDirection { left, op, .. } = expr {
                                         // 需要先回到0+6的起始index
                                         self.skipElement(-2)?;
 
@@ -843,13 +843,11 @@ impl Parser {
         Ok(expr)
     }
 
+    /// 单独的函数解析 a in (0,0+6,0+(a+1),)的in后边的括号包含的用","分隔的多个expr
     // 单独的生成小的parser,element只包含expr的
-    // 如何应对 a in (0,0+6,0+(a+1),)
     fn parseInExprs(&mut self) -> Result<Vec<Expr>> {
         // 要以(打头
-        if self.getCurrentElement()?.expectTextLiteralContent(global::括号_STR) == false {
-            self.throwSyntaxError()?;
-        }
+        self.getCurrentElement()?.expectTextLiteralContent(global::括号_STR)?;
 
         let mut 括号count = 0;
         let mut 括号1count = 0;
@@ -875,25 +873,24 @@ impl Parser {
 
                             // 说明括号已然收敛了
                             if prefix_plus_plus!(括号1count) == 括号count {
+                                // pending的不要忘了
+                                let mut exprParser = Parser::default();
+                                exprParser.elementVecVec.push(pendingElementVec);
+                                exprParserVec.push(exprParser);
+                                pendingElementVec = Vec::new();
                                 break;
                             }
                         }
                         global::逗号_STR => {
                             let mut exprParser = Parser::default();
                             exprParser.elementVecVec.push(pendingElementVec);
-
                             exprParserVec.push(exprParser);
-
                             pendingElementVec = Vec::new();
                         }
-                        _ => {
-                            pendingElementVec.push(currentElement.clone());
-                        }
+                        _ => pendingElementVec.push(currentElement.clone()),
                     }
                 }
-                _ => {
-                    pendingElementVec.push(currentElement.clone());
-                }
+                _ => pendingElementVec.push(currentElement.clone()),
             }
         }
 
@@ -975,13 +972,11 @@ impl Parser {
         let chars: Vec<char> = name.chars().collect();
 
         // 打头得要字母
-        let firstCharCorrect = match chars[0] {
+        match chars[0] {
             'a'..='z' => {}
             'A'..='Z' => {}
-            _ => {
-                self.throwSyntaxErrorDetail("table,column name should start with letter")?;
-            }
-        };
+            _ => self.throwSyntaxErrorDetail("table,column name should start with letter")?,
+        }
 
         if name.len() == 1 {
             return Ok(());
@@ -992,9 +987,7 @@ impl Parser {
                 'a'..='z' => {}
                 'A'..='Z' => {}
                 '0'..='9' => {}
-                _ => {
-                    self.throwSyntaxErrorDetail("table,column name should only contain letter , number")?;
-                }
+                _ => self.throwSyntaxErrorDetail("table,column name should only contain letter , number")?,
             }
         }
 
@@ -1024,15 +1017,23 @@ impl Element {
         }
     }
 
-    fn expectTextLiteral(&self) -> Result<String> {
-        if let Element::TextLiteral(text) = self {
+    fn expectTextLiteral(&self, errorStr: &str) -> Result<String> {
+        if let Some(text) = self.expectTextLiteralOpt() {
             Ok(text.to_string())
         } else {
-            throw!(&format!("expect Element::TextLiteral but got {:?}", self))
+            throw!(&format!("expect Element::TextLiteral but get {:?}, {}", self, errorStr))
         }
     }
 
-    fn expectTextLiteralContent(&self, expectContent: &str) -> bool {
+    fn expectTextLiteralContent(&self, expectContent: &str) -> Result<()> {
+        if self.expectTextLiteralContentBool(expectContent) {
+            Ok(())
+        } else {
+            throw!(&format!("expect Element::TextLiteral({}) but get {:?}", expectContent, self))
+        }
+    }
+
+    fn expectTextLiteralContentBool(&self, expectContent: &str) -> bool {
         if let Element::TextLiteral(content) = self {
             content == expectContent
         } else {
@@ -1040,7 +1041,7 @@ impl Element {
         }
     }
 
-    fn expectTextLiteralContentIgnoreCase(&self, expectContent: &str) -> bool {
+    fn expectTextLiteralContentIgnoreCaseBool(&self, expectContent: &str) -> bool {
         if let Element::TextLiteral(content) = self {
             let expectContent = expectContent.to_uppercase();
             let content = content.to_uppercase();
@@ -1048,6 +1049,14 @@ impl Element {
             expectContent == content
         } else {
             false
+        }
+    }
+
+    fn expectTextLiteralContentIgnoreCase(&self, expectContent: &str, errorStr: &str) -> Result<()> {
+        if self.expectTextLiteralContentIgnoreCaseBool(expectContent) {
+            Ok(())
+        } else {
+            throw!(errorStr)
         }
     }
 }
@@ -1140,6 +1149,23 @@ impl From<&str> for MathCmpOp {
     }
 }
 
+/// "a".parse::<MathCmpOp>()用的
+impl FromStr for MathCmpOp {
+    type Err = GraphError;
+
+    fn from_str(str: &str) -> std::result::Result<Self, Self::Err> {
+        match str {
+            global::等号_STR => Ok(MathCmpOp::Equal),
+            global::小于_STR => Ok(MathCmpOp::LessThan),
+            global::大于_STR => Ok(MathCmpOp::GreaterThan),
+            global::小于等于_STR => Ok(MathCmpOp::LessEqual),
+            global::大于等于_STR => Ok(MathCmpOp::GreaterEqual),
+            global::不等_STR => Ok(MathCmpOp::NotEqual),
+            _ => throw!(&format!("unknown math cmp op :{}",str)),
+        }
+    }
+}
+
 #[derive(DisplayStrum, Clone, Debug)]
 pub enum LogicalOp {
     And,
@@ -1188,7 +1214,7 @@ impl From<char> for MathCalcOp {
 }
 
 /// link user(id = 1) to car(color = 'red') by usage(number = 2)
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Link {
     pub srcTableName: String,
     pub srcTableCondition: Option<Expr>,
@@ -1198,10 +1224,9 @@ pub struct Link {
 
     pub relationName: String,
     pub columnNames: Vec<String>,
-    pub columnValues: Vec<ColumnValue>,
+    pub columnValues: Vec<Expr>,
 }
 
-// ((a=1 and b=0)or(c=3 and d=6) and m ='0')
 // 碰到"(" 下钻递归,返回后落地到上级的left right
 #[derive(Debug)]
 pub enum Expr {
@@ -1229,7 +1254,7 @@ mod test {
 
     #[test]
     pub fn testParseCreateTable() {
-        let command = parser::parse("CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)").unwrap();
+        parser::parse("CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)").unwrap();
     }
 
     #[test]
@@ -1239,11 +1264,16 @@ mod test {
     }
 
     #[test]
-    pub fn testLink() { // where a = 1+1 and b='a'
+    pub fn testLink() {
         // "link user(id > 1 and ( name = 'a' or code = 6)) to car (color='red') by usage(number = 13)"
         // parser::parse("link user(id > 1 and ( name = 'a' or code = (1 + 0) and true))").unwrap();
         // parser::parse("link user (a>0+6+1>a)").unwrap();
-        parser::parse("link user (a in (0,0+6,0+(a+1),))").unwrap();
+        // parser::parse("link user (a in (0,0+6,0+(a+1),))").unwrap();
+        // parser::parse(" a = 1+0 and b='a'").unwrap();
+        // parser::parse("link user ((a = 1) = true)").unwrap();
+        // parser::parse("link user (((a = 1)) = true)").unwrap();
+        // parser::parse("link user ( a in (a,b,d))").unwrap();
+        parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true))").unwrap();
     }
 }
 

@@ -1,6 +1,9 @@
 use std::fmt::{Display, Formatter};
 use std::fs::File;
+use std::str::FromStr;
 use serde::{Deserialize, Serialize};
+use crate::graph_error::GraphError;
+use crate::throw;
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Table {
@@ -8,7 +11,7 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub type0: TableType,
     #[serde(skip_serializing, skip_deserializing)]
-    pub dataFile:Option<File>,
+    pub dataFile: Option<File>,
 
 }
 
@@ -31,6 +34,18 @@ impl From<&str> for TableType {
             "TABLE" => TableType::TABLE,
             "RELATION" => TableType::RELATION,
             _ => TableType::UNKNOWN
+        }
+    }
+}
+
+impl FromStr for TableType {
+    type Err = GraphError;
+
+    fn from_str(str: &str) -> Result<Self, Self::Err> {
+        match str.to_uppercase().as_str() {
+            "TABLE" => Ok(TableType::TABLE),
+            "RELATION" => Ok(TableType::RELATION),
+            _ => throw!(&format!("unknown type:{}", str)),
         }
     }
 }
@@ -110,7 +125,7 @@ impl Display for ColumnType {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum ColumnValue {
     STRING(String),
     INTEGER(i64),

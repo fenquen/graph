@@ -64,7 +64,7 @@ fn init() -> Result<()> {
 
 fn rebuildTables() -> Result<()> {
     unsafe {
-        let mut tableRecordFile = global::TABLE_RECORD_FILE.as_ref().unwrap().read().unwrap();
+        let tableRecordFile = global::TABLE_RECORD_FILE.as_ref().unwrap().read().unwrap();
 
         let bufReader = BufReader::new(&*tableRecordFile);
 
