@@ -1,7 +1,8 @@
-use std::fs::File;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
+use tokio::fs::File;
+use tokio::sync::RwLock;
 use crate::meta::Table;
 
 

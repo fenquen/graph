@@ -379,7 +379,7 @@ impl Parser {
     // CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)
     fn parseCreate(&mut self) -> Result<Command> {
         // 不是table便是relation
-        let tableType = self.getCurrentElement()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str().parse()?;
+        let tableType = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str().parse()?;
         self.parseCreateTable(tableType)
     }
 

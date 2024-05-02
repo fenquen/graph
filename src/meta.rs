@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
-use std::fs::File;
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
+use tokio::fs::File;
 use crate::graph_error::GraphError;
 use crate::throw;
 

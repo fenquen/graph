@@ -1,16 +1,15 @@
 use std::cell::UnsafeCell;
 use std::path::Path;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
 use crate::config::CONFIG;
 use crate::{global, throw};
 use crate::meta::{Column, Table, TableType};
-use crate::parser::InsertValues;
+use crate::parser::{InsertValues, Link};
 use anyhow::Result;
 use serde_json::{json, Value};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::AsyncWriteExt;
 
-
-pub fn createTable(mut table: Table, restore: bool) -> Result<()> {
+pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     let dataDirPath: &Path = CONFIG.dataDir.as_ref();
 
     // 表对应的data 文件
@@ -25,20 +24,20 @@ pub fn createTable(mut table: Table, restore: bool) -> Result<()> {
             throw!(&format!("data file of table:{} has already exist", table.name));
         }
 
-        File::create(tableDataFilePath)?;
+        File::create(tableDataFilePath).await?;
     }
 
     // table_record 文件
     if restore == false {
         let jsonString = serde_json::to_string(&table)?;
         unsafe {
-            let mut tableRecordFile = global::TABLE_RECORD_FILE.as_ref().unwrap().write().unwrap();
-            tableRecordFile.write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref())
-        }?;
+            let mut tableRecordFile = global::TABLE_RECORD_FILE.as_ref().unwrap().write().await;
+            tableRecordFile.write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?
+        };
     }
 
     let dataDirPath: &Path = CONFIG.dataDir.as_ref();
-    let tableDataFile = OpenOptions::new().write(true).read(true).create(true).open(dataDirPath.join(table.name.as_str()))?;
+    let tableDataFile = OpenOptions::new().write(true).read(true).create(true).open(dataDirPath.join(table.name.as_str())).await?;
     table.dataFile = Some(tableDataFile);
 
     // map
@@ -47,7 +46,7 @@ pub fn createTable(mut table: Table, restore: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn insertValues(insertValues: &InsertValues) -> Result<()> {
+pub async fn insertValues(insertValues: &InsertValues) -> Result<()> {
     // 对应的表是不是exist
     let option = global::TABLE_NAME_TABLE.get_mut(&insertValues.tableName);
     if option.is_none() {
@@ -90,7 +89,7 @@ pub fn insertValues(insertValues: &InsertValues) -> Result<()> {
     };
 
     // 确保column数量和value数量相同
-    if columns.len()!=insertValues.columnValues.len() {
+    if columns.len() != insertValues.columnValues.len() {
         throw!("column count does not match value count");
     }
 
@@ -109,8 +108,12 @@ pub fn insertValues(insertValues: &InsertValues) -> Result<()> {
     }
 
     let jsonString = serde_json::to_string(&rowData)?;
-    table.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref())?;
+    table.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?;
 
+    Ok(())
+}
+
+pub async fn link(link: &Link) -> Result<()> {
     Ok(())
 }
 
