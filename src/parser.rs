@@ -424,12 +424,7 @@ impl Parser {
                             readColumnState = ReadColumnState::ReadColumnType;
                         }
                         ReadColumnState::ReadColumnType => {
-                            let columnType = ColumnType::from(text.to_uppercase().as_str());
-                            match columnType {
-                                ColumnType::UNKNOWN => self.throwSyntaxErrorDetail(&format!("unknown column type:{}", text))?,
-                                _ => column.type0 = columnType,
-                            }
-
+                            column.type0 = text.as_str().parse()?;
                             readColumnState = ReadColumnState::ReadComplete;
                         }
                         ReadColumnState::ReadComplete => {
@@ -596,8 +591,12 @@ impl Parser {
         link.relationName = self.getCurrentElementAdvance()?.expectTextLiteral("relation name")?;
 
         // 下边要解析 by usage (a=0,a=(1212+0))的后边的括号部分了
-        if let Some(element) = self.getCurrentElementOptionAdvance() {
-            element.expectTextLiteralContent(global::括号_STR)?;
+        // 和parseInExprs使用相同的套路,当(数量和)数量相同的时候说明收敛结束了,因为会以")"收尾
+        let mut 括号数量 = 0;
+        let mut 括号1数量 = 0;
+        if let Some(currentElement) = self.getCurrentElementOptionAdvance() {
+            currentElement.expectTextLiteralContent(global::括号_STR)?;
+            suffix_plus_plus!(括号数量);
         } else { // 未写link的value
             return Ok(Command::Link(link));
         }
@@ -611,20 +610,17 @@ impl Parser {
         }
 
         let mut parseState = ParseState::ParseColumnName;
-
-        // 和parseInExprs使用相同的套路,当(数量和)数量相同的时候说明结束了
-        let mut 括号数量 = 0;
-        let mut 括号1数量 = 0;
-
-        // 会以")"收尾
         let mut exprElementVec = Default::default();
         loop {
-            break;
-            let currentElement = self.getCurrentElementAdvance()?;
+            let currentElement =
+                match self.getCurrentElementOptionAdvance() {
+                    Some(currentElement) => currentElement,
+                    None => break,
+                };
 
             match (parseState, currentElement) {
                 (ParseState::ParseColumnName, Element::TextLiteral(columnName)) => {
-                    link.columnNames.push(columnName.to_string());
+                    link.relationColumnNames.push(columnName.to_string());
                     parseState = ParseState::ParseEqual;
                 }
                 (ParseState::ParseEqual, Element::Op(Op::MathCmpOp(MathCmpOp::Equal))) => {
@@ -635,7 +631,7 @@ impl Parser {
                     if currentElement.expectTextLiteralContentBool(global::逗号_STR) {
                         let mut parser = Parser::default();
                         parser.elementVecVec.push(exprElementVec);
-                        link.columnValues.push(parser.parseExpr(false)?);
+                        link.relationColumnValues.push(parser.parseExpr(false)?);
                         exprElementVec = Default::default();
 
                         // 到下轮的parseColumnName
@@ -644,15 +640,15 @@ impl Parser {
                     }
 
                     if currentElement.expectTextLiteralContentBool(global::括号_STR) {
-                        括号数量 = 括号数量 + 1;
+                        suffix_plus_plus!(括号数量);
                     } else if currentElement.expectTextLiteralContentBool(global::括号1_STR) {
-                        括号1数量 = 括号1数量 + 1;
+                        suffix_plus_plus!(括号1数量);
 
                         // 说明到了last的)
                         if 括号数量 == 括号1数量 {
                             let mut parser = Parser::default();
                             parser.elementVecVec.push(exprElementVec);
-                            link.columnValues.push(parser.parseExpr(false)?);
+                            link.relationColumnValues.push(parser.parseExpr(false)?);
                             exprElementVec = Default::default();
                             break;
                         }
@@ -664,13 +660,20 @@ impl Parser {
             }
         }
 
+        // relation的name和value数量要相同
+        if link.relationColumnNames.len() != link.relationColumnValues.len() {
+            self.throwSyntaxErrorDetail("relation name count does not match value count")?;
+        }
+
         println!("{:?}", link);
+
         Ok(Command::Link(link))
     }
 
     /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个 <br>
     /// stopWhenParseRightComplete 用来应对(a>0+6),0+6未被括号保护,不然的话会解析成  (a>1)+6
     fn parseExpr(&mut self, stopWhenParseRightComplete: bool) -> Result<Expr> {
+        // 像 a = 0+1 的 0+1 是没有用括号保护起来的 需要有这样的标识的
         let mut hasLeading括号 = false;
 
         if self.getCurrentElement()?.expectTextLiteralContentBool(global::括号_STR) {
@@ -803,6 +806,7 @@ impl Parser {
 
                     match currentElement {
                         Element::TextLiteral(text) => {
+                            // 要是不是以(打头的话,那么到这没有必要继续了
                             if hasLeading括号 == false {
                                 self.skipElement(-1)?;
                                 break;
@@ -819,13 +823,14 @@ impl Parser {
                                 // 它是之前能应对的情况 a = 1 and b= 0 的 and
                                 // (a and b or d) 会解析变成 a and (b or d) 不对 应该是 (a and b) or d
                                 Op::LogicalOp(_) => {
-                                    let a = self.getCurrentElement()?.expectTextLiteralContentBool(global::括号_STR);
+                                    // getCurrentElement()其实已是下个了
+                                    let nextElementIs括号 = self.getCurrentElement()?.expectTextLiteralContentBool(global::括号_STR);
 
                                     expr = Expr::BiDirection {
                                         left: Box::new(expr),
                                         op,
                                         // 需要递归下钻
-                                        right: vec![Box::new(self.parseExpr(!a)?)],
+                                        right: vec![Box::new(self.parseExpr(!nextElementIs括号)?)],
                                     };
                                     // (m and (a = 0 and (b = 1))) 这个时候解析到的是1后边的那个")"而已 还有")"残留
                                     // (a=0 and (b=1) and 1 or 0)
@@ -847,8 +852,6 @@ impl Parser {
 
                                         parseCondState = ParseCondState::ParseRightComplete;
                                         continue;
-                                    } else {
-                                        self.throwSyntaxError()?;
                                     }
                                 }
                                 // 0+6>a and b=0的 ">" 当前的expr是0+6
@@ -1266,8 +1269,8 @@ pub struct Link {
     pub destTableCondition: Option<Expr>,
 
     pub relationName: String,
-    pub columnNames: Vec<String>,
-    pub columnValues: Vec<Expr>,
+    pub relationColumnNames: Vec<String>,
+    pub relationColumnValues: Vec<Expr>,
 }
 
 // 碰到"(" 下钻递归,返回后落地到上级的left right

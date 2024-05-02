@@ -12,7 +12,6 @@ pub struct Table {
     pub type0: TableType,
     #[serde(skip_serializing, skip_deserializing)]
     pub dataFile: Option<File>,
-
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -70,17 +69,6 @@ impl Default for ColumnType {
     }
 }
 
-impl From<&str> for ColumnType {
-    fn from(value: &str) -> Self {
-        match value.to_uppercase().as_str() {
-            "STRING" => ColumnType::STRING,
-            "INTEGER" => ColumnType::INTEGER,
-            "DECIMAL" => ColumnType::DECIMAL,
-            _ => ColumnType::UNKNOWN
-        }
-    }
-}
-
 impl ColumnType {
     pub fn compatible(&self, columnValue: &ColumnValue) -> bool {
         match self {
@@ -106,21 +94,37 @@ impl ColumnType {
     }
 }
 
+impl From<&str> for ColumnType {
+    fn from(value: &str) -> Self {
+        match value.to_uppercase().as_str() {
+            "STRING" => ColumnType::STRING,
+            "INTEGER" => ColumnType::INTEGER,
+            "DECIMAL" => ColumnType::DECIMAL,
+            _ => ColumnType::UNKNOWN
+        }
+    }
+}
+
+impl FromStr for ColumnType {
+    type Err = GraphError;
+
+    fn from_str(str: &str) -> Result<Self, Self::Err> {
+        match str.to_uppercase().as_str() {
+            "STRING" => Ok(ColumnType::STRING),
+            "INTEGER" => Ok(ColumnType::INTEGER),
+            "DECIMAL" => Ok(ColumnType::DECIMAL),
+            _ => throw!(&format!("unknown type:{}", str))
+        }
+    }
+}
+
 impl Display for ColumnType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ColumnType::STRING => {
-                write!(f, "STRING")
-            }
-            ColumnType::INTEGER => {
-                write!(f, "INTEGER")
-            }
-            ColumnType::DECIMAL => {
-                write!(f, "DECIMAL")
-            }
-            _ => {
-                write!(f, "UNKNOWN")
-            }
+            ColumnType::STRING => write!(f, "STRING"),
+            ColumnType::INTEGER => write!(f, "INTEGER"),
+            ColumnType::DECIMAL => write!(f, "DECIMAL"),
+            _ => write!(f, "UNKNOWN"),
         }
     }
 }
@@ -135,15 +139,9 @@ pub enum ColumnValue {
 impl Display for ColumnValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ColumnValue::STRING(s) => {
-                write!(f, "STRING({})", s)
-            }
-            ColumnValue::INTEGER(s) => {
-                write!(f, "INTEGER({})", s)
-            }
-            ColumnValue::DECIMAL(s) => {
-                write!(f, "DECIMAL({})", s)
-            }
+            ColumnValue::STRING(s) => write!(f, "STRING({})", s),
+            ColumnValue::INTEGER(s) => write!(f, "INTEGER({})", s),
+            ColumnValue::DECIMAL(s) => write!(f, "DECIMAL({})", s),
         }
     }
 }
