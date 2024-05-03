@@ -5,7 +5,6 @@ use tokio::fs::File;
 use tokio::sync::RwLock;
 use crate::meta::Table;
 
-
 pub static mut TABLE_RECORD_FILE: Option<Arc<RwLock<File>>> = None;
 
 lazy_static! {

@@ -18,12 +18,12 @@ pub struct Table {
 pub enum TableType {
     TABLE,
     RELATION,
-    UNKNOWN,
+    Unknown,
 }
 
 impl Default for TableType {
     fn default() -> Self {
-        TableType::UNKNOWN
+        TableType::Unknown
     }
 }
 
@@ -32,7 +32,7 @@ impl From<&str> for TableType {
         match value.to_uppercase().as_str() {
             "TABLE" => TableType::TABLE,
             "RELATION" => TableType::RELATION,
-            _ => TableType::UNKNOWN
+            _ => TableType::Unknown
         }
     }
 }
@@ -70,20 +70,20 @@ impl Default for ColumnType {
 }
 
 impl ColumnType {
-    pub fn compatible(&self, columnValue: &ColumnValue) -> bool {
+    pub fn compatible(&self, columnValue: &Value) -> bool {
         match self {
             ColumnType::STRING => {
-                if let ColumnValue::STRING(_) = columnValue {
+                if let Value::STRING(_) = columnValue {
                     return true;
                 }
             }
             ColumnType::INTEGER => {
-                if let ColumnValue::INTEGER(_) = columnValue {
+                if let Value::INTEGER(_) = columnValue {
                     return true;
                 }
             }
             ColumnType::DECIMAL => {
-                if let ColumnValue::DECIMAL(_) = columnValue {
+                if let Value::DECIMAL(_) = columnValue {
                     return true;
                 }
             }
@@ -130,36 +130,36 @@ impl Display for ColumnType {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum ColumnValue {
+pub enum Value {
     STRING(String),
     INTEGER(i64),
     DECIMAL(f64),
 }
 
-impl Display for ColumnValue {
+impl Display for Value {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ColumnValue::STRING(s) => write!(f, "STRING({})", s),
-            ColumnValue::INTEGER(s) => write!(f, "INTEGER({})", s),
-            ColumnValue::DECIMAL(s) => write!(f, "DECIMAL({})", s),
+            Value::STRING(s) => write!(f, "STRING({})", s),
+            Value::INTEGER(s) => write!(f, "INTEGER({})", s),
+            Value::DECIMAL(s) => write!(f, "DECIMAL({})", s),
         }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::meta::ColumnValue;
+    use crate::meta::Value;
 
     #[test]
     pub fn testSerialEnum() {
-        let a = ColumnValue::STRING("s".to_string());
+        let a = Value::STRING("s".to_string());
         println!("{}", serde_json::to_string(&a).unwrap());
     }
 
     #[test]
     pub fn testDeserialEnum() {
-        let columnValue: ColumnValue = serde_json::from_str("{\"STRING\":\"s\"}").unwrap();
-        if let ColumnValue::STRING(s) = columnValue {
+        let columnValue: Value = serde_json::from_str("{\"STRING\":\"s\"}").unwrap();
+        if let Value::STRING(s) = columnValue {
             println!("{}", s);
         }
     }

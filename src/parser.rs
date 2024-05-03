@@ -5,8 +5,9 @@ use crate::{global, prefix_plus_plus, suffix_minus_minus, suffix_plus_plus, thro
 use anyhow::Result;
 use lazy_static::lazy_static;
 use strum_macros::{Display as DisplayStrum, Display, EnumString};
+use crate::expr::Expr;
 use crate::graph_error::GraphError;
-use crate::meta::{Column, ColumnType, Table, TableType, ColumnValue};
+use crate::meta::{Column, ColumnType, Table, TableType, Value};
 
 pub fn parse(sql: &str) -> Result<Vec<Command>> {
     let mut parser = Parser::new(sql);
@@ -30,7 +31,7 @@ pub enum Command {
     Insert(InsertValues),
     Link(Link),
     SELECT,
-    UNKNOWN,
+    Unknown,
 }
 
 #[derive(Default)]
@@ -496,13 +497,13 @@ impl Parser {
                         // columnValue 不能是TextLiteral
                         match currentElement {
                             Element::StringContent(stringContent) => {
-                                insertValues.columnValues.push(ColumnValue::STRING(stringContent.to_string()));
+                                insertValues.columnValues.push(Value::STRING(stringContent.to_string()));
                             }
                             Element::IntegerLiteral(int) => {
-                                insertValues.columnValues.push(ColumnValue::INTEGER(*int));
+                                insertValues.columnValues.push(Value::INTEGER(*int));
                             }
                             Element::DecimalLiteral(decimal) => {
-                                insertValues.columnValues.push(ColumnValue::DECIMAL(*decimal));
+                                insertValues.columnValues.push(Value::DECIMAL(*decimal));
                             }
                             Element::TextLiteral(text) => {
                                 match text.as_str() {
@@ -564,7 +565,7 @@ impl Parser {
                 (ParseSrcDestState::ParseSrcTableCondition, global::括号_STR) => {
                     // 返回1个确保当前的element是"("
                     self.skipElement(-1)?;
-                    link.srcTableCondition = Some(self.parseExpr(false)?);
+                    link.srcTableFilterExpr = Some(self.parseExpr(false)?);
 
                     parseSrcDestState = ParseSrcDestState::ParseDestTableName;
                 }
@@ -579,7 +580,7 @@ impl Parser {
                 }
                 (ParseSrcDestState::ParseDestTableCondition, global::括号_STR) => {
                     self.skipElement(-1)?;
-                    link.destTableCondition = Some(self.parseExpr(false)?);
+                    link.destTableFilterExpr = Some(self.parseExpr(false)?);
                     break;
                 }
                 _ => self.throwSyntaxError()?,
@@ -1139,7 +1140,7 @@ pub struct InsertValues {
     /// insert into table (column) values ('a')
     pub useExplicitColumnNames: bool,
     pub columnNames: Vec<String>,
-    pub columnValues: Vec<ColumnValue>,
+    pub columnValues: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -1263,32 +1264,14 @@ impl From<char> for MathCalcOp {
 #[derive(Default, Debug)]
 pub struct Link {
     pub srcTableName: String,
-    pub srcTableCondition: Option<Expr>,
+    pub srcTableFilterExpr: Option<Expr>,
 
     pub destTableName: String,
-    pub destTableCondition: Option<Expr>,
+    pub destTableFilterExpr: Option<Expr>,
 
     pub relationName: String,
     pub relationColumnNames: Vec<String>,
     pub relationColumnValues: Vec<Expr>,
-}
-
-// 碰到"(" 下钻递归,返回后落地到上级的left right
-#[derive(Debug)]
-pub enum Expr {
-    Single(Element),
-    BiDirection {
-        left: Box<Expr>,
-        op: Op,
-        right: Vec<Box<Expr>>,
-    },
-    None,
-}
-
-impl Default for Expr {
-    fn default() -> Self {
-        Expr::None
-    }
 }
 
 // ------------------------------------------------------------------------------------------

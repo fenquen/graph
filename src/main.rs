@@ -8,6 +8,8 @@ mod global;
 mod parser;
 mod meta;
 mod executor;
+mod a;
+mod expr;
 
 use std::path::Path;
 use std::string::ToString;
@@ -22,7 +24,6 @@ use tokio::sync::RwLock;
 use meta::Table;
 use crate::config::CONFIG;
 use crate::parser::{Command, Parser};
-
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
