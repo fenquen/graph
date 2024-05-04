@@ -798,12 +798,6 @@ impl Parser {
                     parseCondState = ParseCondState::ParseRightComplete;
                 }
                 ParseCondState::ParseRightComplete => {
-                    if stopWhenParseRightComplete {
-                        // 不要遗忘
-                        self.skipElement(-1)?;
-                        break;
-                    }
-
                     match currentElement {
                         Element::TextLiteral(text) => {
                             // 要是不是以(打头的话,那么到这没有必要继续了
@@ -825,6 +819,12 @@ impl Parser {
                                 // 它是之前能应对的情况 a = 1 and b= 0 的 and
                                 // (a and b or d) 会解析变成 a and (b or d) 不对 应该是 (a and b) or d
                                 Op::LogicalOp(_) => {
+                                    if stopWhenParseRightComplete {
+                                        // 不要遗忘
+                                        self.skipElement(-1)?;
+                                        break;
+                                    }
+
                                     // getCurrentElement()其实已是下个了
                                     let nextElementIs括号 = self.getCurrentElement()?.expectTextLiteralContentBool(global::括号_STR);
 
