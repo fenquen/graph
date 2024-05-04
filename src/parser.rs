@@ -159,6 +159,7 @@ impl Parser {
                                 vec![currentChar].iter().collect()
                             };
 
+                        // parse内部调用的还是MathCmpOp::from_str
                         let mathCmpOp = operatorString.as_str().parse()?;
 
                         // 需要了断 pendingChars
@@ -172,10 +173,7 @@ impl Parser {
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
                     } else {
-                        let mathCalcOp = MathCalcOp::from(currentChar);
-                        if let MathCalcOp::Unknown = mathCalcOp {
-                            self.throwSyntaxErrorDetail(&format!("unknown math calc operator:{}", currentChar))?;
-                        }
+                        let mathCalcOp = MathCalcOp::fromChar(currentChar)?;
 
                         // 需要了断 pendingChars
                         self.collectPendingChars(&mut currentElementVec);
@@ -631,7 +629,7 @@ impl Parser {
                     if currentElement.expectTextLiteralContentBool(global::逗号_STR) {
                         let mut parser = Parser::default();
                         parser.elementVecVec.push(exprElementVec);
-                        link.relationColumnValues.push(parser.parseExpr(false)?);
+                        link.relationColumnExprs.push(parser.parseExpr(false)?);
                         exprElementVec = Default::default();
 
                         // 到下轮的parseColumnName
@@ -648,7 +646,7 @@ impl Parser {
                         if 括号数量 == 括号1数量 {
                             let mut parser = Parser::default();
                             parser.elementVecVec.push(exprElementVec);
-                            link.relationColumnValues.push(parser.parseExpr(false)?);
+                            link.relationColumnExprs.push(parser.parseExpr(false)?);
                             exprElementVec = Default::default();
                             break;
                         }
@@ -661,7 +659,7 @@ impl Parser {
         }
 
         // relation的name和value数量要相同
-        if link.relationColumnNames.len() != link.relationColumnValues.len() {
+        if link.relationColumnNames.len() != link.relationColumnExprs.len() {
             self.throwSyntaxErrorDetail("relation name count does not match value count")?;
         }
 
@@ -1149,7 +1147,6 @@ pub enum Op {
     MathCmpOp(MathCmpOp),
     SqlOp(SqlOp),
     LogicalOp(LogicalOp),
-    Unknown,
     MathCalcOp(MathCalcOp),
 }
 
@@ -1160,14 +1157,7 @@ impl Display for Op {
             Op::LogicalOp(s) => write!(f, "LogicalOp({})", s),
             Op::SqlOp(s) => write!(f, "SqlOp({})", s),
             Op::MathCalcOp(mathCalcOp) => write!(f, "MathCalcOp({})", mathCalcOp),
-            _ => write!(f, "Unknown"),
         }
-    }
-}
-
-impl Default for Op {
-    fn default() -> Self {
-        Op::Unknown
     }
 }
 
@@ -1216,31 +1206,16 @@ pub enum MathCalcOp {
     Divide,
     Multiply,
     Minus,
-    Unknown,
 }
 
-impl FromStr for MathCalcOp {
-    type Err = GraphError;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "+" => Ok(MathCalcOp::Plus),
-            "/" => Ok(MathCalcOp::Divide),
-            "*" => Ok(MathCalcOp::Multiply),
-            "-" => Ok(MathCalcOp::Minus),
-            _ => throw!(&format!("unknown math compare operator:{}",s))
-        }
-    }
-}
-
-impl From<char> for MathCalcOp {
-    fn from(char: char) -> Self {
+impl MathCalcOp {
+    pub fn fromChar(char: char) -> Result<Self> {
         match char {
-            '+' => MathCalcOp::Plus,
-            '/' => MathCalcOp::Divide,
-            '*' => MathCalcOp::Multiply,
-            '-' => MathCalcOp::Minus,
-            _ => MathCalcOp::Unknown,
+            '+' => Ok(MathCalcOp::Plus),
+            '/' => Ok(MathCalcOp::Divide),
+            '*' => Ok(MathCalcOp::Multiply),
+            '-' => Ok(MathCalcOp::Minus),
+            _ => throw!(&format!("unknown math calc operator:{char}"))
         }
     }
 }
@@ -1256,7 +1231,7 @@ pub struct Link {
 
     pub relationName: String,
     pub relationColumnNames: Vec<String>,
-    pub relationColumnValues: Vec<Expr>,
+    pub relationColumnExprs: Vec<Expr>,
 }
 
 // ------------------------------------------------------------------------------------------

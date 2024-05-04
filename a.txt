@@ -66,3 +66,4 @@ by usage(a=0+1,d=0)
 
 使用session来包含多个sql的action成为1个整体的tx
 tx的回复
+insert的values也要能支持expr 可以使用现有的parseInExpr

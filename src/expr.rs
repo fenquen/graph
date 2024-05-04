@@ -24,34 +24,35 @@ impl Default for Expr {
 }
 
 impl Expr {
-    pub fn applyRowData(&self, rowData: &HashMap<String, GraphValue>) -> Result<GraphValue> {
+    pub fn calc(&self, rowData: Option<&HashMap<String, GraphValue>>) -> Result<GraphValue> {
         // 需要不断的向下到Single
         match self {
             Expr::Single(element) => {
                 let graphValue = GraphValue::try_from(element)?;
                 match graphValue {
                     GraphValue::Pending(ref columnName) => {
-                        rowData.get(columnName).unwrap();
+                        if let Some(rowData) = rowData {
+                            Ok(rowData.get(columnName).unwrap().clone())
+                        } else {
+                            throw!("need actual row data to get actual value")
+                        }
                     }
-                    _ => {
-                        graphValue;
-                    }
+                    _ => Ok(graphValue),
                 }
             }
             Expr::BiDirection { leftExpr, op, rightExprVec } => {
-                let leftValue = leftExpr.applyRowData(rowData)?;
+                let leftValue = leftExpr.calc(rowData)?;
 
                 if rightExprVec.is_empty() {
                     throw!("has no right values");
                 }
 
-                let rightValues: Vec<GraphValue> = rightExprVec.iter().map(|expr| { expr.applyRowData(rowData).unwrap() }).collect();
+                let rightValues: Vec<GraphValue> = rightExprVec.iter().map(|expr| { expr.calc(rowData).unwrap() }).collect();
 
-
+                leftValue.calc(op.clone(), &rightValues)
             }
             Expr::None => panic!("impossible"),
         }
-        Ok(GraphValue::Boolean(true))
     }
 }
 

@@ -51,4 +51,3 @@ pub const 小于等于_STR: &str = "<=";
 
 pub const 大于等于_STR: &str = ">=";
 
-pub const 临界_CHARS: &[char] = &[空格_CHAR, 逗号_CHAR, 单引号_CHAR, 括号_CHAR, 括号1_CHAR];

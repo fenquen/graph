@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::path::Path;
 use crate::config::CONFIG;
-use crate::{executor, global, throw};
+use crate::{executor, global, prefix_plus_plus, throw};
 use crate::meta::{Column, GraphValue, Table, TableType};
 use crate::parser::{InsertValues, Link};
 use anyhow::Result;
@@ -10,6 +10,7 @@ use dashmap::mapref::one::{Ref, RefMut};
 use serde_json::{json, Map, Value};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use crate::expr::Expr;
 
 pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     let dataDirPath: &Path = CONFIG.dataDir.as_ref();
@@ -118,23 +119,49 @@ pub async fn insertValues(insertValues: &InsertValues) -> Result<()> {
 pub async fn link(link: &Link) -> Result<()> {
     // 得到3个表的对象
     let mut srcTable = getTableRefByName(link.srcTableName.as_str())?;
-    let destTable = getTableRefByName(link.destTableName.as_str())?;
+    let mut destTable = getTableRefByName(link.destTableName.as_str())?;
     let relation = getTableRefByName(link.relationName.as_str())?;
 
-    // 对src table和dest table调用expr筛选
-    let srcTableFilterExpr = link.srcTableFilterExpr.as_ref();
+    async fn getSatisfiedRowNumVec(tableFilterExpr: Option<&Expr>, table: &mut Table) -> Result<Vec<usize>> {
+        Ok(if tableFilterExpr.is_some() {
+            let srcTableFilterExpr = tableFilterExpr.unwrap();
+            let mut rowNum: usize = 0;
+            let mut satisfiedRowNumVec = Vec::new();
 
-    let srcTableDataFile = srcTable.dataFile.as_mut().unwrap();
-    let bufReader = BufReader::new(srcTableDataFile);
+            let srcTableDataFile = table.dataFile.as_mut().unwrap();
+            let bufReader = BufReader::new(srcTableDataFile);
+            let mut lines = bufReader.lines();
+            while let Some(line) = lines.next_line().await? {
+                prefix_plus_plus!(rowNum);
 
-    let mut lines = bufReader.lines();
-    while let Some(line) = lines.next_line().await? {
-        let rowData: HashMap<String,GraphValue> = serde_json::from_str(&line)?;
+                let rowData: HashMap<String, GraphValue> = serde_json::from_str(&line)?;
+                if let GraphValue::Boolean(satisfy) = srcTableFilterExpr.calc(Some(&rowData))? {
+                    if satisfy {
+                        satisfiedRowNumVec.push(rowNum);
+                    }
+                } else {
+                    throw!("table filter should get a boolean")
+                }
+            }
+
+            satisfiedRowNumVec
+        } else {
+            vec![0]
+        })
     }
+
+    // 对src table和dest table调用expr筛选
+    let srcTableSatisfiedRowNumVec = getSatisfiedRowNumVec(link.srcTableFilterExpr.as_ref(), srcTable.value_mut()).await?;
+    let destTableSatisfiedRowNumVec = getSatisfiedRowNumVec(link.destTableFilterExpr.as_ref(), destTable.value_mut()).await?;
+
+    // 把relation上的exprs变为graphValues
+
+
     Ok(())
 }
 
-fn getTableRefByName(tableName: &str) -> Result<RefMut<String,Table>> {
+
+fn getTableRefByName(tableName: &str) -> Result<RefMut<String, Table>> {
     let table = global::TABLE_NAME_TABLE.get_mut(tableName);
     if table.is_none() {
         throw!(&format!("table:{} not exist", tableName));

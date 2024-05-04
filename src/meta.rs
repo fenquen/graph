@@ -3,7 +3,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use crate::graph_error::GraphError;
-use crate::parser::{Element, LogicalOp, MathCmpOp, Op, SqlOp};
+use crate::parser::{Element, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
 use crate::throw;
 use anyhow::Result;
 
@@ -26,16 +26,6 @@ pub enum TableType {
 impl Default for TableType {
     fn default() -> Self {
         TableType::Unknown
-    }
-}
-
-impl From<&str> for TableType {
-    fn from(value: &str) -> Self {
-        match value.to_uppercase().as_str() {
-            "TABLE" => TableType::TABLE,
-            "RELATION" => TableType::RELATION,
-            _ => TableType::Unknown
-        }
     }
 }
 
@@ -117,7 +107,7 @@ impl Display for ColumnType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GraphValue {
     /// 应对表的字段名 需要后续配合rowData来得到实际的
     Pending(String),
@@ -150,7 +140,7 @@ impl TryFrom<&Element> for GraphValue {
             Element::IntegerLiteral(integer) => Ok(GraphValue::Integer(*integer)),
             Element::DecimalLiteral(decimal) => Ok(GraphValue::Decimal(*decimal)),
             Element::TextLiteral(columnName) => Ok(GraphValue::Pending(columnName.clone())),
-            _ => throw!(&format!("element:{:?} can not be transform to GraphValue",element)),
+            _ => throw!(&format!("element:{element:?} can not be transform to GraphValue")),
         }
     }
 }
@@ -160,7 +150,7 @@ impl GraphValue {
         if let GraphValue::Boolean(bool) = self {
             Ok(*bool)
         } else {
-            throw!(&format!("not boolean, is {:?}",self))
+            throw!(&format!("not boolean, is {self:?}"))
         }
     }
 
@@ -173,27 +163,138 @@ impl GraphValue {
         }
     }
 
+    /// 目前对不兼容的type之间的大小比较返回false
     pub fn calcOneToOne(&self, op: Op, rightValue: &GraphValue) -> Result<GraphValue> {
         match op {
             Op::MathCmpOp(mathCmpOp) => {
                 match mathCmpOp {
-                    _ => {}
+                    MathCmpOp::LessEqual => {
+                        match (self, rightValue) {
+                            (GraphValue::String(s), GraphValue::String(s0)) => Ok(GraphValue::Boolean(s <= s0)),
+                            (GraphValue::Boolean(b), GraphValue::Boolean(b0)) => Ok(GraphValue::Boolean(b <= b0)),
+                            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Ok(GraphValue::Boolean(integer <= integer0)),
+                            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 <= &(*integer as f64))),
+                            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float <= float0)),
+                            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 <= &(*integer as f64))),
+                            _ => Ok(GraphValue::Boolean(false)),
+                        }
+                    }
+                    MathCmpOp::Equal => {
+                        match (self, rightValue) {
+                            (GraphValue::String(s), GraphValue::String(s0)) => Ok(GraphValue::Boolean(s == s0)),
+                            (GraphValue::Boolean(b), GraphValue::Boolean(b0)) => Ok(GraphValue::Boolean(b == b0)),
+                            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Ok(GraphValue::Boolean(integer == integer0)),
+                            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 == &(*integer as f64))),
+                            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float == float0)),
+                            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 == &(*integer as f64))),
+                            _ => Ok(GraphValue::Boolean(false)),
+                        }
+                    }
+                    MathCmpOp::LessThan => {
+                        match (self, rightValue) {
+                            (GraphValue::String(s), GraphValue::String(s0)) => Ok(GraphValue::Boolean(s < s0)),
+                            (GraphValue::Boolean(b), GraphValue::Boolean(b0)) => Ok(GraphValue::Boolean(b < b0)),
+                            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Ok(GraphValue::Boolean(integer < integer0)),
+                            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 < &(*integer as f64))),
+                            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float < float0)),
+                            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 < &(*integer as f64))),
+                            _ => Ok(GraphValue::Boolean(false)),
+                        }
+                    }
+                    MathCmpOp::GreaterThan => {
+                        match (self, rightValue) {
+                            (GraphValue::String(s), GraphValue::String(s0)) => Ok(GraphValue::Boolean(s > s0)),
+                            (GraphValue::Boolean(b), GraphValue::Boolean(b0)) => Ok(GraphValue::Boolean(b > b0)),
+                            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Ok(GraphValue::Boolean(integer > integer0)),
+                            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 > &(*integer as f64))),
+                            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float > float0)),
+                            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 > &(*integer as f64))),
+                            _ => Ok(GraphValue::Boolean(false)),
+                        }
+                    }
+                    MathCmpOp::GreaterEqual => {
+                        match (self, rightValue) {
+                            (GraphValue::String(s), GraphValue::String(s0)) => Ok(GraphValue::Boolean(s >= s0)),
+                            (GraphValue::Boolean(b), GraphValue::Boolean(b0)) => Ok(GraphValue::Boolean(b >= b0)),
+                            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Ok(GraphValue::Boolean(integer >= integer0)),
+                            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 >= &(*integer as f64))),
+                            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float >= float0)),
+                            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 >= &(*integer as f64))),
+                            _ => Ok(GraphValue::Boolean(false)),
+                        }
+                    }
+                    MathCmpOp::NotEqual => {
+                        match (self, rightValue) {
+                            (GraphValue::String(s), GraphValue::String(s0)) => Ok(GraphValue::Boolean(s != s0)),
+                            (GraphValue::Boolean(b), GraphValue::Boolean(b0)) => Ok(GraphValue::Boolean(b != b0)),
+                            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Ok(GraphValue::Boolean(integer != integer0)),
+                            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 != &(*integer as f64))),
+                            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float != float0)),
+                            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 != &(*integer as f64))),
+                            _ => Ok(GraphValue::Boolean(false)),
+                        }
+                    }
                 }
             }
             Op::MathCalcOp(matchCalcOp) => {
                 match matchCalcOp {
-                    _ => {}
+                    MathCalcOp::Plus => {
+                        match (self, rightValue) {
+                            (GraphValue::String(s), GraphValue::String(s0)) => Ok(GraphValue::String(format!("{s}{s0}"))),
+                            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Ok(GraphValue::Integer(integer + integer0)),
+                            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Decimal(float64 + (*integer as f64))),
+                            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Decimal(float + float0)),
+                            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Decimal(float64 + (*integer as f64))),
+                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                        }
+                    }
+                    MathCalcOp::Divide => {
+                        match (self, rightValue) {
+                            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Ok(GraphValue::Integer(integer / integer0)),
+                            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Decimal(float64 / (*integer as f64))),
+                            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Decimal(float / float0)),
+                            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Decimal(float64 / (*integer as f64))),
+                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                        }
+                    }
+                    MathCalcOp::Multiply => {
+                        match (self, rightValue) {
+                            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Ok(GraphValue::Integer(integer * integer0)),
+                            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Decimal(float64 * (*integer as f64))),
+                            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Decimal(float * float0)),
+                            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Decimal(float64 * (*integer as f64))),
+                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                        }
+                    }
+                    MathCalcOp::Minus => {
+                        match (self, rightValue) {
+                            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Ok(GraphValue::Integer(integer - integer0)),
+                            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Decimal(float64 - (*integer as f64))),
+                            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Decimal(float - float0)),
+                            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Decimal(float64 - (*integer as f64))),
+                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                        }
+                    }
                 }
             }
             Op::LogicalOp(logicalOp) => {
                 match logicalOp {
-                    LogicalOp::Or => {}
-                    LogicalOp::And => {}
+                    LogicalOp::Or => {
+                        match (self, rightValue) {
+                            (GraphValue::Boolean(bool), GraphValue::Boolean(bool0)) => Ok(GraphValue::Boolean(bool | bool0)),
+                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                        }
+                    }
+                    LogicalOp::And => {
+                        match (self, rightValue) {
+                            (GraphValue::Boolean(bool), GraphValue::Boolean(bool0)) => Ok(GraphValue::Boolean(bool & bool0)),
+                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                        }
+                    }
                 }
             }
-            _ => throw!(&format!("unsupported op:{:?}",op)),
+            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
         }
-        Ok(GraphValue::Boolean(false))
     }
 
     pub fn calcIn(&self, rightValues: &[GraphValue]) -> Result<GraphValue> {
@@ -223,5 +324,12 @@ mod test {
         if let GraphValue::String(s) = columnValue {
             println!("{}", s);
         }
+    }
+
+    #[test]
+    pub fn testStringEqual() {
+        let a = "a".to_string();
+        let b = "a".to_string();
+        println!("{}", a == b);
     }
 }
