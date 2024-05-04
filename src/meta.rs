@@ -1,9 +1,11 @@
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, write};
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use crate::graph_error::GraphError;
+use crate::parser::{Element, LogicalOp, MathCmpOp, Op, SqlOp};
 use crate::throw;
+use anyhow::Result;
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Table {
@@ -57,50 +59,36 @@ pub struct Column {
 
 #[derive(Debug, Deserialize, Clone, Serialize, PartialEq)]
 pub enum ColumnType {
-    STRING,
-    INTEGER,
-    DECIMAL,
-    UNKNOWN,
+    String,
+    Integer,
+    Decimal,
+    Unknown,
 }
 
 impl Default for ColumnType {
     fn default() -> Self {
-        ColumnType::UNKNOWN
+        ColumnType::Unknown
     }
 }
 
 impl ColumnType {
-    pub fn compatible(&self, columnValue: &Value) -> bool {
-        match self {
-            ColumnType::STRING => {
-                if let Value::STRING(_) = columnValue {
-                    return true;
-                }
-            }
-            ColumnType::INTEGER => {
-                if let Value::INTEGER(_) = columnValue {
-                    return true;
-                }
-            }
-            ColumnType::DECIMAL => {
-                if let Value::DECIMAL(_) = columnValue {
-                    return true;
-                }
-            }
-            _ => {}
+    pub fn compatible(&self, columnValue: &GraphValue) -> bool {
+        match (self, columnValue) {
+            (ColumnType::String, GraphValue::String(_)) => true,
+            (ColumnType::Integer, GraphValue::Integer(_)) => true,
+            (ColumnType::Decimal, GraphValue::Decimal(_)) => true,
+            _ => false
         }
-
-        false
     }
 }
 
 impl From<&str> for ColumnType {
     fn from(value: &str) -> Self {
         match value.to_uppercase().as_str() {
-            "STRING" => ColumnType::STRING,
-            "INTEGER" => ColumnType::INTEGER,
-            "DECIMAL" => ColumnType::DECIMAL,
-            _ => ColumnType::UNKNOWN
+            "STRING" => ColumnType::String,
+            "INTEGER" => ColumnType::Integer,
+            "DECIMAL" => ColumnType::Decimal,
+            _ => ColumnType::Unknown
         }
     }
 }
@@ -110,9 +98,9 @@ impl FromStr for ColumnType {
 
     fn from_str(str: &str) -> Result<Self, Self::Err> {
         match str.to_uppercase().as_str() {
-            "STRING" => Ok(ColumnType::STRING),
-            "INTEGER" => Ok(ColumnType::INTEGER),
-            "DECIMAL" => Ok(ColumnType::DECIMAL),
+            "STRING" => Ok(ColumnType::String),
+            "INTEGER" => Ok(ColumnType::Integer),
+            "DECIMAL" => Ok(ColumnType::Decimal),
             _ => throw!(&format!("unknown type:{}", str))
         }
     }
@@ -121,45 +109,118 @@ impl FromStr for ColumnType {
 impl Display for ColumnType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ColumnType::STRING => write!(f, "STRING"),
-            ColumnType::INTEGER => write!(f, "INTEGER"),
-            ColumnType::DECIMAL => write!(f, "DECIMAL"),
+            ColumnType::String => write!(f, "STRING"),
+            ColumnType::Integer => write!(f, "INTEGER"),
+            ColumnType::Decimal => write!(f, "DECIMAL"),
             _ => write!(f, "UNKNOWN"),
         }
     }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum Value {
-    STRING(String),
-    INTEGER(i64),
-    DECIMAL(f64),
+pub enum GraphValue {
+    /// 应对表的字段名 需要后续配合rowData来得到实际的
+    Pending(String),
+    String(String),
+    Boolean(bool),
+    Integer(i64),
+    Decimal(f64),
 }
 
-impl Display for Value {
+impl Display for GraphValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::STRING(s) => write!(f, "STRING({})", s),
-            Value::INTEGER(s) => write!(f, "INTEGER({})", s),
-            Value::DECIMAL(s) => write!(f, "DECIMAL({})", s),
+            GraphValue::String(s) => write!(f, "String({})", s),
+            GraphValue::Boolean(s) => write!(f, "Boolean({})", s),
+            GraphValue::Integer(s) => write!(f, "Integer({})", s),
+            GraphValue::Decimal(s) => write!(f, "Decimal({})", s),
+            _ => write!(f, "unknown({:?})", self),
         }
+    }
+}
+
+impl TryFrom<&Element> for GraphValue {
+    type Error = GraphError;
+
+    // 如何应对Element::TextLiteral 表的字段名是的
+    fn try_from(element: &Element) -> Result<Self, Self::Error> {
+        match element {
+            Element::StringContent(s) => Ok(GraphValue::String(s.clone())),
+            Element::Boolean(bool) => Ok(GraphValue::Boolean(*bool)),
+            Element::IntegerLiteral(integer) => Ok(GraphValue::Integer(*integer)),
+            Element::DecimalLiteral(decimal) => Ok(GraphValue::Decimal(*decimal)),
+            Element::TextLiteral(columnName) => Ok(GraphValue::Pending(columnName.clone())),
+            _ => throw!(&format!("element:{:?} can not be transform to GraphValue",element)),
+        }
+    }
+}
+
+impl GraphValue {
+    pub fn boolValue(&self) -> Result<bool> {
+        if let GraphValue::Boolean(bool) = self {
+            Ok(*bool)
+        } else {
+            throw!(&format!("not boolean, is {:?}",self))
+        }
+    }
+
+    /// 当前不支持 type的自动转换 两边的type要严格相同的
+    pub fn calc(&self, op: Op, rightValues: &[GraphValue]) -> Result<GraphValue> {
+        if let Op::SqlOp(SqlOp::In) = op {
+            self.calcIn(rightValues)
+        } else {
+            self.calcOneToOne(op, &rightValues[0])
+        }
+    }
+
+    pub fn calcOneToOne(&self, op: Op, rightValue: &GraphValue) -> Result<GraphValue> {
+        match op {
+            Op::MathCmpOp(mathCmpOp) => {
+                match mathCmpOp {
+                    _ => {}
+                }
+            }
+            Op::MathCalcOp(matchCalcOp) => {
+                match matchCalcOp {
+                    _ => {}
+                }
+            }
+            Op::LogicalOp(logicalOp) => {
+                match logicalOp {
+                    LogicalOp::Or => {}
+                    LogicalOp::And => {}
+                }
+            }
+            _ => throw!(&format!("unsupported op:{:?}",op)),
+        }
+        Ok(GraphValue::Boolean(false))
+    }
+
+    pub fn calcIn(&self, rightValues: &[GraphValue]) -> Result<GraphValue> {
+        for rightValue in rightValues {
+            let calcResult = self.calcOneToOne(Op::MathCmpOp(MathCmpOp::Equal), rightValue)?;
+            if calcResult.boolValue()? == false {
+                return Ok(GraphValue::Boolean(false));
+            }
+        }
+        Ok(GraphValue::Boolean(true))
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::meta::Value;
+    use crate::meta::GraphValue;
 
     #[test]
     pub fn testSerialEnum() {
-        let a = Value::STRING("s".to_string());
+        let a = GraphValue::String("s".to_string());
         println!("{}", serde_json::to_string(&a).unwrap());
     }
 
     #[test]
     pub fn testDeserialEnum() {
-        let columnValue: Value = serde_json::from_str("{\"STRING\":\"s\"}").unwrap();
-        if let Value::STRING(s) = columnValue {
+        let columnValue: GraphValue = serde_json::from_str("{\"STRING\":\"s\"}").unwrap();
+        if let GraphValue::String(s) = columnValue {
             println!("{}", s);
         }
     }

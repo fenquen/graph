@@ -28,6 +28,7 @@ use crate::parser::{Command, Parser};
 #[tokio::main]
 pub async fn main() -> Result<()> {
     init().await?;
+
     // "create table user (id integer,name string);insert into user values (1,'tom')"
     // "create table car (id integer,color string);insert into car values (1,'red')"
     // "create relation usage (number integer);insert into usage values (1)"

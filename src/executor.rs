@@ -1,14 +1,15 @@
 use std::cell::UnsafeCell;
+use std::collections::HashMap;
 use std::path::Path;
 use crate::config::CONFIG;
-use crate::{global, throw};
-use crate::meta::{Column, Table, TableType};
+use crate::{executor, global, throw};
+use crate::meta::{Column, GraphValue, Table, TableType};
 use crate::parser::{InsertValues, Link};
 use anyhow::Result;
-use dashmap::mapref::one::Ref;
-use serde_json::{json, Value};
+use dashmap::mapref::one::{Ref, RefMut};
+use serde_json::{json, Map, Value};
 use tokio::fs::{File, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     let dataDirPath: &Path = CONFIG.dataDir.as_ref();
@@ -116,18 +117,25 @@ pub async fn insertValues(insertValues: &InsertValues) -> Result<()> {
 
 pub async fn link(link: &Link) -> Result<()> {
     // 得到3个表的对象
-    let srcTable = getTableRefByName(link.srcTableName.as_str())?;
+    let mut srcTable = getTableRefByName(link.srcTableName.as_str())?;
     let destTable = getTableRefByName(link.destTableName.as_str())?;
     let relation = getTableRefByName(link.relationName.as_str())?;
 
     // 对src table和dest table调用expr筛选
-    let srcTableFilterExpr = link.srcTableFilterExpr.as_ref().unwrap_or_default();
+    let srcTableFilterExpr = link.srcTableFilterExpr.as_ref();
 
+    let srcTableDataFile = srcTable.dataFile.as_mut().unwrap();
+    let bufReader = BufReader::new(srcTableDataFile);
+
+    let mut lines = bufReader.lines();
+    while let Some(line) = lines.next_line().await? {
+        let rowData: HashMap<String,GraphValue> = serde_json::from_str(&line)?;
+    }
     Ok(())
 }
 
-fn getTableRefByName(tableName: &str) -> Result<Ref<String,Table>> {
-    let table = global::TABLE_NAME_TABLE.get(tableName);
+fn getTableRefByName(tableName: &str) -> Result<RefMut<String,Table>> {
+    let table = global::TABLE_NAME_TABLE.get_mut(tableName);
     if table.is_none() {
         throw!(&format!("table:{} not exist", tableName));
     }
@@ -137,12 +145,12 @@ fn getTableRefByName(tableName: &str) -> Result<Ref<String,Table>> {
 #[cfg(test)]
 mod test {
     use serde_json::json;
-    use crate::meta::Value;
+    use crate::meta::GraphValue;
 
     #[test]
     pub fn a() {
         let mut rowData = json!({});
-        rowData["name"] = json!(Value::STRING("s".to_string()));
+        rowData["name"] = json!(GraphValue::String("s".to_string()));
         println!("{}", serde_json::to_string(&rowData).unwrap());
     }
 }

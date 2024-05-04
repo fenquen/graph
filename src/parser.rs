@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 use strum_macros::{Display as DisplayStrum, Display, EnumString};
 use crate::expr::Expr;
 use crate::graph_error::GraphError;
-use crate::meta::{Column, ColumnType, Table, TableType, Value};
+use crate::meta::{Column, ColumnType, Table, TableType, GraphValue};
 
 pub fn parse(sql: &str) -> Result<Vec<Command>> {
     let mut parser = Parser::new(sql);
@@ -277,7 +277,6 @@ impl Parser {
                         "TRUE" => Element::Boolean(true),
                         "OR" => Element::Op(Op::LogicalOp(LogicalOp::Or)),
                         "AND" => Element::Op(Op::LogicalOp(LogicalOp::And)),
-                        "IS" => Element::Op(Op::SqlOp(SqlOp::Is)),
                         "IN" => Element::Op(Op::SqlOp(SqlOp::In)),
                         _ => Element::TextLiteral(text),
                     }
@@ -497,13 +496,13 @@ impl Parser {
                         // columnValue 不能是TextLiteral
                         match currentElement {
                             Element::StringContent(stringContent) => {
-                                insertValues.columnValues.push(Value::STRING(stringContent.to_string()));
+                                insertValues.columnValues.push(GraphValue::String(stringContent.to_string()));
                             }
                             Element::IntegerLiteral(int) => {
-                                insertValues.columnValues.push(Value::INTEGER(*int));
+                                insertValues.columnValues.push(GraphValue::Integer(*int));
                             }
                             Element::DecimalLiteral(decimal) => {
-                                insertValues.columnValues.push(Value::DECIMAL(*decimal));
+                                insertValues.columnValues.push(GraphValue::Decimal(*decimal));
                             }
                             Element::TextLiteral(text) => {
                                 match text.as_str() {
@@ -715,9 +714,9 @@ impl Parser {
                 ParseCondState::ParsingOp => {
                     if let Element::Op(op) = currentElement {
                         expr = Expr::BiDirection {
-                            left: Box::new(expr),
+                            leftExpr: Box::new(expr),
                             op,
-                            right: Default::default(),
+                            rightExprVec: Default::default(),
                         }
                     } else {
                         // 应对 (((a = 1)))  因为递归结束后返回到上1级的时候currentElement是")"
@@ -750,11 +749,11 @@ impl Parser {
                                     self.skipElement(-1)?;
 
                                     // 得要BiDirection
-                                    if let Expr::BiDirection { left, op, .. } = expr {
+                                    if let Expr::BiDirection { leftExpr: left, op, .. } = expr {
                                         expr = Expr::BiDirection {
-                                            left,
+                                            leftExpr: left,
                                             op,
-                                            right: self.parseInExprs()?.into_iter().map(|expr| { Box::new(expr) }).collect(),
+                                            rightExprVec: self.parseInExprs()?.into_iter().map(|expr| { Box::new(expr) }).collect(),
                                         }
                                     } else {
                                         self.throwSyntaxError()?;
@@ -766,11 +765,11 @@ impl Parser {
                                     let subExpr = self.parseExpr(false)?;
 
                                     // 得要BiDirection
-                                    if let Expr::BiDirection { left, op, .. } = expr {
+                                    if let Expr::BiDirection { leftExpr: left, op, .. } = expr {
                                         expr = Expr::BiDirection {
-                                            left,
+                                            leftExpr: left,
                                             op,
-                                            right: vec![Box::new(subExpr)],
+                                            rightExprVec: vec![Box::new(subExpr)],
                                         }
                                     } else {
                                         self.throwSyntaxError()?;
@@ -786,11 +785,11 @@ impl Parser {
                         _ => {}
                     }
 
-                    if let Expr::BiDirection { left, op, .. } = expr {
+                    if let Expr::BiDirection { leftExpr: left, op, .. } = expr {
                         expr = Expr::BiDirection {
-                            left,
+                            leftExpr: left,
                             op,
-                            right: vec![Box::new(Expr::Single(currentElement))],
+                            rightExprVec: vec![Box::new(Expr::Single(currentElement))],
                         }
                     } else {
                         self.throwSyntaxError()?;
@@ -817,6 +816,8 @@ impl Parser {
                             if text == global::括号1_STR {
                                 break;
                             }
+
+                            // 别的情况要报错
                         }
                         Element::Op(op) => {
                             // 需要区分 原来是都是认为是logicalOp
@@ -828,10 +829,10 @@ impl Parser {
                                     let nextElementIs括号 = self.getCurrentElement()?.expectTextLiteralContentBool(global::括号_STR);
 
                                     expr = Expr::BiDirection {
-                                        left: Box::new(expr),
+                                        leftExpr: Box::new(expr),
                                         op,
                                         // 需要递归下钻
-                                        right: vec![Box::new(self.parseExpr(!nextElementIs括号)?)],
+                                        rightExprVec: vec![Box::new(self.parseExpr(!nextElementIs括号)?)],
                                     };
                                     // (m and (a = 0 and (b = 1))) 这个时候解析到的是1后边的那个")"而已 还有")"残留
                                     // (a=0 and (b=1) and 1 or 0)
@@ -840,15 +841,15 @@ impl Parser {
                                 }
                                 // a>0+6 and b=0 的 "+",当前的expr是a>0,需要打破现有的expr
                                 Op::MathCalcOp(_) => {
-                                    if let Expr::BiDirection { left, op, .. } = expr {
+                                    if let Expr::BiDirection { leftExpr: left, op, .. } = expr {
                                         // 需要先回到0+6的起始index
                                         self.skipElement(-2)?;
 
                                         expr = Expr::BiDirection {
-                                            left,
+                                            leftExpr: left,
                                             op,
                                             // 递归的level不能用力太猛 不然应对不了 a > 0+6 and b=0 会把 0+6 and b=0 当成1个expr
-                                            right: vec![Box::new(self.parseExpr(true)?)],
+                                            rightExprVec: vec![Box::new(self.parseExpr(true)?)],
                                         };
 
                                         parseCondState = ParseCondState::ParseRightComplete;
@@ -859,9 +860,9 @@ impl Parser {
                                 Op::MathCmpOp(_) => {
                                     // 把现有的expr降级变为小弟
                                     expr = Expr::BiDirection {
-                                        left: Box::new(expr),
+                                        leftExpr: Box::new(expr),
                                         op,
-                                        right: Default::default(),
+                                        rightExprVec: Default::default(),
                                     };
                                     // 不递归而是本level循环
                                     parseCondState = ParseCondState::ParsingRight;
@@ -1140,10 +1141,10 @@ pub struct InsertValues {
     /// insert into table (column) values ('a')
     pub useExplicitColumnNames: bool,
     pub columnNames: Vec<String>,
-    pub columnValues: Vec<Value>,
+    pub columnValues: Vec<GraphValue>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Op {
     MathCmpOp(MathCmpOp),
     SqlOp(SqlOp),
@@ -1171,7 +1172,7 @@ impl Default for Op {
 }
 
 // https://note.qidong.name/2023/03/rust-enum-str/
-#[derive(DisplayStrum, Clone, Debug)]
+#[derive(DisplayStrum, Clone, Debug, Copy)]
 pub enum MathCmpOp {
     Equal,
     GreaterThan,
@@ -1179,21 +1180,6 @@ pub enum MathCmpOp {
     LessEqual,
     LessThan,
     NotEqual,
-    Unknown,
-}
-
-impl From<&str> for MathCmpOp {
-    fn from(str: &str) -> Self {
-        match str {
-            global::等号_STR => MathCmpOp::Equal,
-            global::小于_STR => MathCmpOp::LessThan,
-            global::大于_STR => MathCmpOp::GreaterThan,
-            global::小于等于_STR => MathCmpOp::LessEqual,
-            global::大于等于_STR => MathCmpOp::GreaterEqual,
-            global::不等_STR => MathCmpOp::NotEqual,
-            _ => MathCmpOp::Unknown,
-        }
-    }
 }
 
 /// "a".parse::<MathCmpOp>()用的
@@ -1213,19 +1199,18 @@ impl FromStr for MathCmpOp {
     }
 }
 
-#[derive(DisplayStrum, Clone, Debug)]
+#[derive(DisplayStrum, Clone, Debug, Copy)]
 pub enum LogicalOp {
     And,
     Or,
 }
 
-#[derive(DisplayStrum, Clone, Debug)]
+#[derive(DisplayStrum, Clone, Debug, Copy)]
 pub enum SqlOp {
     In,
-    Is,
 }
 
-#[derive(DisplayStrum, Clone, Debug)]
+#[derive(DisplayStrum, Clone, Debug, Copy)]
 pub enum MathCalcOp {
     Plus,
     Divide,
