@@ -51,31 +51,20 @@ pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
 
 pub async fn insertValues(insertValues: InsertValues) -> Result<()> {
     // 对应的表是不是exist
-    let option = global::TABLE_NAME_TABLE.get_mut(&insertValues.tableName);
-    if option.is_none() {
-        throw!(&format!("table {} not exist", insertValues.tableName));
-    }
-    let table = &mut *option.unwrap();
-
-    let jsonString = generateInsertValuesJson(&insertValues)?;
-    table.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?;
-
-    Ok(())
-}
-
-pub fn generateInsertValuesJson(insertValues: &InsertValues) -> Result<String> {
-    // 对应的表是不是exist
-    let option = global::TABLE_NAME_TABLE.get(&insertValues.tableName);
-    if option.is_none() {
-        throw!(&format!("table {} not exist", insertValues.tableName));
-    }
-    let table = &*option.unwrap();
+    let mut table = getTableRefMutByName(&insertValues.tableName)?;
 
     // 不能对relation使用insert into
     if let TableType::RELATION = table.type0 {
         throw!(&format!("{} is a RELATION , can not use insert into on RELATION", insertValues.tableName));
     }
 
+    let jsonString = serde_json::to_string(&generateInsertValuesJson(&insertValues, &*table)?)?;
+    table.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?;
+
+    Ok(())
+}
+
+fn generateInsertValuesJson(insertValues: &InsertValues, table: &Table) -> Result<Value> {
     let columns = {
         let mut columns = Vec::new();
 
@@ -125,14 +114,13 @@ pub fn generateInsertValuesJson(insertValues: &InsertValues) -> Result<String> {
         rowData[column.name.as_str()] = json!(columnValue);
     }
 
-    Ok(serde_json::to_string(&rowData)?)
+    Ok(rowData)
 }
 
 pub async fn link(link: Link) -> Result<()> {
     // 得到3个表的对象
-    let mut srcTable = getTableRefByName(link.srcTableName.as_str())?;
-    let mut destTable = getTableRefByName(link.destTableName.as_str())?;
-    let relation = getTableRefByName(link.relationName.as_str())?;
+    let mut srcTable = getTableRefMutByName(link.srcTableName.as_str())?;
+    let mut destTable = getTableRefMutByName(link.destTableName.as_str())?;
 
     async fn getSatisfiedRowNumVec(tableFilterExpr: Option<&Expr>, table: &mut Table) -> Result<Vec<usize>> {
         Ok(if tableFilterExpr.is_some() {
@@ -163,8 +151,8 @@ pub async fn link(link: Link) -> Result<()> {
     }
 
     // 对src table和dest table调用expr筛选
-    let srcTableSatisfiedRowNumVec = getSatisfiedRowNumVec(link.srcTableFilterExpr.as_ref(), srcTable.value_mut()).await?;
-    let destTableSatisfiedRowNumVec = getSatisfiedRowNumVec(link.destTableFilterExpr.as_ref(), destTable.value_mut()).await?;
+    let srcTableSatisfiedRowNums = getSatisfiedRowNumVec(link.srcTableFilterExpr.as_ref(), srcTable.value_mut()).await?;
+    let destTableSatisfiedRowNums = getSatisfiedRowNumVec(link.destTableFilterExpr.as_ref(), destTable.value_mut()).await?;
 
     // 用insetValues套路
     let insertValues = InsertValues {
@@ -173,13 +161,19 @@ pub async fn link(link: Link) -> Result<()> {
         columnNames: link.relationColumnNames.clone(),
         columnExprs: link.relationColumnExprs.clone(),
     };
-    let jsonString = generateInsertValuesJson(&insertValues)?;
+    let mut relationTable = getTableRefMutByName(link.relationName.as_str())?;
+    let mut rowData = generateInsertValuesJson(&insertValues, &*relationTable)?;
+    rowData["srcRowNums"] = json!(srcTableSatisfiedRowNums);
+    rowData["destRowNums"] = json!(destTableSatisfiedRowNums);
 
+    let jsonString = serde_json::to_string(&rowData)?;
+
+    relationTable.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?;
     Ok(())
 }
 
 
-fn getTableRefByName(tableName: &str) -> Result<RefMut<String, Table>> {
+fn getTableRefMutByName(tableName: &str) -> Result<RefMut<String, Table>> {
     let table = global::TABLE_NAME_TABLE.get_mut(tableName);
     if table.is_none() {
         throw!(&format!("table:{} not exist", tableName));
