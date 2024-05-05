@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 use strum_macros::{Display as DisplayStrum, Display, EnumString};
 use crate::expr::Expr;
 use crate::graph_error::GraphError;
-use crate::meta::{Column, ColumnType, Table, TableType, GraphValue};
+use crate::meta::{Column, ColumnType, Table, TableType};
 
 pub fn parse(sql: &str) -> Result<Vec<Command>> {
     let mut parser = Parser::new(sql);

@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use tokio::fs::File;
 use tokio::sync::RwLock;
 use crate::graph_error::GraphError;
-use crate::meta::{GraphValue, Table};
+use crate::meta::Table;
 
 pub static mut TABLE_RECORD_FILE: Option<Arc<RwLock<File>>> = None;
 

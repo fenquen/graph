@@ -10,6 +10,7 @@ mod meta;
 mod executor;
 mod a;
 mod expr;
+mod graph_value;
 
 use std::path::Path;
 use std::string::ToString;
@@ -30,17 +31,16 @@ pub async fn main() -> Result<()> {
     init().await?;
 
     // "create table user (id integer,name string);insert into user values (1,'tom')"
-    // "create table car (id integer,color string);insert into car values (1,'red')"
-    // "create relation usage (number integer);insert into usage values (1)"
-    let commandVec = parser::parse("create table usage (number integer);insert into usage values (1)")?;
+    // "create table car (id integer,color string);insert into car values (34,'red')"
+    // "create relation usage (number integer)"
+    // "link user(id =1) to car(color='red') by usage(number = 12)"
+    // "link user(id =1) to car(id =37) by usage(number = 17)"
+    let commandVec = parser::parse("link user(id =1) to car(color='red') by usage(number = 12)")?;
     for command in commandVec {
         match command {
-            Command::CreateTable(table) => {
-                executor::createTable(table, false).await?;
-            }
-            Command::Insert(insertValues) => {
-                executor::insertValues(insertValues).await?;
-            }
+            Command::CreateTable(table) => executor::createTable(table, false).await?,
+            Command::Insert(insertValues) => executor::insertValues(insertValues).await?,
+            Command::Link(link) => executor::link(link).await?,
             _ => {}
         }
     }

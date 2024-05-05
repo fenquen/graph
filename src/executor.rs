@@ -3,14 +3,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use crate::config::CONFIG;
 use crate::{executor, global, prefix_plus_plus, throw};
-use crate::meta::{Column, GraphValue, Table, TableType};
+use crate::meta::{Column, Table, TableType};
 use crate::parser::{InsertValues, Link};
 use anyhow::Result;
 use dashmap::mapref::one::{Ref, RefMut};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use crate::expr::Expr;
+use crate::graph_value::GraphValue;
 
 pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     let dataDirPath: &Path = CONFIG.dataDir.as_ref();
@@ -40,7 +42,7 @@ pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     }
 
     let dataDirPath: &Path = CONFIG.dataDir.as_ref();
-    let tableDataFile = OpenOptions::new().write(true).read(true).create(true).open(dataDirPath.join(table.name.as_str())).await?;
+    let tableDataFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(dataDirPath.join(table.name.as_str())).await?;
     table.dataFile = Some(tableDataFile);
 
     // map
@@ -117,6 +119,8 @@ fn generateInsertValuesJson(insertValues: &InsertValues, table: &Table) -> Resul
     Ok(rowData)
 }
 
+/// 它本质是向relation对应的data file写入
+/// 两个元素之间的relation只看种类不看里边的属性的
 pub async fn link(link: Link) -> Result<()> {
     // 得到3个表的对象
     let mut srcTable = getTableRefMutByName(link.srcTableName.as_str())?;
@@ -155,23 +159,38 @@ pub async fn link(link: Link) -> Result<()> {
     let destTableSatisfiedRowNums = getSatisfiedRowNumVec(link.destTableFilterExpr.as_ref(), destTable.value_mut()).await?;
 
     // 用insetValues套路
-    let insertValues = InsertValues {
-        tableName: link.destTableName.clone(),
-        useExplicitColumnNames: true,
-        columnNames: link.relationColumnNames.clone(),
-        columnExprs: link.relationColumnExprs.clone(),
-    };
-    let mut relationTable = getTableRefMutByName(link.relationName.as_str())?;
-    let mut rowData = generateInsertValuesJson(&insertValues, &*relationTable)?;
-    rowData["srcRowNums"] = json!(srcTableSatisfiedRowNums);
-    rowData["destRowNums"] = json!(destTableSatisfiedRowNums);
+    {
+        #[derive(Serialize, Deserialize)]
+        struct Node {
+            tableName: String,
+            rowNums: Vec<usize>,
+        }
 
-    let jsonString = serde_json::to_string(&rowData)?;
+        let insertValues = InsertValues {
+            tableName: link.destTableName.clone(),
+            useExplicitColumnNames: true,
+            columnNames: link.relationColumnNames.clone(),
+            columnExprs: link.relationColumnExprs.clone(),
+        };
+        let mut relationTable = getTableRefMutByName(link.relationName.as_str())?;
+        let mut rowData = generateInsertValuesJson(&insertValues, &*relationTable)?;
 
-    relationTable.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?;
+        rowData["src"] = json!(Node {
+            tableName:srcTable.name.clone(),
+            rowNums:srcTableSatisfiedRowNums,
+        });
+        rowData["dest"] = json!(Node {
+            tableName:destTable.name.clone(),
+            rowNums:destTableSatisfiedRowNums,
+        });
+
+        let jsonString = serde_json::to_string(&rowData)?;
+
+        relationTable.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?;
+    }
+
     Ok(())
 }
-
 
 fn getTableRefMutByName(tableName: &str) -> Result<RefMut<String, Table>> {
     let table = global::TABLE_NAME_TABLE.get_mut(tableName);
