@@ -526,9 +526,10 @@ impl Parser {
         let mut parseSrcDestState = ParseSrcDestState::ParseSrcTableName;
 
         loop {
-            match (parseSrcDestState, self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str()) {
+            let text = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+            match (parseSrcDestState, text.to_uppercase().as_str()) {
                 (ParseSrcDestState::ParseSrcTableName, tableName) => {
-                    link.srcTableName = tableName.to_string();
+                    link.srcTableName = text;
                     parseSrcDestState = ParseSrcDestState::ParseSrcTableCondition;
                 }
                 (ParseSrcDestState::ParseSrcTableCondition, global::括号_STR) => {
