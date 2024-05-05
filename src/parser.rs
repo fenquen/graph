@@ -467,7 +467,7 @@ impl Parser {
         loop { // loop 对应下边说的猥琐套路
             let currentText = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase();
             match currentText.as_str() {
-                "(" => { // 各column名
+                global::括号_STR => { // 各column名
                     insertValues.useExplicitColumnNames = true;
 
                     loop {
@@ -478,7 +478,7 @@ impl Parser {
                         match text.as_str() {
                             global::逗号_STR => continue,
                             // columnName读取结束了 下边应该是values
-                            ")" => break,
+                            global::括号1_STR => break,
                             _ => insertValues.columnNames.push(text),
                         }
                     }
@@ -486,44 +486,16 @@ impl Parser {
                     // 后边应该到下边的 case "VALUES" 那边 因为rust的match默认有break效果不会到下边的case 需要使用猥琐的套路 把它们都包裹到loop
                 }
                 "VALUES" => { // values
-                    self.getCurrentElementAdvance()?.expectTextLiteralContent(global::括号_STR)?;
-
-                    loop {
-                        let currentElement = self.getCurrentElementAdvance()?;
-
-                        // columnValue 不能是TextLiteral
-                        match currentElement {
-                            Element::StringContent(stringContent) => {
-                                insertValues.columnValues.push(GraphValue::String(stringContent.to_string()));
-                            }
-                            Element::IntegerLiteral(int) => {
-                                insertValues.columnValues.push(GraphValue::Integer(*int));
-                            }
-                            Element::DecimalLiteral(decimal) => {
-                                insertValues.columnValues.push(GraphValue::Decimal(*decimal));
-                            }
-                            Element::TextLiteral(text) => {
-                                match text.as_str() {
-                                    global::逗号_STR => continue,
-                                    global::括号1_STR => break,
-                                    _ => self.throwSyntaxErrorDetail("column value should not be text literal")?,
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
+                    insertValues.columnExprs = self.parseInExprs()?;
                     break;
                 }
-                _ => {
-                    self.throwSyntaxError()?;
-                }
+                _ => self.throwSyntaxError()?,
             }
         }
 
         // 如果是显式说明的columnName 需要确保columnName数量和value数量相同
         if insertValues.useExplicitColumnNames {
-            if insertValues.columnNames.len() != insertValues.columnValues.len() {
+            if insertValues.columnNames.len() != insertValues.columnExprs.len() {
                 self.throwSyntaxErrorDetail("column number should equal value number")?;
             }
 
@@ -531,7 +503,7 @@ impl Parser {
                 self.throwSyntaxErrorDetail("you have not designate any column")?;
             }
         } else {
-            if insertValues.columnValues.len() == 0 {
+            if insertValues.columnExprs.len() == 0 {
                 self.throwSyntaxErrorDetail("you have not designate any column value")?;
             }
         }
@@ -1107,12 +1079,6 @@ impl Element {
     }
 }
 
-impl Default for Element {
-    fn default() -> Self {
-        Element::Unknown
-    }
-}
-
 impl Display for Element {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1139,7 +1105,7 @@ pub struct InsertValues {
     /// insert into table (column) values ('a')
     pub useExplicitColumnNames: bool,
     pub columnNames: Vec<String>,
-    pub columnValues: Vec<GraphValue>,
+    pub columnExprs: Vec<Expr>,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -39,7 +39,7 @@ pub async fn main() -> Result<()> {
                 executor::createTable(table, false).await?;
             }
             Command::Insert(insertValues) => {
-                executor::insertValues(&insertValues).await?;
+                executor::insertValues(insertValues).await?;
             }
             _ => {}
         }

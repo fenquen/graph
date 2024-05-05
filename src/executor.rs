@@ -49,13 +49,27 @@ pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn insertValues(insertValues: &InsertValues) -> Result<()> {
+pub async fn insertValues(insertValues: InsertValues) -> Result<()> {
     // 对应的表是不是exist
     let option = global::TABLE_NAME_TABLE.get_mut(&insertValues.tableName);
     if option.is_none() {
         throw!(&format!("table {} not exist", insertValues.tableName));
     }
     let table = &mut *option.unwrap();
+
+    let jsonString = generateInsertValuesJson(&insertValues)?;
+    table.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?;
+
+    Ok(())
+}
+
+pub fn generateInsertValuesJson(insertValues: &InsertValues) -> Result<String> {
+    // 对应的表是不是exist
+    let option = global::TABLE_NAME_TABLE.get(&insertValues.tableName);
+    if option.is_none() {
+        throw!(&format!("table {} not exist", insertValues.tableName));
+    }
+    let table = &*option.unwrap();
 
     // 不能对relation使用insert into
     if let TableType::RELATION = table.type0 {
@@ -92,31 +106,29 @@ pub async fn insertValues(insertValues: &InsertValues) -> Result<()> {
     };
 
     // 确保column数量和value数量相同
-    if columns.len() != insertValues.columnValues.len() {
+    if columns.len() != insertValues.columnExprs.len() {
         throw!("column count does not match value count");
     }
 
     let mut rowData = json!({});
 
-    for column_columnValue in columns.iter().zip(insertValues.columnValues.iter()) {
+    for column_columnValue in columns.iter().zip(insertValues.columnExprs.iter()) {
         let column = column_columnValue.0;
-        let columnValue = column_columnValue.1;
+        let columnExpr = column_columnValue.1;
 
         // columnType和value也要对上
-        if column.type0.compatible(columnValue) == false {
+        let columnValue = columnExpr.calc(None)?;
+        if column.type0.compatible(&columnValue) == false {
             throw!(&format!("column:{},type:{} is not compatible with value:{}", column.name, column.type0, columnValue));
         }
 
         rowData[column.name.as_str()] = json!(columnValue);
     }
 
-    let jsonString = serde_json::to_string(&rowData)?;
-    table.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?;
-
-    Ok(())
+    Ok(serde_json::to_string(&rowData)?)
 }
 
-pub async fn link(link: &Link) -> Result<()> {
+pub async fn link(link: Link) -> Result<()> {
     // 得到3个表的对象
     let mut srcTable = getTableRefByName(link.srcTableName.as_str())?;
     let mut destTable = getTableRefByName(link.destTableName.as_str())?;
@@ -154,8 +166,14 @@ pub async fn link(link: &Link) -> Result<()> {
     let srcTableSatisfiedRowNumVec = getSatisfiedRowNumVec(link.srcTableFilterExpr.as_ref(), srcTable.value_mut()).await?;
     let destTableSatisfiedRowNumVec = getSatisfiedRowNumVec(link.destTableFilterExpr.as_ref(), destTable.value_mut()).await?;
 
-    // 把relation上的exprs变为graphValues
-
+    // 用insetValues套路
+    let insertValues = InsertValues {
+        tableName: link.destTableName.clone(),
+        useExplicitColumnNames: true,
+        columnNames: link.relationColumnNames.clone(),
+        columnExprs: link.relationColumnExprs.clone(),
+    };
+    let jsonString = generateInsertValuesJson(&insertValues)?;
 
     Ok(())
 }
