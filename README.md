@@ -32,7 +32,7 @@ link user(id =1) to car(id =43) by usage(number = 17);
 ## query
 
 ```sql
-select user[id,name](id=1 and 1=1) -usage(number > 9) as usage0-> car
+select user[id,name](id=1 and 0=0) -usage(number > 9) as usage0-> car
 ```
 
 ```json
