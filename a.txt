@@ -71,5 +71,4 @@ insert的values也要能支持expr 可以使用现有的parseInExpr 完成
 要使用binanry的position替换text的lineNum
 本身要有4个byte表示长度
 
-{"dest":{"rowNums":[1,2],"tableName":"car"},"number":{"Integer":12},"src":{"rowNums":[1],"tableName":"user"}}
-{"dest":{"rowNums":[2],"tableName":"car"},"number":{"Integer":17},"src":{"rowNums":[1],"tableName":"user"}}
+a

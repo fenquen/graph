@@ -682,7 +682,29 @@ impl Parser {
             ReadDestName,
             ReadDestColumnNames,
             ReadDestFilterExpr,
-            ResdDesrAlias,
+            ResdDestAlias,
+        }
+
+        fn parseColumnNames(parser: &mut Parser) -> Result<Vec<String>> {
+            let mut columnNames = Vec::default();
+
+            loop {
+                let text = parser.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+
+                match text.as_str() {
+                    global::逗号_STR => continue,
+                    global::方括号1_STR => break,
+                    _ => columnNames.push(text),
+                }
+
+                break;
+            }
+
+            if columnNames.is_empty() {
+                parser.throwSyntaxErrorDetail("no explicit column name")?;
+            }
+
+            Ok(columnNames)
         }
 
         let mut state = State::ReadSrcName;
@@ -695,11 +717,29 @@ impl Parser {
                 }
                 State::ReadSrcColumnNames => {
                     if self.getCurrentElementAdvance()?.expectTextLiteralContentBool(global::方括号_STR) {
-
+                        select.srcTableColumnNames = Some(parseColumnNames(self)?);
                     } else {
                         self.skipElement(-1)?;
                     }
                     state = State::ReadSrcFilterExpr;
+                }
+                State::ReadSrcFilterExpr => {
+                    if self.getCurrentElementAdvance()?.expectTextLiteralContentBool(global::圆括号_STR) {
+                        self.skipElement(-1)?;
+                        select.srcTableFilterExpr = Some(self.parseExpr(false)?);
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+                    state = State::ReadSrcAlias;
+                }
+                State::ReadSrcAlias => {
+                    if self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCaseBool("as") {
+                        select.srcTableAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by src alias")?);
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+
+                    state = State::ReadRelationName;
                 }
                 _ => {}
             }
