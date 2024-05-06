@@ -59,11 +59,17 @@ parseElement的时候 1+0 会变成1个TextLiteral(1+0) 不对的 已完成
     matchCalcOp不能到collectPendingChars()来处理,需要和mathCmpOp相同应对 已完成
 parseExpr要能支持 (a > 0+6 and b=0) 目前的话必须写成 (id > (0+6) and b=0) 完成
 parseExpr要能支持 (id in (0,0+6,0+(a+1),)) 完成
-parseExpr (((a = 1)))
-values (0+2,'a','0')
-by usage(a=0+1,d=0)
-(a and b or d) 会解析变成 a and (b or d) 不对 应该是 (a and b) or d
+parseExpr (((a = 1))) 完成
+values (0+2,'a','0') 完成
+by usage(a=0+1,d=0) 完成
+(a and b or d) 会解析变成 a and (b or d) 不对 应该是 (a and b) or d 完成
 
 使用session来包含多个sql的action成为1个整体的tx
 tx的回复
-insert的values也要能支持expr 可以使用现有的parseInExpr
+insert的values也要能支持expr 可以使用现有的parseInExpr 完成
+
+要使用binanry的position替换text的lineNum
+本身要有4个byte表示长度
+
+{"dest":{"rowNums":[1,2],"tableName":"car"},"number":{"Integer":12},"src":{"rowNums":[1],"tableName":"user"}}
+{"dest":{"rowNums":[2],"tableName":"car"},"number":{"Integer":17},"src":{"rowNums":[1],"tableName":"user"}}

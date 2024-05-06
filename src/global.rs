@@ -24,11 +24,11 @@ pub const 逗号_STR: &str = ",";
 
 pub const 单引号_CHAR: char = '\'';
 
-pub const 括号_CHAR: char = '(';
-pub const 括号_STR: &str = "(";
+pub const 圆括号_CHAR: char = '(';
+pub const 圆括号_STR: &str = "(";
 
-pub const 括号1_CHAR: char = ')';
-pub const 括号1_STR: &str = ")";
+pub const 圆括号1_CHAR: char = ')';
+pub const 圆括号1_STR: &str = ")";
 
 pub const 分号_CHAR: char = ';';
 pub const 冒号_CHAR: char = ':';
@@ -50,4 +50,16 @@ pub const 不等_STR: &str = "!=";
 pub const 小于等于_STR: &str = "<=";
 
 pub const 大于等于_STR: &str = ">=";
+
+pub const 加号_CHAR: char = '+';
+pub const 除号_CHAR: char = '/';
+pub const 乘号_CHAR: char = '*';
+pub const 减号_CHAR: char = '-';
+
+pub const 方括号_CHAR: char = '[';
+pub const 方括号_STR: &str = "[";
+pub const 方括号1_CHAR: char = ']';
+pub const 方括号1_STR: &str = "[";
+
+pub const ROW_DATA_LEN_FIELD_LEN: usize = 4;
 

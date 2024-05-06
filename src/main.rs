@@ -1,5 +1,7 @@
 #![allow(non_snake_case, unused_imports)]
 
+extern crate core;
+
 mod config;
 mod command_line;
 mod macros;
@@ -30,20 +32,25 @@ use crate::parser::{Command, Parser};
 pub async fn main() -> Result<()> {
     init().await?;
 
-    // "create table user (id integer,name string);insert into user values (1,'tom')"
-    // "create table car (id integer,color string);insert into car values (34,'red')"
-    // "create relation usage (number integer)"
-    // "link user(id =1) to car(color='red') by usage(number = 12)"
-    // "link user(id =1) to car(id =37) by usage(number = 17)"
-    let commandVec = parser::parse("link user(id =1) to car(color='red') by usage(number = 12)")?;
-    for command in commandVec {
-        match command {
-            Command::CreateTable(table) => executor::createTable(table, false).await?,
-            Command::Insert(insertValues) => executor::insertValues(insertValues).await?,
-            Command::Link(link) => executor::link(link).await?,
-            _ => {}
+    let tableRecordFile = OpenOptions::new().read(true).open("sql.txt").await?;
+    let bufReader = BufReader::new(tableRecordFile);
+    let mut lines = bufReader.lines();
+    while let Some(sql) = lines.next_line().await? {
+        if sql.starts_with("--") {
+            continue;
+        }
+
+        let commandVec = parser::parse(sql.as_str())?;
+        for command in commandVec {
+            match command {
+                Command::CreateTable(table) => executor::createTable(table, false).await?,
+                Command::Insert(insertValues) => executor::insertValues(insertValues).await?,
+                Command::Link(link) => executor::link(link).await?,
+                _ => {}
+            }
         }
     }
+
 
     Ok(())
 }

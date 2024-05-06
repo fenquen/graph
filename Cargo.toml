@@ -16,6 +16,7 @@ dashmap = "5.5.3"
 strum = "0.26"
 strum_macros = "0.26"
 tokio = { version = "1", features = ["full"] }
+bytes = "1.6.0"
 
 # https://course.rs/cargo/reference/profiles.html
 [profile.release]

@@ -16,10 +16,10 @@ pub fn parse(sql: &str) -> Result<Vec<Command>> {
 
     for elementVec in &parser.elementVecVec {
         for element in elementVec {
-            println!("{}", element);
+            println!("{element}");
         }
 
-        println!("{}", "\n");
+        println!("\n");
     }
 
     parser.parse()
@@ -30,8 +30,9 @@ pub enum Command {
     CreateTable(Table),
     Insert(InsertValues),
     Link(Link),
-    SELECT,
-    Unknown,
+    Delete,
+    Update,
+    Select,
 }
 
 #[derive(Default)]
@@ -42,8 +43,6 @@ pub struct Parser {
     currentCharIndex: usize,
     pendingChars: Vec<char>,
     单引号as文本边界的数量: usize,
-    括号数量: usize,
-    括号1数量: usize,
 
     /// 因为可能会1趟写多个使用;分隔的sql 也会有多个Vec<Element>
     elementVecVec: Vec<Vec<Element>>,
@@ -64,6 +63,9 @@ impl Parser {
 
     fn parseElement(&mut self) -> Result<()> {
         let mut currentElementVec: Vec<Element> = Vec::new();
+
+        let mut 括号数量: usize = 0;
+        let mut 括号1数量: usize = 0;
 
         // 空格 逗号 单引号 括号
         loop {
@@ -109,7 +111,9 @@ impl Parser {
                         self.单引号as文本边界的数量 = self.单引号as文本边界的数量 + 1;
                     }
                 }
-                global::括号_CHAR | global::括号1_CHAR | global::逗号_CHAR => {
+                global::圆括号_CHAR | global::圆括号1_CHAR |
+                global::逗号_CHAR |
+                global::方括号_CHAR | global::方括号1_CHAR => {
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
                     } else {
@@ -118,10 +122,10 @@ impl Parser {
                         // 本身也添加到elementVec
                         currentElementVec.push(Element::TextLiteral(currentChar.to_string()));
 
-                        if currentChar == global::括号_CHAR {
-                            self.括号数量 = self.括号数量 + 1;
-                        } else if currentChar == global::括号1_CHAR {
-                            self.括号1数量 = self.括号1数量 + 1;
+                        match currentChar {
+                            global::圆括号_CHAR | global::方括号_CHAR => 括号数量 = 括号数量 + 1,
+                            global::圆括号1_CHAR | global::方括号1_CHAR => 括号1数量 = 括号1数量 + 1,
+                            _ => {}
                         }
                     }
                 }
@@ -169,16 +173,23 @@ impl Parser {
                     }
                 }
                 // 数学计算符 因为是可以粘连的 需要到这边来parse
-                '+' | '/' | '*' | '-' => {
+                global::加号_CHAR | global::除号_CHAR | global::乘号_CHAR | global::减号_CHAR => {
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
                     } else {
-                        let mathCalcOp = MathCalcOp::fromChar(currentChar)?;
+                        // 应对->
+                        let element = if currentChar == global::减号_CHAR && Some(global::大于_CHAR) == self.nextChar() {
+                            advanceCount = 2;
+                            Element::To
+                        } else {
+                            let mathCalcOp = MathCalcOp::fromChar(currentChar)?;
+                            Element::Op(Op::MathCalcOp(mathCalcOp))
+                        };
 
                         // 需要了断 pendingChars
                         self.collectPendingChars(&mut currentElementVec);
 
-                        currentElementVec.push(Element::Op(Op::MathCalcOp(mathCalcOp)));
+                        currentElementVec.push(element);
                     }
                 }
                 _ => self.pendingChars.push(currentChar),
@@ -193,7 +204,7 @@ impl Parser {
         }
 
         // 需要确保单引号 和括号是对称的
-        if self.whetherIn单引号() || self.括号数量 != self.括号1数量 {
+        if self.whetherIn单引号() || 括号数量 != 括号1数量 {
             self.throwSyntaxError()?;
         }
 
@@ -358,6 +369,9 @@ impl Parser {
                 "CREATE" => self.parseCreate()?,
                 "INSERT" => self.parseInsert()?,
                 "LINK" => self.parseLink()?,
+                "DELETE" => self.parseDelete()?,
+                "UPDATE" => self.parseUpdate()?,
+                "SELECT" => self.parseSelect()?,
                 _ => self.throwSyntaxError()?,
             };
 
@@ -392,7 +406,7 @@ impl Parser {
         self.checkDbObjectName(&table.name)?;
 
         // 应该是"("
-        self.getCurrentElementAdvance()?.expectTextLiteralContent(global::括号_STR)?;
+        self.getCurrentElementAdvance()?.expectTextLiteralContent(global::圆括号_STR)?;
 
         // 循环读取 column
         enum ReadColumnState {
@@ -435,7 +449,7 @@ impl Parser {
 
                                     continue;
                                 }
-                                global::括号1_STR => {
+                                global::圆括号1_STR => {
                                     table.columns.push(column);
                                     break;
                                 }
@@ -467,7 +481,7 @@ impl Parser {
         loop { // loop 对应下边说的猥琐套路
             let currentText = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase();
             match currentText.as_str() {
-                global::括号_STR => { // 各column名
+                global::圆括号_STR => { // 各column名
                     insertValues.useExplicitColumnNames = true;
 
                     loop {
@@ -478,7 +492,7 @@ impl Parser {
                         match text.as_str() {
                             global::逗号_STR => continue,
                             // columnName读取结束了 下边应该是values
-                            global::括号1_STR => break,
+                            global::圆括号1_STR => break,
                             _ => insertValues.columnNames.push(text),
                         }
                     }
@@ -532,7 +546,7 @@ impl Parser {
                     link.srcTableName = text;
                     parseSrcDestState = ParseSrcDestState::ParseSrcTableCondition;
                 }
-                (ParseSrcDestState::ParseSrcTableCondition, global::括号_STR) => {
+                (ParseSrcDestState::ParseSrcTableCondition, global::圆括号_STR) => {
                     // 返回1个确保当前的element是"("
                     self.skipElement(-1)?;
                     link.srcTableFilterExpr = Some(self.parseExpr(false)?);
@@ -548,7 +562,7 @@ impl Parser {
                     link.destTableName = self.getCurrentElementAdvance()?.expectTextLiteral("to should followed by dest table name when use link sql")?;
                     parseSrcDestState = ParseSrcDestState::ParseDestTableCondition;
                 }
-                (ParseSrcDestState::ParseDestTableCondition, global::括号_STR) => {
+                (ParseSrcDestState::ParseDestTableCondition, global::圆括号_STR) => {
                     self.skipElement(-1)?;
                     link.destTableFilterExpr = Some(self.parseExpr(false)?);
                     break;
@@ -566,7 +580,7 @@ impl Parser {
         let mut 括号数量 = 0;
         let mut 括号1数量 = 0;
         if let Some(currentElement) = self.getCurrentElementOptionAdvance() {
-            currentElement.expectTextLiteralContent(global::括号_STR)?;
+            currentElement.expectTextLiteralContent(global::圆括号_STR)?;
             suffix_plus_plus!(括号数量);
         } else { // 未写link的value
             return Ok(Command::Link(link));
@@ -610,9 +624,9 @@ impl Parser {
                         continue;
                     }
 
-                    if currentElement.expectTextLiteralContentBool(global::括号_STR) {
+                    if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         suffix_plus_plus!(括号数量);
-                    } else if currentElement.expectTextLiteralContentBool(global::括号1_STR) {
+                    } else if currentElement.expectTextLiteralContentBool(global::圆括号1_STR) {
                         suffix_plus_plus!(括号1数量);
 
                         // 说明到了last的)
@@ -641,13 +655,80 @@ impl Parser {
         Ok(Command::Link(link))
     }
 
+    fn parseDelete(&mut self) -> Result<Command> {
+        Ok(Command::Delete)
+    }
+
+    fn parseUpdate(&mut self) -> Result<Command> {
+        Ok(Command::Update)
+    }
+
+    /// ```select user[id,name](id=1 and 1=1) as user0 -usage(number > 9) as usage0-> car```
+    fn parseSelect(&mut self) -> Result<Command> {
+        let mut select = Select::default();
+
+        #[derive(Clone, Copy)]
+        enum State {
+            ReadSrcName,
+            ReadSrcColumnNames,
+            ReadSrcFilterExpr,
+            ReadSrcAlias,
+
+            ReadRelationName,
+            ReadRelationColumnNames,
+            ReadRelationFilterExpr,
+            ReadRelationAlias,
+
+            ReadDestName,
+            ReadDestColumnNames,
+            ReadDestFilterExpr,
+            ResdDesrAlias,
+        }
+
+        let mut state = State::ReadSrcName;
+
+        loop {
+            match state {
+                State::ReadSrcName => {
+                    select.srcTableName = self.getCurrentElementAdvance()?.expectTextLiteral("expect src table name")?;
+                    state = State::ReadSrcColumnNames;
+                }
+                State::ReadSrcColumnNames => {
+                    if self.getCurrentElementAdvance()?.expectTextLiteralContentBool(global::方括号_STR) {
+
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+                    state = State::ReadSrcFilterExpr;
+                }
+                _ => {}
+            }
+
+            break;
+        }
+
+        match self.getCurrentElementAdvance()? {
+            Element::TextLiteral(text) => {
+                match text.as_str() {
+                    global::方括号_STR => {}
+                    global::圆括号_STR => {}
+                    _ => self.throwSyntaxErrorDetail("src table should followed by explicit column names, filter exprs")?,
+                }
+            }
+            Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) => {}
+            _ => self.throwSyntaxError()?,
+        }
+
+        Ok(Command::Select)
+    }
+
     /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个 <br>
     /// stopWhenParseRightComplete 用来应对(a>0+6),0+6未被括号保护,不然的话会解析成  (a>1)+6
     fn parseExpr(&mut self, stopWhenParseRightComplete: bool) -> Result<Expr> {
         // 像 a = 0+1 的 0+1 是没有用括号保护起来的 需要有这样的标识的
         let mut hasLeading括号 = false;
 
-        if self.getCurrentElement()?.expectTextLiteralContentBool(global::括号_STR) {
+        if self.getCurrentElement()?.expectTextLiteralContentBool(global::圆括号_STR) {
             hasLeading括号 = true;
             self.skipElement(1)?;
         }
@@ -671,7 +752,7 @@ impl Parser {
 
             match parseCondState {
                 ParseCondState::ParsingLeft => {
-                    if currentElement.expectTextLiteralContentBool(global::括号_STR) {
+                    if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
                         expr = self.parseExpr(false)?;
                         parseCondState = ParseCondState::ParsingOp;
@@ -707,7 +788,7 @@ impl Parser {
                     match currentElement {
                         Element::TextLiteral(ref text) => {
                             // 后续要支持 a in ('a') 和 a = (0+1)
-                            if text == global::括号_STR {
+                            if text == global::圆括号_STR {
                                 // 要应对 a in ('a'),那么碰到"("的话需要去看看前边的是不是 in
 
                                 // 需要先回过去然后回过来,不然prevElement还是currentElement
@@ -778,7 +859,7 @@ impl Parser {
                             }
 
                             // (a = 1) 的 ")",说明要收了，递归结束要返回上轮
-                            if text == global::括号1_STR {
+                            if text == global::圆括号1_STR {
                                 break;
                             }
 
@@ -797,7 +878,7 @@ impl Parser {
                                     }
 
                                     // getCurrentElement()其实已是下个了
-                                    let nextElementIs括号 = self.getCurrentElement()?.expectTextLiteralContentBool(global::括号_STR);
+                                    let nextElementIs括号 = self.getCurrentElement()?.expectTextLiteralContentBool(global::圆括号_STR);
 
                                     expr = Expr::BiDirection {
                                         leftExpr: Box::new(expr),
@@ -857,7 +938,7 @@ impl Parser {
     // 单独的生成小的parser,element只包含expr的
     fn parseInExprs(&mut self) -> Result<Vec<Expr>> {
         // 要以(打头
-        self.getCurrentElement()?.expectTextLiteralContent(global::括号_STR)?;
+        self.getCurrentElement()?.expectTextLiteralContent(global::圆括号_STR)?;
 
         let mut 括号count = 0;
         let mut 括号1count = 0;
@@ -873,13 +954,13 @@ impl Parser {
             match currentElement {
                 Element::TextLiteral(text) => {
                     match text.as_str() {
-                        global::括号_STR => {
+                        global::圆括号_STR => {
                             pendingElementVec.push(currentElement.clone());
 
                             suffix_plus_plus!(括号count);
                         }
                         // 要以)收尾
-                        global::括号1_STR => {
+                        global::圆括号1_STR => {
                             // 说明括号已然收敛了 是last的)
                             if prefix_plus_plus!(括号1count) == 括号count {
                                 // pending的不要忘了
@@ -1024,7 +1105,8 @@ pub enum Element {
     DecimalLiteral(f64),
     Op(Op),
     Boolean(bool),
-    Unknown,
+    /// 对应"->"
+    To,
 }
 
 impl Element {
@@ -1083,13 +1165,13 @@ impl Element {
 impl Display for Element {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Element::TextLiteral(s) => write!(f, "{}({})", "TextLiteral", s),
-            Element::StringContent(s) => write!(f, "{}({})", "StringContent", s),
-            Element::IntegerLiteral(s) => write!(f, "{}({})", "IntegerLiteral", s),
-            Element::DecimalLiteral(s) => write!(f, "{}({})", "DecimalLiteral", s),
-            Element::Boolean(bool) => write!(f, "{}({})", "Boolean", bool),
-            Element::Op(op) => write!(f, "{}({})", "Op", op),
-            _ => write!(f, "{}", "Unknown"),
+            Element::TextLiteral(s) => write!(f, "TextLiteral({})", s),
+            Element::StringContent(s) => write!(f, "StringContent({})", s),
+            Element::IntegerLiteral(s) => write!(f, "IntegerLiteral({})", s),
+            Element::DecimalLiteral(s) => write!(f, "DecimalLiteral({})", s),
+            Element::Boolean(bool) => write!(f, "Boolean({})", bool),
+            Element::Op(op) => write!(f, "Op({})", op),
+            Element::To => write!(f, "To"),
         }
     }
 }
@@ -1201,6 +1283,24 @@ pub struct Link {
     pub relationColumnExprs: Vec<Expr>,
 }
 
+#[derive(Default, Debug)]
+pub struct Select {
+    pub srcTableName: String,
+    pub srcTableColumnNames: Option<Vec<String>>,
+    pub srcTableFilterExpr: Option<Expr>,
+    pub srcTableAlias: Option<String>,
+
+    pub destTableName: String,
+    pub destTableColumnNames: Option<Vec<String>>,
+    pub destTableFilterExpr: Option<Expr>,
+    pub destTableAlias: Option<Expr>,
+
+    pub relationName: String,
+    pub relationColumnNames: Vec<String>,
+    pub relationFliterExpr: Option<Expr>,
+    pub relationAlias: Option<String>,
+}
+
 // ------------------------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1229,7 +1329,8 @@ mod test {
         // parser::parse("link user ((a = 1) = true)").unwrap();
         // parser::parse("link user (((a = 1)) = true)").unwrap();
         // parser::parse("link user ( a in (a,b,d))").unwrap();
-        parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
+        // parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
+        parser::parse("select user[id,name](id=1 and 1=1) -usage(number > 9) as usage0-> car").unwrap();
     }
 }
 

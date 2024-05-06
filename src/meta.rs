@@ -19,8 +19,8 @@ pub struct Table {
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
 pub enum TableType {
-    TABLE,
-    RELATION,
+    Table,
+    Relation,
     Unknown,
 }
 
@@ -35,8 +35,8 @@ impl FromStr for TableType {
 
     fn from_str(str: &str) -> Result<Self, Self::Err> {
         match str.to_uppercase().as_str() {
-            "TABLE" => Ok(TableType::TABLE),
-            "RELATION" => Ok(TableType::RELATION),
+            "TABLE" => Ok(TableType::Table),
+            "RELATION" => Ok(TableType::Relation),
             _ => throw!(&format!("unknown type:{}", str)),
         }
     }

@@ -1,6 +1,8 @@
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
+use std::io::SeekFrom;
 use std::path::Path;
+use std::ptr::read;
 use crate::config::CONFIG;
 use crate::{executor, global, prefix_plus_plus, throw};
 use crate::meta::{Column, Table, TableType};
@@ -10,30 +12,27 @@ use dashmap::mapref::one::{Ref, RefMut};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use bytes::{BufMut, BytesMut};
 use crate::expr::Expr;
 use crate::graph_value::GraphValue;
 
 pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
-    let dataDirPath: &Path = CONFIG.dataDir.as_ref();
+    if global::TABLE_NAME_TABLE.contains_key(table.name.as_str()) {
+        throw!(&format!("table/relation: {} already exist",table.name))
+    }
 
     // 表对应的data 文件
-    let tableDataFilePath = dataDirPath.join(&table.name);
-    let tableDataFileExist = tableDataFilePath.exists();
-    if restore {
-        if tableDataFileExist == false {
-            throw!(&format!("data file of table:{} not exist", table.name));
-        }
-    } else {
-        if tableDataFileExist {
+    let tableDataFilePath = (CONFIG.dataDir.as_ref() as &Path).join(&table.name);
+
+    if restore == false {
+        if tableDataFilePath.exists() {
             throw!(&format!("data file of table:{} has already exist", table.name));
         }
 
-        File::create(tableDataFilePath).await?;
-    }
+        File::create(tableDataFilePath.as_path()).await?;
 
-    // table_record 文件
-    if restore == false {
+        // table_record 文件
         let jsonString = serde_json::to_string(&table)?;
         unsafe {
             let mut tableRecordFile = global::TABLE_RECORD_FILE.as_ref().unwrap().write().await;
@@ -41,8 +40,7 @@ pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
         };
     }
 
-    let dataDirPath: &Path = CONFIG.dataDir.as_ref();
-    let tableDataFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(dataDirPath.join(table.name.as_str())).await?;
+    let tableDataFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(tableDataFilePath.as_path()).await?;
     table.dataFile = Some(tableDataFile);
 
     // map
@@ -56,14 +54,117 @@ pub async fn insertValues(insertValues: InsertValues) -> Result<()> {
     let mut table = getTableRefMutByName(&insertValues.tableName)?;
 
     // 不能对relation使用insert into
-    if let TableType::RELATION = table.type0 {
+    if let TableType::Relation = table.type0 {
         throw!(&format!("{} is a RELATION , can not use insert into on RELATION", insertValues.tableName));
     }
 
-    let jsonString = serde_json::to_string(&generateInsertValuesJson(&insertValues, &*table)?)?;
-    table.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?;
+    let rowData = generateInsertValuesJson(&insertValues, &*table)?;
+    let bytesMut = writeBytesMut(&rowData)?;
+    table.dataFile.as_mut().unwrap().write_all(bytesMut.as_ref()).await?;
 
     Ok(())
+}
+
+
+/// 它本质是向relation对应的data file写入
+/// 两个元素之间的relation只看种类不看里边的属性的
+pub async fn link(link: Link) -> Result<()> {
+    // 得到3个表的对象
+    let mut srcTable = getTableRefMutByName(link.srcTableName.as_str())?;
+    let mut destTable = getTableRefMutByName(link.destTableName.as_str())?;
+
+    async fn getSatisfiedRowNumVec(tableFilterExpr: Option<&Expr>, table: &mut Table) -> Result<Vec<u64>> {
+        let tableDataFile = table.dataFile.as_mut().unwrap();
+
+        tableDataFile.seek(SeekFrom::Start(0)).await?;
+
+        let satisfiedRowNumVec =
+            if tableFilterExpr.is_some() {
+                let mut satisfiedRowNumVec = Vec::new();
+                let mut dataLenBuffer = vec![0; global::ROW_DATA_LEN_FIELD_LEN];
+
+                loop {
+                    let position = tableDataFile.seek(SeekFrom::Current(0)).await?;
+
+                    // 相当的坑 有read()和read_buf() 前边看的是len后边看的是capactiy
+                    // 后边的是不能用的 虽然有Vec::with_capacity() 然而随读取的越多vec本身也会扩容的
+                    let readCount = tableDataFile.read(&mut dataLenBuffer).await?;
+                    if readCount == 0 {  // reach the end
+                        break;
+                    } else {
+                        assert_eq!(readCount, global::ROW_DATA_LEN_FIELD_LEN);
+                    }
+
+                    let dataLen = u32::from_be_bytes([dataLenBuffer[0], dataLenBuffer[1], dataLenBuffer[2], dataLenBuffer[3]]) as usize;
+                    let mut dataBuffer = vec![0u8; dataLen];
+                    let readCount = tableDataFile.read(&mut dataBuffer).await?;
+                    assert_eq!(readCount, dataLen);
+                    let jsonString = String::from_utf8(dataBuffer)?;
+
+                    let rowData: HashMap<String, GraphValue> = serde_json::from_str(&jsonString)?;
+                    if let GraphValue::Boolean(satisfy) = tableFilterExpr.unwrap().calc(Some(&rowData))? {
+                        if satisfy {
+                            satisfiedRowNumVec.push(position);
+                        }
+                    } else {
+                        throw!("table filter should get a boolean")
+                    }
+                }
+
+                satisfiedRowNumVec
+            } else {
+                vec![0]
+            };
+
+        Ok(satisfiedRowNumVec)
+    }
+
+    // 对src table和dest table调用expr筛选
+    let srcTableSatisfiedRowNums = getSatisfiedRowNumVec(link.srcTableFilterExpr.as_ref(), srcTable.value_mut()).await?;
+    let destTableSatisfiedRowNums = getSatisfiedRowNumVec(link.destTableFilterExpr.as_ref(), destTable.value_mut()).await?;
+
+    // 用insetValues套路
+    {
+        #[derive(Serialize, Deserialize)]
+        struct Node {
+            tableName: String,
+            positions: Vec<u64>,
+        }
+
+        let insertValues = InsertValues {
+            tableName: link.destTableName.clone(),
+            useExplicitColumnNames: true,
+            columnNames: link.relationColumnNames.clone(),
+            columnExprs: link.relationColumnExprs.clone(),
+        };
+        let mut relationTable = getTableRefMutByName(link.relationName.as_str())?;
+        let mut rowData = generateInsertValuesJson(&insertValues, &*relationTable)?;
+
+        rowData["src"] = json!(Node {
+            tableName:srcTable.name.clone(),
+            positions:srcTableSatisfiedRowNums,
+        });
+        rowData["dest"] = json!(Node {
+            tableName:destTable.name.clone(),
+            positions:destTableSatisfiedRowNums,
+        });
+
+        let bytesMut = writeBytesMut(&rowData)?;
+
+        let relationDataFile = relationTable.dataFile.as_mut().unwrap();
+        // bytesMut.as_ref() 也可以使用 &bytesMut[..]
+        relationDataFile.write_all(bytesMut.as_ref()).await?;
+    }
+
+    Ok(())
+}
+
+fn getTableRefMutByName(tableName: &str) -> Result<RefMut<String, Table>> {
+    let table = global::TABLE_NAME_TABLE.get_mut(tableName);
+    if table.is_none() {
+        throw!(&format!("table:{} not exist", tableName));
+    }
+    Ok(table.unwrap())
 }
 
 fn generateInsertValuesJson(insertValues: &InsertValues, table: &Table) -> Result<Value> {
@@ -119,91 +220,26 @@ fn generateInsertValuesJson(insertValues: &InsertValues, table: &Table) -> Resul
     Ok(rowData)
 }
 
-/// 它本质是向relation对应的data file写入
-/// 两个元素之间的relation只看种类不看里边的属性的
-pub async fn link(link: Link) -> Result<()> {
-    // 得到3个表的对象
-    let mut srcTable = getTableRefMutByName(link.srcTableName.as_str())?;
-    let mut destTable = getTableRefMutByName(link.destTableName.as_str())?;
+fn writeBytesMut(rowData: &Value) -> Result<BytesMut> {
+    let jsonString = serde_json::to_string(rowData)?;
 
-    async fn getSatisfiedRowNumVec(tableFilterExpr: Option<&Expr>, table: &mut Table) -> Result<Vec<usize>> {
-        Ok(if tableFilterExpr.is_some() {
-            let srcTableFilterExpr = tableFilterExpr.unwrap();
-            let mut rowNum: usize = 0;
-            let mut satisfiedRowNumVec = Vec::new();
+    let jsonStringByte = jsonString.as_bytes();
+    let dataLen = jsonStringByte.len();
 
-            let srcTableDataFile = table.dataFile.as_mut().unwrap();
-            let bufReader = BufReader::new(srcTableDataFile);
-            let mut lines = bufReader.lines();
-            while let Some(line) = lines.next_line().await? {
-                prefix_plus_plus!(rowNum);
+    assert!(u32::MAX as usize >= jsonStringByte.len());
 
-                let rowData: HashMap<String, GraphValue> = serde_json::from_str(&line)?;
-                if let GraphValue::Boolean(satisfy) = srcTableFilterExpr.calc(Some(&rowData))? {
-                    if satisfy {
-                        satisfiedRowNumVec.push(rowNum);
-                    }
-                } else {
-                    throw!("table filter should get a boolean")
-                }
-            }
+    let mut bytesMut = BytesMut::with_capacity(global::ROW_DATA_LEN_FIELD_LEN + jsonStringByte.len());
+    bytesMut.put_u32(dataLen as u32);
+    bytesMut.put_slice(jsonStringByte);
 
-            satisfiedRowNumVec
-        } else {
-            vec![0]
-        })
-    }
-
-    // 对src table和dest table调用expr筛选
-    let srcTableSatisfiedRowNums = getSatisfiedRowNumVec(link.srcTableFilterExpr.as_ref(), srcTable.value_mut()).await?;
-    let destTableSatisfiedRowNums = getSatisfiedRowNumVec(link.destTableFilterExpr.as_ref(), destTable.value_mut()).await?;
-
-    // 用insetValues套路
-    {
-        #[derive(Serialize, Deserialize)]
-        struct Node {
-            tableName: String,
-            rowNums: Vec<usize>,
-        }
-
-        let insertValues = InsertValues {
-            tableName: link.destTableName.clone(),
-            useExplicitColumnNames: true,
-            columnNames: link.relationColumnNames.clone(),
-            columnExprs: link.relationColumnExprs.clone(),
-        };
-        let mut relationTable = getTableRefMutByName(link.relationName.as_str())?;
-        let mut rowData = generateInsertValuesJson(&insertValues, &*relationTable)?;
-
-        rowData["src"] = json!(Node {
-            tableName:srcTable.name.clone(),
-            rowNums:srcTableSatisfiedRowNums,
-        });
-        rowData["dest"] = json!(Node {
-            tableName:destTable.name.clone(),
-            rowNums:destTableSatisfiedRowNums,
-        });
-
-        let jsonString = serde_json::to_string(&rowData)?;
-
-        relationTable.dataFile.as_mut().unwrap().write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?;
-    }
-
-    Ok(())
+    Ok(bytesMut)
 }
 
-fn getTableRefMutByName(tableName: &str) -> Result<RefMut<String, Table>> {
-    let table = global::TABLE_NAME_TABLE.get_mut(tableName);
-    if table.is_none() {
-        throw!(&format!("table:{} not exist", tableName));
-    }
-    Ok(table.unwrap())
-}
 
 #[cfg(test)]
 mod test {
     use serde_json::json;
-    use crate::meta::GraphValue;
+    use crate::graph_value::GraphValue;
 
     #[test]
     pub fn a() {
