@@ -130,10 +130,12 @@ pub async fn select(select: &Select) -> Result<()> {
 
             for relationData in relationDatas {
                 let srcPointDesc = relationData.get(PointDesc::SRC).unwrap().asPointDesc()?;
+                // relation的src表的name不符合
                 if srcPointDesc.tableName != select.srcTableName {
                     continue;
                 }
 
+                // relation的dest表的name不符合
                 let destPointDesc = relationData.get(PointDesc::DEST).unwrap().asPointDesc()?;
                 if destPointDesc.tableName != (*select.destTableName.as_ref().unwrap()) {
                     continue;
@@ -142,12 +144,16 @@ pub async fn select(select: &Select) -> Result<()> {
                 if srcPointDesc.positions.is_empty() || destPointDesc.positions.is_empty() {
                     continue;
                 }
-
+                println!("aaaaaaaaaaaaaaa");
                 let mut srcTable = getTableRefMutByName(select.srcTableName.as_str())?;
                 let srcRowDatas = getRowsByPositions(&srcPointDesc.positions, &mut srcTable, select.srcTableFilterExpr.as_ref(), select.srcTableColumnNames.as_ref()).await?;
 
+                println!("bbbbbbbbbbbbbb");
+
                 let mut destTable = getTableRefMutByName(select.destTableName.as_ref().unwrap())?;
                 let destRowDatas = getRowsByPositions(&destPointDesc.positions, &mut destTable, select.destTableFilterExpr.as_ref(), select.destTableColumnNames.as_ref()).await?;
+
+                println!("cccccccccccccccc");
 
                 selectResultVec.push(
                     SelectResult {
