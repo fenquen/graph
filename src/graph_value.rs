@@ -1,8 +1,10 @@
 use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize};
+use strum_macros::Display;
 use crate::graph_error::GraphError;
 use crate::parser::{Element, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
 use crate::throw;
+use anyhow::Result;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GraphValue {
@@ -12,6 +14,7 @@ pub enum GraphValue {
     Boolean(bool),
     Integer(i64),
     Decimal(f64),
+    PointDesc(PointDesc),
 }
 
 impl Display for GraphValue {
@@ -30,7 +33,7 @@ impl TryFrom<&Element> for GraphValue {
     type Error = GraphError;
 
     // 如何应对Element::TextLiteral 表的字段名是的
-    fn try_from(element: &Element) -> anyhow::Result<Self, Self::Error> {
+    fn try_from(element: &Element) -> Result<Self, Self::Error> {
         match element {
             Element::StringContent(s) => Ok(GraphValue::String(s.clone())),
             Element::Boolean(bool) => Ok(GraphValue::Boolean(*bool)),
@@ -43,7 +46,7 @@ impl TryFrom<&Element> for GraphValue {
 }
 
 impl GraphValue {
-    pub fn boolValue(&self) -> anyhow::Result<bool> {
+    pub fn boolValue(&self) -> Result<bool> {
         if let GraphValue::Boolean(bool) = self {
             Ok(*bool)
         } else {
@@ -51,8 +54,16 @@ impl GraphValue {
         }
     }
 
+    pub fn asPointDesc(&self) -> Result<&PointDesc> {
+        if let GraphValue::PointDesc(pointDesc) = self {
+            Ok(pointDesc)
+        } else {
+            throw!(&format!("not PointDEsc, is {self:?}"))
+        }
+    }
+
     /// 当前不支持 type的自动转换 两边的type要严格相同的
-    pub fn calc(&self, op: Op, rightValues: &[GraphValue]) -> anyhow::Result<GraphValue> {
+    pub fn calc(&self, op: Op, rightValues: &[GraphValue]) -> Result<GraphValue> {
         if let Op::SqlOp(SqlOp::In) = op {
             self.calcIn(rightValues)
         } else {
@@ -61,7 +72,7 @@ impl GraphValue {
     }
 
     /// 目前对不兼容的type之间的大小比较返回false
-    pub fn calcOneToOne(&self, op: Op, rightValue: &GraphValue) -> anyhow::Result<GraphValue> {
+    pub fn calcOneToOne(&self, op: Op, rightValue: &GraphValue) -> Result<GraphValue> {
         match op {
             Op::MathCmpOp(mathCmpOp) => {
                 match mathCmpOp {
@@ -194,7 +205,7 @@ impl GraphValue {
         }
     }
 
-    pub fn calcIn(&self, rightValues: &[GraphValue]) -> anyhow::Result<GraphValue> {
+    pub fn calcIn(&self, rightValues: &[GraphValue]) -> Result<GraphValue> {
         for rightValue in rightValues {
             let calcResult = self.calcOneToOne(Op::MathCmpOp(MathCmpOp::Equal), rightValue)?;
             if calcResult.boolValue()? == false {
@@ -203,4 +214,15 @@ impl GraphValue {
         }
         Ok(GraphValue::Boolean(true))
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PointDesc {
+    pub tableName: String,
+    pub positions: Vec<u64>,
+}
+
+impl PointDesc {
+    pub const SRC: &'static str = "src";
+    pub const DEST: &'static str = "dest";
 }

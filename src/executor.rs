@@ -6,7 +6,7 @@ use std::ptr::read;
 use crate::config::CONFIG;
 use crate::{executor, global, prefix_plus_plus, throw};
 use crate::meta::{Column, Table, TableType};
-use crate::parser::{InsertValues, Link};
+use crate::parser::{InsertValues, Link, Select};
 use anyhow::Result;
 use dashmap::mapref::one::{Ref, RefMut};
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,9 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use bytes::{BufMut, BytesMut};
 use crate::expr::Expr;
-use crate::graph_value::GraphValue;
+use crate::graph_value::{GraphValue, PointDesc};
+
+type RowData = HashMap<String, GraphValue>;
 
 pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     if global::TABLE_NAME_TABLE.contains_key(table.name.as_str()) {
@@ -36,7 +38,7 @@ pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
         let jsonString = serde_json::to_string(&table)?;
         unsafe {
             let mut tableRecordFile = global::TABLE_RECORD_FILE.as_ref().unwrap().write().await;
-            tableRecordFile.write_all([jsonString.as_bytes(), &[b'\r'], &[b'\n']].concat().as_ref()).await?
+            tableRecordFile.write_all([jsonString.as_bytes(), &[b'\r', b'\n']].concat().as_ref()).await?
         };
     }
 
@@ -49,7 +51,7 @@ pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn insertValues(insertValues: InsertValues) -> Result<()> {
+pub async fn insertValues(insertValues: &InsertValues) -> Result<()> {
     // 对应的表是不是exist
     let mut table = getTableRefMutByName(&insertValues.tableName)?;
 
@@ -65,72 +67,19 @@ pub async fn insertValues(insertValues: InsertValues) -> Result<()> {
     Ok(())
 }
 
-
 /// 它本质是向relation对应的data file写入
 /// 两个元素之间的relation只看种类不看里边的属性的
-pub async fn link(link: Link) -> Result<()> {
+pub async fn link(link: &Link) -> Result<()> {
     // 得到3个表的对象
     let mut srcTable = getTableRefMutByName(link.srcTableName.as_str())?;
     let mut destTable = getTableRefMutByName(link.destTableName.as_str())?;
 
-    async fn getSatisfiedRowNumVec(tableFilterExpr: Option<&Expr>, table: &mut Table) -> Result<Vec<u64>> {
-        let tableDataFile = table.dataFile.as_mut().unwrap();
-
-        tableDataFile.seek(SeekFrom::Start(0)).await?;
-
-        let satisfiedRowNumVec =
-            if tableFilterExpr.is_some() {
-                let mut satisfiedRowNumVec = Vec::new();
-                let mut dataLenBuffer = vec![0; global::ROW_DATA_LEN_FIELD_LEN];
-
-                loop {
-                    let position = tableDataFile.seek(SeekFrom::Current(0)).await?;
-
-                    // 相当的坑 有read()和read_buf() 前边看的是len后边看的是capactiy
-                    // 后边的是不能用的 虽然有Vec::with_capacity() 然而随读取的越多vec本身也会扩容的
-                    let readCount = tableDataFile.read(&mut dataLenBuffer).await?;
-                    if readCount == 0 {  // reach the end
-                        break;
-                    } else {
-                        assert_eq!(readCount, global::ROW_DATA_LEN_FIELD_LEN);
-                    }
-
-                    let dataLen = u32::from_be_bytes([dataLenBuffer[0], dataLenBuffer[1], dataLenBuffer[2], dataLenBuffer[3]]) as usize;
-                    let mut dataBuffer = vec![0u8; dataLen];
-                    let readCount = tableDataFile.read(&mut dataBuffer).await?;
-                    assert_eq!(readCount, dataLen);
-                    let jsonString = String::from_utf8(dataBuffer)?;
-
-                    let rowData: HashMap<String, GraphValue> = serde_json::from_str(&jsonString)?;
-                    if let GraphValue::Boolean(satisfy) = tableFilterExpr.unwrap().calc(Some(&rowData))? {
-                        if satisfy {
-                            satisfiedRowNumVec.push(position);
-                        }
-                    } else {
-                        throw!("table filter should get a boolean")
-                    }
-                }
-
-                satisfiedRowNumVec
-            } else {
-                vec![0]
-            };
-
-        Ok(satisfiedRowNumVec)
-    }
-
     // 对src table和dest table调用expr筛选
-    let srcTableSatisfiedRowNums = getSatisfiedRowNumVec(link.srcTableFilterExpr.as_ref(), srcTable.value_mut()).await?;
-    let destTableSatisfiedRowNums = getSatisfiedRowNumVec(link.destTableFilterExpr.as_ref(), destTable.value_mut()).await?;
+    let srcTableSatisfiedRowNums = scanSatisfiedRows(link.srcTableFilterExpr.as_ref(), srcTable.value_mut(), false, None).await?;
+    let destTableSatisfiedRowNums = scanSatisfiedRows(link.destTableFilterExpr.as_ref(), destTable.value_mut(), false, None).await?;
 
     // 用insetValues套路
     {
-        #[derive(Serialize, Deserialize)]
-        struct Node {
-            tableName: String,
-            positions: Vec<u64>,
-        }
-
         let insertValues = InsertValues {
             tableName: link.destTableName.clone(),
             useExplicitColumnNames: true,
@@ -140,14 +89,14 @@ pub async fn link(link: Link) -> Result<()> {
         let mut relationTable = getTableRefMutByName(link.relationName.as_str())?;
         let mut rowData = generateInsertValuesJson(&insertValues, &*relationTable)?;
 
-        rowData["src"] = json!(Node {
+        rowData["src"] = json!(GraphValue::PointDesc(PointDesc {
             tableName:srcTable.name.clone(),
-            positions:srcTableSatisfiedRowNums,
-        });
-        rowData["dest"] = json!(Node {
+            positions:srcTableSatisfiedRowNums.iter().map(|tuple|tuple.0).collect(),
+        }));
+        rowData["dest"] = json!(GraphValue::PointDesc(PointDesc {
             tableName:destTable.name.clone(),
-            positions:destTableSatisfiedRowNums,
-        });
+            positions:destTableSatisfiedRowNums.iter().map(|tuple|tuple.0).collect(),
+        }));
 
         let bytesMut = writeBytesMut(&rowData)?;
 
@@ -157,6 +106,179 @@ pub async fn link(link: Link) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// 如果不是含有relation的select 便是普通的select
+pub async fn select(select: &Select) -> Result<()> {
+    // 先要明确是不是含有relation
+    match select.relationName {
+        Some(ref relationName) => {
+            let mut relation = getTableRefMutByName(relationName)?;
+            let relationDatas = scanSatisfiedRows(select.relationFliterExpr.as_ref(), relation.value_mut(), true, select.relationColumnNames.as_ref()).await?;
+            let relationDatas: Vec<HashMap<String, GraphValue>> = relationDatas.into_iter().map(|tuple| tuple.1).collect();
+
+            println!("{:?}\n", relationDatas);
+
+            #[derive(Deserialize, Debug)]
+            struct SelectResult {
+                relationData: RowData,
+                srcRowDatas: Vec<RowData>,
+                destRowDatas: Vec<RowData>,
+            }
+
+            let mut selectResultVec = Vec::with_capacity(relationDatas.len());
+
+            for relationData in relationDatas {
+                let srcPointDesc = relationData.get(PointDesc::SRC).unwrap().asPointDesc()?;
+                if srcPointDesc.tableName != select.srcTableName {
+                    continue;
+                }
+
+                let destPointDesc = relationData.get(PointDesc::DEST).unwrap().asPointDesc()?;
+                if destPointDesc.tableName != (*select.destTableName.as_ref().unwrap()) {
+                    continue;
+                }
+
+                if srcPointDesc.positions.is_empty() || destPointDesc.positions.is_empty() {
+                    continue;
+                }
+
+                let mut srcTable = getTableRefMutByName(select.srcTableName.as_str())?;
+                let srcRowDatas = getRowsByPositions(&srcPointDesc.positions, &mut srcTable, select.srcTableFilterExpr.as_ref(), select.srcTableColumnNames.as_ref()).await?;
+
+                let mut destTable = getTableRefMutByName(select.destTableName.as_ref().unwrap())?;
+                let destRowDatas = getRowsByPositions(&destPointDesc.positions, &mut destTable, select.destTableFilterExpr.as_ref(), select.destTableColumnNames.as_ref()).await?;
+
+                selectResultVec.push(
+                    SelectResult {
+                        relationData,
+                        srcRowDatas,
+                        destRowDatas,
+                    });
+            }
+
+            println!("{:?}", selectResultVec)
+        }
+        None => {
+            let mut srcTable = getTableRefMutByName(select.srcTableName.as_str())?;
+            let rows = scanSatisfiedRows(select.srcTableFilterExpr.as_ref(), srcTable.value_mut(), true, select.srcTableColumnNames.as_ref()).await?;
+            let rows: Vec<HashMap<String, GraphValue>> = rows.into_iter().map(|tuple| tuple.1).collect();
+            println!("{:?}", rows);
+        }
+    }
+
+    Ok(())
+}
+
+async fn getRowsByPositions(positions: &[u64],
+                            table: &mut Table,
+                            tableFilterExpr: Option<&Expr>,
+                            selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<RowData>> {
+    let tableDataFile = table.dataFile.as_mut().unwrap();
+
+    let mut dataLenBuffer = [0; global::ROW_DATA_LEN_FIELD_LEN];
+
+    let mut rowDatas = vec![];
+
+    for position in positions {
+        tableDataFile.seek(SeekFrom::Start(*position)).await?;
+        if let (Some(rowData), _) = readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await? {
+            rowDatas.push(rowData);
+        }
+    }
+
+    Ok(rowDatas)
+}
+
+async fn scanSatisfiedRows(tableFilterExpr: Option<&Expr>,
+                           table: &mut Table,
+                           select: bool,
+                           selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(u64, RowData)>> {
+    let tableDataFile = table.dataFile.as_mut().unwrap();
+
+    tableDataFile.seek(SeekFrom::Start(0)).await?;
+
+    let satisfiedRows =
+        if tableFilterExpr.is_some() || select {
+            let mut satisfiedRows = Vec::new();
+
+            let mut dataLenBuffer = [0; global::ROW_DATA_LEN_FIELD_LEN];
+
+            loop {
+                let position = tableDataFile.seek(SeekFrom::Current(0)).await?;
+
+                let (rowData, reachEnd) = readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await?;
+                if reachEnd {
+                    break;
+                }
+
+                if rowData.is_some() {
+                    satisfiedRows.push((position, rowData.unwrap()));
+                }
+            }
+
+            satisfiedRows
+        } else {
+            vec![(u64::MAX, HashMap::default())]
+        };
+
+    Ok(satisfiedRows)
+}
+
+async fn readRow(tableDataFile: &mut File,
+                 tableFilterExpr: Option<&Expr>,
+                 selectedColumnNames: Option<&Vec<String>>,
+                 dataLenBuffer: &mut [u8]) -> Result<(Option<RowData>, bool)> {
+    // 相当的坑 有read()和read_buf() 前边看的是len后边看的是capactiy
+    // 后边的是不能用的 虽然有Vec::with_capacity() 然而随读取的越多vec本身也会扩容的 后来改为 [0; global::ROW_DATA_LEN_FIELD_LEN]
+    let readCount = tableDataFile.read(dataLenBuffer).await?;
+    if readCount == 0 {  // reach the end
+        return Ok((None, true));
+    }
+
+    assert_eq!(readCount, global::ROW_DATA_LEN_FIELD_LEN);
+
+    let dataLen = u32::from_be_bytes([dataLenBuffer[0], dataLenBuffer[1], dataLenBuffer[2], dataLenBuffer[3]]) as usize;
+    let mut dataBuffer = vec![0u8; dataLen];
+    let readCount = tableDataFile.read(&mut dataBuffer).await?;
+    assert_eq!(readCount, dataLen);
+    let jsonString = String::from_utf8(dataBuffer)?;
+
+    let mut rowData: HashMap<String, GraphValue> = serde_json::from_str(&jsonString)?;
+
+    let rowData = if selectedColumnNames.is_some() {
+        let mut a = HashMap::with_capacity(rowData.len());
+        for selectedColumnName in selectedColumnNames.unwrap() {
+            let entry = rowData.remove_entry(selectedColumnName);
+
+            // 说明指明的column不存在
+            if entry.is_none() {
+                throw!(&format!("not have column:{}", selectedColumnName));
+            }
+
+            let entry = entry.unwrap();
+
+            a.insert(entry.0, entry.1);
+        }
+
+        a
+    } else {
+        rowData
+    };
+
+    if tableFilterExpr.is_none() {
+        return Ok((Some(rowData), false));
+    }
+
+    if let GraphValue::Boolean(satisfy) = tableFilterExpr.unwrap().calc(Some(&rowData))? {
+        if satisfy {
+            Ok((Some(rowData), false))
+        } else {
+            Ok((None, false))
+        }
+    } else {
+        throw!("table filter should get a boolean")
+    }
 }
 
 fn getTableRefMutByName(tableName: &str) -> Result<RefMut<String, Table>> {
@@ -240,11 +362,25 @@ fn writeBytesMut(rowData: &Value) -> Result<BytesMut> {
 mod test {
     use serde_json::json;
     use crate::graph_value::GraphValue;
+    use crate::{meta, parser};
+    use crate::executor;
+    use crate::parser::Command;
 
     #[test]
     pub fn a() {
         let mut rowData = json!({});
         rowData["name"] = json!(GraphValue::String("s".to_string()));
         println!("{}", serde_json::to_string(&rowData).unwrap());
+    }
+
+    #[tokio::test]
+    pub async fn testSelect() {
+        meta::init().await.unwrap();
+
+        // select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car
+        let commandVec = parser::parse("select user[id,name](id=1 and 0=0)").unwrap();
+        if let Command::Select(ref select) = commandVec[0] {
+            executor::select(select).await.unwrap();
+        }
     }
 }

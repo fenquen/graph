@@ -32,7 +32,7 @@ pub enum Command {
     Link(Link),
     Delete,
     Update,
-    Select,
+    Select(Select),
 }
 
 #[derive(Default)]
@@ -663,26 +663,26 @@ impl Parser {
         Ok(Command::Update)
     }
 
-    /// ```select user[id,name](id=1 and 1=1) as user0 -usage(number > 9) as usage0-> car```
+    /// ```select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car```
     fn parseSelect(&mut self) -> Result<Command> {
         let mut select = Select::default();
 
         #[derive(Clone, Copy)]
         enum State {
-            ReadSrcName,
-            ReadSrcColumnNames,
-            ReadSrcFilterExpr,
-            ReadSrcAlias,
+            ReadSrcName, // 必有
+            ReadSrcColumnNames, // 可选
+            ReadSrcFilterExpr, // 可选
+            ReadSrcAlias, // 可选
 
-            ReadRelationName,
-            ReadRelationColumnNames,
-            ReadRelationFilterExpr,
-            ReadRelationAlias,
+            ReadRelationName, // 可选
+            ReadRelationColumnNames,// 可选
+            ReadRelationFilterExpr,// 可选
+            ReadRelationAlias,// 可选
 
-            ReadDestName,
-            ReadDestColumnNames,
-            ReadDestFilterExpr,
-            ResdDestAlias,
+            ReadDestName,// 可选
+            ReadDestColumnNames,// 可选
+            ReadDestFilterExpr,// 可选
+            ReadDestAlias,// 可选
         }
 
         fn parseColumnNames(parser: &mut Parser) -> Result<Vec<String>> {
@@ -696,8 +696,6 @@ impl Parser {
                     global::方括号1_STR => break,
                     _ => columnNames.push(text),
                 }
-
-                break;
             }
 
             if columnNames.is_empty() {
@@ -708,58 +706,162 @@ impl Parser {
         }
 
         let mut state = State::ReadSrcName;
+        let mut force = true;
 
         loop {
+            let currentElement =
+                if force {
+                    self.getCurrentElementAdvance()?
+                } else {
+                    if let Some(currentElement) = self.getCurrentElementOptionAdvance() {
+                        currentElement
+                    } else {
+                        break;
+                    }
+                };
+
             match state {
                 State::ReadSrcName => {
-                    select.srcTableName = self.getCurrentElementAdvance()?.expectTextLiteral("expect src table name")?;
+                    select.srcTableName = currentElement.expectTextLiteral("expect src table name")?;
+
+                    // 因为上边已然advance了 故而是next element
+                    // let nextElement = self.getCurrentElementOption();
+                    // if nextElement.is_none() {
+                    //     return Ok(Command::Select(select));
+                    // }
+                    //
+                    // match nextElement.unwrap() {
+                    //     Element::TextLiteral(text) => {
+                    //         match text.to_uppercase().as_str() {
+                    //             global::方括号_STR => state = State::ReadSrcColumnNames,
+                    //             global::圆括号_STR => state = State::ReadSrcFilterExpr,
+                    //             "AS" => state = State::ReadSrcAlias,
+                    //             _ => self.throwSyntaxError()?,
+                    //         }
+                    //     }
+                    //     Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) => state = State::ReadRelationName,
+                    //     _ => self.throwSyntaxError()?,
+                    // }
+
                     state = State::ReadSrcColumnNames;
+                    force = false;
                 }
                 State::ReadSrcColumnNames => {
-                    if self.getCurrentElementAdvance()?.expectTextLiteralContentBool(global::方括号_STR) {
+                    if currentElement.expectTextLiteralContentBool(global::方括号_STR) {
                         select.srcTableColumnNames = Some(parseColumnNames(self)?);
                     } else {
                         self.skipElement(-1)?;
                     }
+
                     state = State::ReadSrcFilterExpr;
+                    force = false;
                 }
                 State::ReadSrcFilterExpr => {
-                    if self.getCurrentElementAdvance()?.expectTextLiteralContentBool(global::圆括号_STR) {
+                    if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
                         select.srcTableFilterExpr = Some(self.parseExpr(false)?);
                     } else {
                         self.skipElement(-1)?;
                     }
+
                     state = State::ReadSrcAlias;
+                    force = false;
                 }
                 State::ReadSrcAlias => {
-                    if self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCaseBool("as") {
+                    if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
                         select.srcTableAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by src alias")?);
                     } else {
                         self.skipElement(-1)?;
                     }
 
                     state = State::ReadRelationName;
+                    force = false;
                 }
-                _ => {}
-            }
+                State::ReadRelationName => {
+                    if let Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) = currentElement {
+                        select.relationName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
+                    } else { // 未写 realition 那么后边的全部都不会有了
+                        break;
+                    }
 
-            break;
+                    state = State::ReadRelationColumnNames;
+                    force = false;
+                }
+                State::ReadRelationColumnNames => {
+                    if currentElement.expectTextLiteralContentBool(global::方括号_STR) {
+                        select.relationColumnNames = Some(parseColumnNames(self)?);
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+
+                    state = State::ReadRelationFilterExpr;
+                    force = false;
+                }
+                State::ReadRelationFilterExpr => {
+                    if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
+                        self.skipElement(-1)?;
+                        select.relationFliterExpr = Some(self.parseExpr(false)?);
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+
+                    state = State::ReadRelationAlias;
+                    force = false;
+                }
+                State::ReadRelationAlias => {
+                    if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
+                        select.relationAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by relation alias")?);
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+
+                    state = State::ReadDestName;
+                    force = true;
+                }
+                State::ReadDestName => {
+                    if let Element::To = currentElement {
+                        select.destTableName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
+                    } else {
+                        break;
+                    }
+
+                    state = State::ReadDestColumnNames;
+                    force = false;
+                }
+                State::ReadDestColumnNames => {
+                    if currentElement.expectTextLiteralContentBool(global::方括号_STR) {
+                        select.destTableColumnNames = Some(parseColumnNames(self)?);
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+
+                    state = State::ReadDestFilterExpr;
+                    force = false;
+                }
+                State::ReadDestFilterExpr => {
+                    if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
+                        self.skipElement(-1)?;
+                        select.destTableFilterExpr = Some(self.parseExpr(false)?);
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+
+                    state = State::ReadDestAlias;
+                    force = false;
+                }
+                State::ReadDestAlias => {
+                    if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
+                        select.destTableAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by dest alias")?);
+                    }
+
+                    break;
+                }
+            }
         }
 
-        match self.getCurrentElementAdvance()? {
-            Element::TextLiteral(text) => {
-                match text.as_str() {
-                    global::方括号_STR => {}
-                    global::圆括号_STR => {}
-                    _ => self.throwSyntaxErrorDetail("src table should followed by explicit column names, filter exprs")?,
-                }
-            }
-            Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) => {}
-            _ => self.throwSyntaxError()?,
-        }
+        println!("{select:?}");
 
-        Ok(Command::Select)
+        Ok(Command::Select(select))
     }
 
     /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个 <br>
@@ -1061,12 +1163,16 @@ impl Parser {
     }
 
     fn getCurrentElement(&self) -> Result<&Element> {
-        let option = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex);
+        let option = self.getCurrentElementOption();
         if option.is_some() {
             Ok(option.unwrap())
         } else {
             self.throwSyntaxErrorDetail("unexpected end of sql")?
         }
+    }
+
+    fn getCurrentElementOption(&self) -> Option<&Element> {
+        self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex)
     }
 
     /// 和 peekNextElement 不同的是 得到的是 Option 不是 result
@@ -1300,10 +1406,10 @@ pub enum MathCalcOp {
 impl MathCalcOp {
     pub fn fromChar(char: char) -> Result<Self> {
         match char {
-            '+' => Ok(MathCalcOp::Plus),
-            '/' => Ok(MathCalcOp::Divide),
-            '*' => Ok(MathCalcOp::Multiply),
-            '-' => Ok(MathCalcOp::Minus),
+            global::加号_CHAR => Ok(MathCalcOp::Plus),
+            global::除号_CHAR => Ok(MathCalcOp::Divide),
+            global::乘号_CHAR => Ok(MathCalcOp::Multiply),
+            global::减号_CHAR => Ok(MathCalcOp::Minus),
             _ => throw!(&format!("unknown math calc operator:{char}"))
         }
     }
@@ -1330,13 +1436,13 @@ pub struct Select {
     pub srcTableFilterExpr: Option<Expr>,
     pub srcTableAlias: Option<String>,
 
-    pub destTableName: String,
+    pub destTableName: Option<String>,
     pub destTableColumnNames: Option<Vec<String>>,
     pub destTableFilterExpr: Option<Expr>,
-    pub destTableAlias: Option<Expr>,
+    pub destTableAlias: Option<String>,
 
-    pub relationName: String,
-    pub relationColumnNames: Vec<String>,
+    pub relationName: Option<String>,
+    pub relationColumnNames: Option<Vec<String>>,
     pub relationFliterExpr: Option<Expr>,
     pub relationAlias: Option<String>,
 }
@@ -1370,7 +1476,8 @@ mod test {
         // parser::parse("link user (((a = 1)) = true)").unwrap();
         // parser::parse("link user ( a in (a,b,d))").unwrap();
         // parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
-        parser::parse("select user[id,name](id=1 and 1=1) -usage(number > 9) as usage0-> car").unwrap();
+        // parser::parse("select user[id,name](id=1 and 1=1) -usage(number > 9) as usage0-> car").unwrap();
+        parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car").unwrap();
     }
 }
 

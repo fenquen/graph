@@ -1,11 +1,16 @@
-use std::fmt::{Display, Formatter, write};
+use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
-use tokio::fs::File;
+use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::parser::{Element, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
-use crate::throw;
+use crate::{executor, global, throw};
 use anyhow::Result;
+use tokio::fs;
+use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use crate::config::CONFIG;
 use crate::graph_value::GraphValue;
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -132,4 +137,38 @@ mod test {
         let b = "a".to_string();
         println!("{}", a == b);
     }
+}
+
+pub async fn init() -> Result<()> {
+    // 生成用来保存表文件和元数据的目录
+    fs::create_dir_all(CONFIG.dataDir.as_str()).await?;
+    fs::create_dir_all(CONFIG.metaDir.as_str()).await?;
+
+    // 用来记录表的文件
+    let metaDirPath: &Path = CONFIG.metaDir.as_ref();
+    let tableRecordFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join("table_record")).await?;
+
+    unsafe {
+        global::TABLE_RECORD_FILE = Some(Arc::new(RwLock::new(tableRecordFile)));
+    }
+
+    // 还原
+    rebuildTables().await?;
+
+    Ok(())
+}
+
+async fn rebuildTables() -> Result<()> {
+    unsafe {
+        let mut tableRecordFile = global::TABLE_RECORD_FILE.as_ref().unwrap().write().await;
+
+        let bufReader = BufReader::new(&mut *tableRecordFile);
+        let mut lines = bufReader.lines();
+        while let Some(line) = lines.next_line().await? {
+            let table: Table = serde_json::from_str(&line)?;
+            executor::createTable(table, true).await?;
+        }
+    }
+
+    Ok(())
 }
