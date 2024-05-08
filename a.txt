@@ -71,4 +71,4 @@ insert的values也要能支持expr 可以使用现有的parseInExpr 完成
 要使用binanry的position替换text的lineNum
 本身要有4个byte表示长度
 
-a
+select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre

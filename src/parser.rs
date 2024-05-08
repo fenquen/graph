@@ -19,11 +19,10 @@ pub fn parse(sql: &str) -> Result<Vec<Command>> {
             println!("{element}");
         }
 
-        println!("\n");
+        println!();
     }
 
     parser.parse()
-    //Ok(Default::default())
 }
 
 pub enum Command {
@@ -32,7 +31,7 @@ pub enum Command {
     Link(Link),
     Delete,
     Update,
-    Select(Select),
+    Select(Vec<Select>),
 }
 
 #[derive(Default)]
@@ -663,10 +662,8 @@ impl Parser {
         Ok(Command::Update)
     }
 
-    /// ```select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car```
+    /// ```select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre```
     fn parseSelect(&mut self) -> Result<Command> {
-        let mut select = Select::default();
-
         #[derive(Clone, Copy)]
         enum State {
             ReadSrcName, // 必有
@@ -683,9 +680,11 @@ impl Parser {
             ReadDestColumnNames,// 可选
             ReadDestFilterExpr,// 可选
             ReadDestAlias,// 可选
+
+            TryNextRound,
         }
 
-        fn parseColumnNames(parser: &mut Parser) -> Result<Vec<String>> {
+        fn parseSelectedColumnNames(parser: &mut Parser) -> Result<Vec<String>> {
             let mut columnNames = Vec::default();
 
             loop {
@@ -708,6 +707,9 @@ impl Parser {
         let mut state = State::ReadSrcName;
         let mut force = true;
 
+        let mut selectVec = Vec::default();
+        let mut select = Select::default();
+
         loop {
             let currentElement =
                 if force {
@@ -722,7 +724,7 @@ impl Parser {
 
             match state {
                 State::ReadSrcName => {
-                    select.srcTableName = currentElement.expectTextLiteral("expect src table name")?;
+                    select.srcName = currentElement.expectTextLiteral("expect src table name")?;
 
                     // 因为上边已然advance了 故而是next element
                     // let nextElement = self.getCurrentElementOption();
@@ -748,7 +750,7 @@ impl Parser {
                 }
                 State::ReadSrcColumnNames => {
                     if currentElement.expectTextLiteralContentBool(global::方括号_STR) {
-                        select.srcTableColumnNames = Some(parseColumnNames(self)?);
+                        select.srcColumnNames = Some(parseSelectedColumnNames(self)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -759,7 +761,7 @@ impl Parser {
                 State::ReadSrcFilterExpr => {
                     if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
-                        select.srcTableFilterExpr = Some(self.parseExpr(false)?);
+                        select.srcFilterExpr = Some(self.parseExpr(false)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -769,7 +771,7 @@ impl Parser {
                 }
                 State::ReadSrcAlias => {
                     if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
-                        select.srcTableAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by src alias")?);
+                        select.srcAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by src alias")?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -789,7 +791,7 @@ impl Parser {
                 }
                 State::ReadRelationColumnNames => {
                     if currentElement.expectTextLiteralContentBool(global::方括号_STR) {
-                        select.relationColumnNames = Some(parseColumnNames(self)?);
+                        select.relationColumnNames = Some(parseSelectedColumnNames(self)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -820,7 +822,7 @@ impl Parser {
                 }
                 State::ReadDestName => {
                     if let Element::To = currentElement {
-                        select.destTableName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
+                        select.destName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
                     } else {
                         break;
                     }
@@ -830,7 +832,7 @@ impl Parser {
                 }
                 State::ReadDestColumnNames => {
                     if currentElement.expectTextLiteralContentBool(global::方括号_STR) {
-                        select.destTableColumnNames = Some(parseColumnNames(self)?);
+                        select.destColumnNames = Some(parseSelectedColumnNames(self)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -841,7 +843,7 @@ impl Parser {
                 State::ReadDestFilterExpr => {
                     if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
-                        select.destTableFilterExpr = Some(self.parseExpr(false)?);
+                        select.destFilterExpr = Some(self.parseExpr(false)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -851,17 +853,45 @@ impl Parser {
                 }
                 State::ReadDestAlias => {
                     if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
-                        select.destTableAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by dest alias")?);
+                        select.destAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by dest alias")?);
+                    } else {
+                        self.skipElement(-1)?;
                     }
 
-                    break;
+                    state = State::TryNextRound;
+                    force = false;
+                }
+                State::TryNextRound => {
+                    if let Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) = currentElement {
+                        self.skipElement(-1)?;
+
+                        // https://qastack.cn/programming/19650265/is-there-a-faster-shorter-way-to-initialize-variables-in-a-rust-struct
+                        let select0 = Select {
+                            srcName: select.destName.as_ref().unwrap().clone(),
+                            srcColumnNames: select.destColumnNames.clone(),
+                            srcFilterExpr: select.destFilterExpr.clone(),
+                            srcAlias: select.destAlias.clone(),
+                            ..Default::default()
+                        };
+
+                        selectVec.push(select);
+
+                        select = select0;
+
+                        state = State::ReadRelationName;
+                        force = false;
+                    } else {
+                        break;
+                    }
                 }
             }
         }
 
-        println!("{select:?}");
+        selectVec.push(select);
 
-        Ok(Command::Select(select))
+        println!("{selectVec:?}");
+
+        Ok(Command::Select(selectVec))
     }
 
     /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个 <br>
@@ -1431,20 +1461,20 @@ pub struct Link {
 
 #[derive(Default, Debug)]
 pub struct Select {
-    pub srcTableName: String,
-    pub srcTableColumnNames: Option<Vec<String>>,
-    pub srcTableFilterExpr: Option<Expr>,
-    pub srcTableAlias: Option<String>,
-
-    pub destTableName: Option<String>,
-    pub destTableColumnNames: Option<Vec<String>>,
-    pub destTableFilterExpr: Option<Expr>,
-    pub destTableAlias: Option<String>,
+    pub srcName: String,
+    pub srcColumnNames: Option<Vec<String>>,
+    pub srcFilterExpr: Option<Expr>,
+    pub srcAlias: Option<String>,
 
     pub relationName: Option<String>,
     pub relationColumnNames: Option<Vec<String>>,
     pub relationFliterExpr: Option<Expr>,
     pub relationAlias: Option<String>,
+
+    pub destName: Option<String>,
+    pub destColumnNames: Option<Vec<String>>,
+    pub destFilterExpr: Option<Expr>,
+    pub destAlias: Option<String>,
 }
 
 // ------------------------------------------------------------------------------------------
@@ -1477,7 +1507,7 @@ mod test {
         // parser::parse("link user ( a in (a,b,d))").unwrap();
         // parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
         // parser::parse("select user[id,name](id=1 and 1=1) -usage(number > 9) as usage0-> car").unwrap();
-        parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car").unwrap();
+        parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> wheel").unwrap();
     }
 }
 

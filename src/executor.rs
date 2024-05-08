@@ -109,67 +109,70 @@ pub async fn link(link: &Link) -> Result<()> {
 }
 
 /// 如果不是含有relation的select 便是普通的select
-pub async fn select(select: &Select) -> Result<()> {
-    // 先要明确是不是含有relation
-    match select.relationName {
-        Some(ref relationName) => {
-            let mut relation = getTableRefMutByName(relationName)?;
-            let relationDatas = scanSatisfiedRows(select.relationFliterExpr.as_ref(), relation.value_mut(), true, select.relationColumnNames.as_ref()).await?;
-            let relationDatas: Vec<HashMap<String, GraphValue>> = relationDatas.into_iter().map(|tuple| tuple.1).collect();
+pub async fn select(select: &[Select]) -> Result<()> {
+    for select in select {
+        // 先要明确是不是含有relation
+        match select.relationName {
+            Some(ref relationName) => {
+                // 为什么要使用{} 不然的话有概率死锁 https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
+                let relationDatas: Vec<HashMap<String, GraphValue>> = {
+                    let mut relation = getTableRefMutByName(relationName)?;
+                    let relationDatas = scanSatisfiedRows(select.relationFliterExpr.as_ref(), relation.value_mut(), true, select.relationColumnNames.as_ref()).await?;
+                    relationDatas.into_iter().map(|tuple| tuple.1).collect()
+                };
 
-            println!("{:?}\n", relationDatas);
+                #[derive(Deserialize, Debug)]
+                struct SelectResult {
+                    relationData: RowData,
+                    srcRowDatas: Vec<RowData>,
+                    destRowDatas: Vec<RowData>,
+                }
 
-            #[derive(Deserialize, Debug)]
-            struct SelectResult {
-                relationData: RowData,
-                srcRowDatas: Vec<RowData>,
-                destRowDatas: Vec<RowData>,
+                let mut selectResultVec = Vec::with_capacity(relationDatas.len());
+
+                for relationData in relationDatas {
+                    let srcPointDesc = relationData.get(PointDesc::SRC).unwrap().asPointDesc()?;
+                    // relation的src表的name不符合
+                    if srcPointDesc.tableName != select.srcName {
+                        continue;
+                    }
+
+                    // relation的dest表的name不符合
+                    let destPointDesc = relationData.get(PointDesc::DEST).unwrap().asPointDesc()?;
+                    if destPointDesc.tableName != (*select.destName.as_ref().unwrap()) {
+                        continue;
+                    }
+
+                    if srcPointDesc.positions.is_empty() || destPointDesc.positions.is_empty() {
+                        continue;
+                    }
+
+                    let srcRowDatas = {
+                        let mut srcTable = getTableRefMutByName(select.srcName.as_str())?;
+                        getRowsByPositions(&srcPointDesc.positions, &mut srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref()).await?
+                    };
+
+                    let destRowDatas = {
+                        let mut destTable = getTableRefMutByName(select.destName.as_ref().unwrap())?;
+                        getRowsByPositions(&destPointDesc.positions, &mut destTable, select.destFilterExpr.as_ref(), select.destColumnNames.as_ref()).await?
+                    };
+
+                    selectResultVec.push(
+                        SelectResult {
+                            relationData,
+                            srcRowDatas,
+                            destRowDatas,
+                        });
+                }
+
+                println!("{:?}\n", selectResultVec)
             }
-
-            let mut selectResultVec = Vec::with_capacity(relationDatas.len());
-
-            for relationData in relationDatas {
-                let srcPointDesc = relationData.get(PointDesc::SRC).unwrap().asPointDesc()?;
-                // relation的src表的name不符合
-                if srcPointDesc.tableName != select.srcTableName {
-                    continue;
-                }
-
-                // relation的dest表的name不符合
-                let destPointDesc = relationData.get(PointDesc::DEST).unwrap().asPointDesc()?;
-                if destPointDesc.tableName != (*select.destTableName.as_ref().unwrap()) {
-                    continue;
-                }
-
-                if srcPointDesc.positions.is_empty() || destPointDesc.positions.is_empty() {
-                    continue;
-                }
-                println!("aaaaaaaaaaaaaaa");
-                let mut srcTable = getTableRefMutByName(select.srcTableName.as_str())?;
-                let srcRowDatas = getRowsByPositions(&srcPointDesc.positions, &mut srcTable, select.srcTableFilterExpr.as_ref(), select.srcTableColumnNames.as_ref()).await?;
-
-                println!("bbbbbbbbbbbbbb");
-
-                let mut destTable = getTableRefMutByName(select.destTableName.as_ref().unwrap())?;
-                let destRowDatas = getRowsByPositions(&destPointDesc.positions, &mut destTable, select.destTableFilterExpr.as_ref(), select.destTableColumnNames.as_ref()).await?;
-
-                println!("cccccccccccccccc");
-
-                selectResultVec.push(
-                    SelectResult {
-                        relationData,
-                        srcRowDatas,
-                        destRowDatas,
-                    });
+            None => {
+                let mut srcTable = getTableRefMutByName(select.srcName.as_str())?;
+                let rows = scanSatisfiedRows(select.srcFilterExpr.as_ref(), srcTable.value_mut(), true, select.srcColumnNames.as_ref()).await?;
+                let rows: Vec<HashMap<String, GraphValue>> = rows.into_iter().map(|tuple| tuple.1).collect();
+                println!("{:?}", rows);
             }
-
-            println!("{:?}", selectResultVec)
-        }
-        None => {
-            let mut srcTable = getTableRefMutByName(select.srcTableName.as_str())?;
-            let rows = scanSatisfiedRows(select.srcTableFilterExpr.as_ref(), srcTable.value_mut(), true, select.srcTableColumnNames.as_ref()).await?;
-            let rows: Vec<HashMap<String, GraphValue>> = rows.into_iter().map(|tuple| tuple.1).collect();
-            println!("{:?}", rows);
         }
     }
 
@@ -366,6 +369,7 @@ fn writeBytesMut(rowData: &Value) -> Result<BytesMut> {
 
 #[cfg(test)]
 mod test {
+    use dashmap::DashMap;
     use serde_json::json;
     use crate::graph_value::GraphValue;
     use crate::{meta, parser};
@@ -388,5 +392,15 @@ mod test {
         if let Command::Select(ref select) = commandVec[0] {
             executor::select(select).await.unwrap();
         }
+    }
+
+    #[test]
+    pub fn dash() {
+        let map = DashMap::with_capacity(2);
+        map.insert("a".to_string(), "a");
+        map.insert("r".to_string(), "r");
+
+        map.get_mut("a");
+        map.get_mut("b");
     }
 }
