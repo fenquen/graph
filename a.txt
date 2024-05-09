@@ -72,3 +72,4 @@ insert的values也要能支持expr 可以使用现有的parseInExpr 完成
 本身要有4个byte表示长度
 
 select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre
+data要有唯1标识 不能单使用position因为后续update后可能会变动

@@ -6,7 +6,7 @@ use crate::parser::{Element, MathCmpOp, Op, SqlOp};
 use crate::throw;
 
 // 碰到"(" 下钻递归,返回后落地到上级的left right
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     Single(Element),
     BiDirection {

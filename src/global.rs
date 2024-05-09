@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::{Arc};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
@@ -62,4 +63,16 @@ pub const 方括号1_CHAR: char = ']';
 pub const 方括号1_STR: &str = "]";
 
 pub const ROW_DATA_LEN_FIELD_LEN: usize = 4;
+
+pub type ReachEnd = bool;
+
+pub type RowDataPosition = u64;
+
+thread_local! {
+    /// https://www.cnblogs.com/jiangbo4444/p/15932305.html <br>
+    /// enum使用json序列化 默认是tagged的 <br>
+    /// GraphValue::String("a") 会变为 {"String":"a"} <br>
+    /// 有的时候需要的是untagged 序列化为"1"
+    pub static UNTAGGED_ENUM_JSON: Cell<bool> = Cell::new(false);
+}
 

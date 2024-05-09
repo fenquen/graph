@@ -37,7 +37,7 @@ pub async fn main() -> Result<()> {
         for command in commandVec {
             match command {
                 Command::CreateTable(table) => executor::createTable(table, false).await?,
-                Command::Insert(ref insertValues) => executor::insertValues(insertValues).await?,
+                Command::Insert(ref insertValues) => executor::insert(insertValues).await?,
                 Command::Select(ref select) => executor::select(select).await?,
                 Command::Link(ref link) => executor::link(link).await?,
                 _ => {}

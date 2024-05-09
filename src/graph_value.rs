@@ -1,12 +1,14 @@
 use std::fmt::{Display, Formatter};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::Display;
 use crate::graph_error::GraphError;
 use crate::parser::{Element, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
-use crate::throw;
+use crate::{global, throw};
 use anyhow::Result;
+use serde::ser::SerializeMap;
+use crate::global::RowDataPosition;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub enum GraphValue {
     /// 应对表的字段名 需要后续配合rowData来得到实际的
     Pending(String),
@@ -15,6 +17,52 @@ pub enum GraphValue {
     Integer(i64),
     Decimal(f64),
     PointDesc(PointDesc),
+}
+
+impl Serialize for GraphValue {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> where S: Serializer {
+        if global::UNTAGGED_ENUM_JSON.get() {
+            match self {
+                GraphValue::Pending(s) => s.serialize(serializer),
+                GraphValue::String(s) => s.serialize(serializer),
+                GraphValue::Boolean(s) => s.serialize(serializer),
+                GraphValue::Integer(s) => s.serialize(serializer),
+                GraphValue::Decimal(s) => s.serialize(serializer),
+                GraphValue::PointDesc(s) => s.serialize(serializer)
+            }
+        } else {
+            let mut serialMap = serializer.serialize_map(Some(1))?;
+
+            match self {
+                GraphValue::Pending(s) => {
+                    serialMap.serialize_key("Pending")?;
+                    serialMap.serialize_value(s)?;
+                }
+                GraphValue::String(s) => {
+                    serialMap.serialize_key("String")?;
+                    serialMap.serialize_value(s)?;
+                }
+                GraphValue::Boolean(s) => {
+                    serialMap.serialize_key("Boolean")?;
+                    serialMap.serialize_value(s)?;
+                }
+                GraphValue::Integer(s) => {
+                    serialMap.serialize_key("Integer")?;
+                    serialMap.serialize_value(s)?;
+                }
+                GraphValue::Decimal(s) => {
+                    serialMap.serialize_key("Decimal")?;
+                    serialMap.serialize_value(s)?;
+                }
+                GraphValue::PointDesc(s) => {
+                    serialMap.serialize_key("PointDesc")?;
+                    serialMap.serialize_value(s)?;
+                }
+            }
+
+            serialMap.end()
+        }
+    }
 }
 
 impl Display for GraphValue {
@@ -219,7 +267,7 @@ impl GraphValue {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PointDesc {
     pub tableName: String,
-    pub positions: Vec<u64>,
+    pub positions: Vec<RowDataPosition>,
 }
 
 impl PointDesc {

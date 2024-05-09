@@ -1,4 +1,4 @@
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::Path;
@@ -6,7 +6,7 @@ use std::ptr::read;
 use crate::config::CONFIG;
 use crate::{executor, global, prefix_plus_plus, throw};
 use crate::meta::{Column, Table, TableType};
-use crate::parser::{InsertValues, Link, Select};
+use crate::parser::{Insert, Link, Select};
 use anyhow::Result;
 use dashmap::mapref::one::{Ref, RefMut};
 use serde::{Deserialize, Serialize};
@@ -14,10 +14,24 @@ use serde_json::{json, Map, Value};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use bytes::{BufMut, BytesMut};
+use lazy_static::lazy_static;
 use crate::expr::Expr;
+use crate::global::{ReachEnd, RowDataPosition};
 use crate::graph_value::{GraphValue, PointDesc};
 
 type RowData = HashMap<String, GraphValue>;
+
+lazy_static! {
+    static ref DUMMY_ROW_DATA: RowData = RowData::default();
+}
+
+macro_rules! JSON_ENUM_UNTAGGED {
+    ($expr:expr) => {
+        global::UNTAGGED_ENUM_JSON.set(true);
+        $expr;
+        global::UNTAGGED_ENUM_JSON.set(false);
+    };
+}
 
 pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     if global::TABLE_NAME_TABLE.contains_key(table.name.as_str()) {
@@ -51,16 +65,16 @@ pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn insertValues(insertValues: &InsertValues) -> Result<()> {
+pub async fn insert(insert: &Insert) -> Result<()> {
     // 对应的表是不是exist
-    let mut table = getTableRefMutByName(&insertValues.tableName)?;
+    let mut table = getTableRefMutByName(&insert.tableName)?;
 
     // 不能对relation使用insert into
     if let TableType::Relation = table.type0 {
-        throw!(&format!("{} is a RELATION , can not use insert into on RELATION", insertValues.tableName));
+        throw!(&format!("{} is a RELATION , can not use insert into on RELATION", insert.tableName));
     }
 
-    let rowData = generateInsertValuesJson(&insertValues, &*table)?;
+    let rowData = generateInsertValuesJson(&insert, &*table)?;
     let bytesMut = writeBytesMut(&rowData)?;
     table.dataFile.as_mut().unwrap().write_all(bytesMut.as_ref()).await?;
 
@@ -75,13 +89,22 @@ pub async fn link(link: &Link) -> Result<()> {
     let mut destTable = getTableRefMutByName(link.destTableName.as_str())?;
 
     // 对src table和dest table调用expr筛选
-    let srcTableSatisfiedRowNums = scanSatisfiedRows(link.srcTableFilterExpr.as_ref(), srcTable.value_mut(), false, None).await?;
-    let destTableSatisfiedRowNums = scanSatisfiedRows(link.destTableFilterExpr.as_ref(), destTable.value_mut(), false, None).await?;
+    let srcSatisfiedPositions = scanSatisfiedRows(link.srcTableFilterExpr.as_ref(), srcTable.value_mut(), false, None).await?;
+    // src 空的 link 不成立
+    if srcSatisfiedPositions.is_empty() {
+        return Ok(());
+    }
+
+    let destSatisfiedPositions = scanSatisfiedRows(link.destTableFilterExpr.as_ref(), destTable.value_mut(), false, None).await?;
+    // dest 空的 link 不成立
+    if destSatisfiedPositions.is_empty() {
+        return Ok(());
+    }
 
     // 用insetValues套路
     {
-        let insertValues = InsertValues {
-            tableName: link.destTableName.clone(),
+        let insertValues = Insert {
+            tableName: link.relationName.clone(),
             useExplicitColumnNames: true,
             columnNames: link.relationColumnNames.clone(),
             columnExprs: link.relationColumnExprs.clone(),
@@ -91,11 +114,11 @@ pub async fn link(link: &Link) -> Result<()> {
 
         rowData["src"] = json!(GraphValue::PointDesc(PointDesc {
             tableName:srcTable.name.clone(),
-            positions:srcTableSatisfiedRowNums.iter().map(|tuple|tuple.0).collect(),
+            positions:srcSatisfiedPositions.iter().map(|tuple|tuple.0).collect(),
         }));
         rowData["dest"] = json!(GraphValue::PointDesc(PointDesc {
             tableName:destTable.name.clone(),
-            positions:destTableSatisfiedRowNums.iter().map(|tuple|tuple.0).collect(),
+            positions:destSatisfiedPositions.iter().map(|tuple|tuple.0).collect(),
         }));
 
         let bytesMut = writeBytesMut(&rowData)?;
@@ -109,80 +132,182 @@ pub async fn link(link: &Link) -> Result<()> {
 }
 
 /// 如果不是含有relation的select 便是普通的select
-pub async fn select(select: &[Select]) -> Result<()> {
-    for select in select {
-        // 先要明确是不是含有relation
-        match select.relationName {
-            Some(ref relationName) => {
-                // 为什么要使用{} 不然的话有概率死锁 https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
-                let relationDatas: Vec<HashMap<String, GraphValue>> = {
-                    let mut relation = getTableRefMutByName(relationName)?;
-                    let relationDatas = scanSatisfiedRows(select.relationFliterExpr.as_ref(), relation.value_mut(), true, select.relationColumnNames.as_ref()).await?;
-                    relationDatas.into_iter().map(|tuple| tuple.1).collect()
-                };
+pub async fn select(selectVec: &[Select]) -> Result<()> {
+    // 普通模式不含有relation
+    if selectVec.len() == 1 && selectVec[0].relationName.is_none() {
+        let select = &selectVec[0];
+        let mut srcTable = getTableRefMutByName(select.srcName.as_str())?;
+        let rows = scanSatisfiedRows(select.srcFilterExpr.as_ref(), srcTable.value_mut(), true, select.srcColumnNames.as_ref()).await?;
+        let rows: Vec<RowData> = rows.into_iter().map(|tuple| tuple.1).collect();
+        println!("{:?}", rows);
 
-                #[derive(Deserialize, Debug)]
-                struct SelectResult {
-                    relationData: RowData,
-                    srcRowDatas: Vec<RowData>,
-                    destRowDatas: Vec<RowData>,
-                }
+        return Ok(());
+    }
 
-                let mut selectResultVec = Vec::with_capacity(relationDatas.len());
+    #[derive(Deserialize, Debug)]
+    struct SelectResult {
+        srcName: String,
+        srcRowDatas: Vec<(RowDataPosition, RowData)>,
+        relationName: String,
+        relationData: RowData,
+        destName: String,
+        destRowDatas: Vec<(RowDataPosition, RowData)>,
+    }
 
-                for relationData in relationDatas {
-                    let srcPointDesc = relationData.get(PointDesc::SRC).unwrap().asPointDesc()?;
-                    // relation的src表的name不符合
-                    if srcPointDesc.tableName != select.srcName {
-                        continue;
-                    }
+    // 给next轮用的
+    let mut destPositionsInPrevSelect: Option<Vec<RowDataPosition>> = None;
 
-                    // relation的dest表的name不符合
-                    let destPointDesc = relationData.get(PointDesc::DEST).unwrap().asPointDesc()?;
-                    if destPointDesc.tableName != (*select.destName.as_ref().unwrap()) {
-                        continue;
-                    }
+    // 1个select对应Vec<SelectResult> 多个select对应Vec<Vec<SelectResult>>
+    let mut selectVecResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectVec.len());
+    let mut valueVecVec = Vec::with_capacity(selectVec.len());
 
-                    if srcPointDesc.positions.is_empty() || destPointDesc.positions.is_empty() {
-                        continue;
-                    }
+    'loopSelect: for select in selectVec {
+        // 为什么要使用{} 不然的话有概率死锁 https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
+        let relationDatas: Vec<HashMap<String, GraphValue>> = {
+            let mut relation = getTableRefMutByName(select.relationName.as_ref().unwrap())?;
+            let relationDatas = scanSatisfiedRows(select.relationFliterExpr.as_ref(), relation.value_mut(), true, select.relationColumnNames.as_ref()).await?;
+            relationDatas.into_iter().map(|tuple| tuple.1).collect()
+        };
 
-                    let srcRowDatas = {
-                        let mut srcTable = getTableRefMutByName(select.srcName.as_str())?;
-                        getRowsByPositions(&srcPointDesc.positions, &mut srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref()).await?
-                    };
+        let mut selectResultVecInCurrentSelect = Vec::with_capacity(relationDatas.len());
+        let mut valueInCurrentSelect = Vec::with_capacity(relationDatas.len());
 
-                    let destRowDatas = {
-                        let mut destTable = getTableRefMutByName(select.destName.as_ref().unwrap())?;
-                        getRowsByPositions(&destPointDesc.positions, &mut destTable, select.destFilterExpr.as_ref(), select.destColumnNames.as_ref()).await?
-                    };
+        let mut destPositionsInCurrentSelect = vec![];
 
-                    selectResultVec.push(
-                        SelectResult {
-                            relationData,
-                            srcRowDatas,
-                            destRowDatas,
-                        });
-                }
-
-                println!("{:?}\n", selectResultVec)
+        // 遍历当前的select的多个relation
+        'loopRelationData: for relationData in relationDatas {
+            let srcPointDesc = relationData.get(PointDesc::SRC).unwrap().asPointDesc()?;
+            // relation的src表的name不符合
+            if srcPointDesc.tableName != select.srcName || srcPointDesc.positions.is_empty() {
+                continue;
             }
-            None => {
+
+            // relation的dest表的name不符合
+            let destPointDesc = relationData.get(PointDesc::DEST).unwrap().asPointDesc()?;
+            if destPointDesc.tableName != (*select.destName.as_ref().unwrap()) || destPointDesc.positions.is_empty() {
+                continue;
+            }
+
+            let srcRowDatas = {
                 let mut srcTable = getTableRefMutByName(select.srcName.as_str())?;
-                let rows = scanSatisfiedRows(select.srcFilterExpr.as_ref(), srcTable.value_mut(), true, select.srcColumnNames.as_ref()).await?;
-                let rows: Vec<HashMap<String, GraphValue>> = rows.into_iter().map(|tuple| tuple.1).collect();
-                println!("{:?}", rows);
+
+                // 上轮的dest 和 当前的 src 交集
+                match destPositionsInPrevSelect {
+                    Some(ref destPositionsInPrevSelect) => {
+                        let intersect =
+                            destPositionsInPrevSelect.iter().filter(|&&destPositionInPrevSelect| srcPointDesc.positions.contains(&destPositionInPrevSelect)).map(|a| *a).collect::<Vec<_>>();
+
+                        // 说明 当前的这个relation的src和上轮的dest没有重合的
+                        if intersect.is_empty() {
+                            continue 'loopRelationData;
+                        }
+
+                        // 当前的select的src确定了 还要回去修改上轮的dest
+                        if let Some(prevSelectResultVec) = selectVecResultVecVec.last_mut() {
+
+                            // 遍历上轮的各个result的dest,把intersect之外的去掉
+                            for prevSelectResult in &mut *prevSelectResultVec {
+                                // https://blog.csdn.net/u011528645/article/details/123117829
+                                prevSelectResult.destRowDatas.retain(|pair| intersect.contains(&pair.0));
+                            }
+
+                            // destRowDatas是空的话那么把selectResult去掉
+                            prevSelectResultVec.retain(|prevSelectResult| prevSelectResult.destRowDatas.len() > 0);
+
+                            // 连线断掉
+                            if prevSelectResultVec.is_empty() {
+                                break 'loopSelect;
+                            }
+                        }
+
+                        getRowsByPositions(&intersect, &mut srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref()).await?
+                    }
+                    // 只会在首轮的
+                    None => getRowsByPositions(&srcPointDesc.positions, &mut srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref()).await?,
+                }
+            };
+            if srcRowDatas.is_empty() {
+                continue;
             }
+
+            let destRowDatas = {
+                let mut destTable = getTableRefMutByName(select.destName.as_ref().unwrap())?;
+                getRowsByPositions(&destPointDesc.positions, &mut destTable, select.destFilterExpr.as_ref(), select.destColumnNames.as_ref()).await?
+            };
+            if destRowDatas.is_empty() {
+                continue;
+            }
+
+            for destPosition in &destPointDesc.positions {
+                destPositionsInCurrentSelect.push(*destPosition);
+            }
+
+            let mut json = json!({});
+
+            // 对json::Value来说需要注意的是serialize的调用发生在这边 而不是下边的serde_json::to_string()
+            JSON_ENUM_UNTAGGED!({
+                json[select.srcAlias.as_ref().unwrap_or_else(|| &select.srcName)] = json!(srcRowDatas);
+                json[select.relationAlias.as_ref().unwrap_or_else(|| select.relationName.as_ref().unwrap())] = json!(relationData);
+                json[select.destAlias.as_ref().unwrap_or_else(|| select.destName.as_ref().unwrap())] = json!(destRowDatas);
+            });
+
+            valueInCurrentSelect.push(json);
+
+            selectResultVecInCurrentSelect.push(
+                SelectResult {
+                    srcName: select.srcAlias.as_ref().unwrap_or_else(|| &select.srcName).to_string(),
+                    srcRowDatas,
+                    relationName: select.relationAlias.as_ref().unwrap_or_else(|| select.relationName.as_ref().unwrap()).to_string(),
+                    relationData,
+                    destName: select.destAlias.as_ref().unwrap_or_else(|| select.destName.as_ref().unwrap()).to_string(),
+                    destRowDatas,
+                }
+            );
+        }
+
+        destPositionsInPrevSelect = {
+            // 当前的relation select 的多个realtion对应dest全都是empty的
+            if destPositionsInCurrentSelect.is_empty() {
+                break 'loopSelect;
+            }
+
+            destPositionsInCurrentSelect.sort();
+            destPositionsInCurrentSelect.dedup();
+            Some(destPositionsInCurrentSelect)
+        };
+
+        selectVecResultVecVec.push(selectResultVecInCurrentSelect);
+    }
+
+    // 遍历多个select的result
+    for selectResultVec in selectVecResultVecVec {
+        // 遍历单个select的result
+        for selectResult in selectResultVec {
+            let mut json = json!({});
+
+            // 对json::Value来说需要注意的是serialize的调用发生在这边 而不是下边的serde_json::to_string()
+            JSON_ENUM_UNTAGGED!({
+                json[selectResult.srcName] = json!(selectResult.srcRowDatas);
+                json[selectResult.relationName] = json!(selectResult.relationData);
+                json[selectResult.destName] = json!(selectResult.destRowDatas);
+            });
+
+            valueVecVec.push(json);
         }
     }
+
+    println!("{}", serde_json::to_string(&valueVecVec)?);
+
+    fn handleResult(selectVecResultVecVec: Vec<Vec<SelectResult>>) {}
 
     Ok(())
 }
 
-async fn getRowsByPositions(positions: &[u64],
+
+async fn getRowsByPositions(positions: &[RowDataPosition],
                             table: &mut Table,
                             tableFilterExpr: Option<&Expr>,
-                            selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<RowData>> {
+                            selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(RowDataPosition, RowData)>> {
     let tableDataFile = table.dataFile.as_mut().unwrap();
 
     let mut dataLenBuffer = [0; global::ROW_DATA_LEN_FIELD_LEN];
@@ -192,7 +317,7 @@ async fn getRowsByPositions(positions: &[u64],
     for position in positions {
         tableDataFile.seek(SeekFrom::Start(*position)).await?;
         if let (Some(rowData), _) = readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await? {
-            rowDatas.push(rowData);
+            rowDatas.push((*position, rowData));
         }
     }
 
@@ -202,7 +327,7 @@ async fn getRowsByPositions(positions: &[u64],
 async fn scanSatisfiedRows(tableFilterExpr: Option<&Expr>,
                            table: &mut Table,
                            select: bool,
-                           selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(u64, RowData)>> {
+                           selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(RowDataPosition, RowData)>> {
     let tableDataFile = table.dataFile.as_mut().unwrap();
 
     tableDataFile.seek(SeekFrom::Start(0)).await?;
@@ -237,7 +362,7 @@ async fn scanSatisfiedRows(tableFilterExpr: Option<&Expr>,
 async fn readRow(tableDataFile: &mut File,
                  tableFilterExpr: Option<&Expr>,
                  selectedColumnNames: Option<&Vec<String>>,
-                 dataLenBuffer: &mut [u8]) -> Result<(Option<RowData>, bool)> {
+                 dataLenBuffer: &mut [u8]) -> Result<(Option<RowData>, ReachEnd)> {
     // 相当的坑 有read()和read_buf() 前边看的是len后边看的是capactiy
     // 后边的是不能用的 虽然有Vec::with_capacity() 然而随读取的越多vec本身也会扩容的 后来改为 [0; global::ROW_DATA_LEN_FIELD_LEN]
     let readCount = tableDataFile.read(dataLenBuffer).await?;
@@ -298,17 +423,17 @@ fn getTableRefMutByName(tableName: &str) -> Result<RefMut<String, Table>> {
     Ok(table.unwrap())
 }
 
-fn generateInsertValuesJson(insertValues: &InsertValues, table: &Table) -> Result<Value> {
+fn generateInsertValuesJson(insert: &Insert, table: &Table) -> Result<Value> {
     let columns = {
         let mut columns = Vec::new();
 
         // 要是未显式说明column的话还需要读取table的column
-        if insertValues.useExplicitColumnNames == false {
+        if insert.useExplicitColumnNames == false {
             for column in &table.columns {
                 columns.push(column);
             }
         } else { // 如果显式说明columnName的话需要确保都是有的
-            for columnName in &insertValues.columnNames {
+            for columnName in &insert.columnNames {
                 let mut found = false;
 
                 for column in &table.columns {
@@ -329,13 +454,13 @@ fn generateInsertValuesJson(insertValues: &InsertValues, table: &Table) -> Resul
     };
 
     // 确保column数量和value数量相同
-    if columns.len() != insertValues.columnExprs.len() {
+    if columns.len() != insert.columnExprs.len() {
         throw!("column count does not match value count");
     }
 
     let mut rowData = json!({});
 
-    for column_columnValue in columns.iter().zip(insertValues.columnExprs.iter()) {
+    for column_columnValue in columns.iter().zip(insert.columnExprs.iter()) {
         let column = column_columnValue.0;
         let columnExpr = column_columnValue.1;
 
@@ -366,13 +491,15 @@ fn writeBytesMut(rowData: &Value) -> Result<BytesMut> {
     Ok(bytesMut)
 }
 
-
 #[cfg(test)]
 mod test {
+    use std::cell::{Cell, RefCell};
     use dashmap::DashMap;
+    use serde::{Deserialize, Serialize, Serializer};
+    use serde::ser::{SerializeMap, SerializeStruct};
     use serde_json::json;
     use crate::graph_value::GraphValue;
-    use crate::{meta, parser};
+    use crate::{global, meta, parser};
     use crate::executor;
     use crate::parser::Command;
 
@@ -395,12 +522,39 @@ mod test {
     }
 
     #[test]
-    pub fn dash() {
-        let map = DashMap::with_capacity(2);
-        map.insert("a".to_string(), "a");
-        map.insert("r".to_string(), "r");
+    pub fn testJsonTagged() {
+        #[derive(Deserialize)]
+        enum A {
+            S(String),
+        }
 
-        map.get_mut("a");
-        map.get_mut("b");
+        let a = A::S("1".to_string());
+
+        impl Serialize for A {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+                match self {
+                    A::S(string) => {
+                        if global::UNTAGGED_ENUM_JSON.get() {
+                            serializer.serialize_str(string.as_str())
+                        } else {
+                            // let mut s = serializer.serialize_map(Some(1usize))?;
+                            // s.serialize_key("S")?;
+                            // s.serialize_value(string)?;
+
+                            let mut s = serializer.serialize_struct("AAAAA", 1)?;
+                            s.serialize_field("S", string)?;
+                            s.end()
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("{}", serde_json::to_string(&a).unwrap());
+
+        global::UNTAGGED_ENUM_JSON.set(true);
+        println!("{}", serde_json::to_string(&a).unwrap());
+
+        let a: A = serde_json::from_str("{\"S\":\"1\"}").unwrap();
     }
 }

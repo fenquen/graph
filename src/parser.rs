@@ -27,7 +27,7 @@ pub fn parse(sql: &str) -> Result<Vec<Command>> {
 
 pub enum Command {
     CreateTable(Table),
-    Insert(InsertValues),
+    Insert(Insert),
     Link(Link),
     Delete,
     Update,
@@ -473,7 +473,7 @@ impl Parser {
             self.throwSyntaxErrorDetail("insert should followed by into")?;
         }
 
-        let mut insertValues = InsertValues::default();
+        let mut insertValues = Insert::default();
 
         insertValues.tableName = self.getCurrentElementAdvance()?.expectTextLiteral("table name should not pure number")?.to_string();
 
@@ -541,7 +541,7 @@ impl Parser {
         loop {
             let text = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
             match (parseSrcDestState, text.to_uppercase().as_str()) {
-                (ParseSrcDestState::ParseSrcTableName, tableName) => {
+                (ParseSrcDestState::ParseSrcTableName, _) => {
                     link.srcTableName = text;
                     parseSrcDestState = ParseSrcDestState::ParseSrcTableCondition;
                 }
@@ -590,7 +590,6 @@ impl Parser {
             ParseColumnName,
             ParseEqual,
             ParseColumnExpr,
-            AfterParseColumnExpr,
         }
 
         let mut parseState = ParseState::ParseColumnName;
@@ -889,7 +888,7 @@ impl Parser {
 
         selectVec.push(select);
 
-        println!("{selectVec:?}");
+        println!("{selectVec:?}\n");
 
         Ok(Command::Select(selectVec))
     }
@@ -1359,7 +1358,7 @@ impl Debug for Element {
 }
 
 #[derive(Default)]
-pub struct InsertValues {
+pub struct Insert {
     pub tableName: String,
     /// insert into table (column) values ('a')
     pub useExplicitColumnNames: bool,
