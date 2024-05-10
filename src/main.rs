@@ -40,6 +40,7 @@ pub async fn main() -> Result<()> {
                 Command::Insert(ref insertValues) => executor::insert(insertValues).await?,
                 Command::Select(ref select) => executor::select(select).await?,
                 Command::Link(ref link) => executor::link(link).await?,
+                Command::Delete(ref delete) => executor::delete(delete).await?,
                 _ => {}
             }
         }

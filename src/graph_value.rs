@@ -260,6 +260,7 @@ impl GraphValue {
                 return Ok(GraphValue::Boolean(false));
             }
         }
+
         Ok(GraphValue::Boolean(true))
     }
 }

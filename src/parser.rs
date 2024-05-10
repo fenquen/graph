@@ -1,4 +1,5 @@
 use std::cmp::PartialEq;
+use std::collections::HashSet;
 use std::fmt::{Debug, Display, Formatter, Pointer};
 use std::str::FromStr;
 use crate::{global, prefix_plus_plus, suffix_minus_minus, suffix_plus_plus, throw};
@@ -29,9 +30,10 @@ pub enum Command {
     CreateTable(Table),
     Insert(Insert),
     Link(Link),
-    Delete,
+    A,
     Update,
     Select(Vec<Select>),
+    Delete(Delete),
 }
 
 #[derive(Default)]
@@ -653,8 +655,22 @@ impl Parser {
         Ok(Command::Link(link))
     }
 
+    /// delete from user(a=1)
     fn parseDelete(&mut self) -> Result<Command> {
-        Ok(Command::Delete)
+        self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("from", "delete should followed by from")?;
+
+        let tableName = self.getCurrentElementAdvance()?.expectTextLiteral("expect a table after from")?;
+
+        let expr = self.parseExpr(false)?;
+
+        let delete = Delete {
+            tableName,
+            filterExpr: Some(expr),
+        };
+
+        println!("{delete:?}\n");
+
+        Ok(Command::Delete(delete))
     }
 
     fn parseUpdate(&mut self) -> Result<Command> {
@@ -889,6 +905,23 @@ impl Parser {
         selectVec.push(select);
 
         println!("{selectVec:?}\n");
+
+        macro_rules! testDuplicate {
+            ($field:expr, $hashSet:ident) => {
+                if $field.is_some() {
+                    if $hashSet.insert($field.as_ref().unwrap()) == false {
+                        self.throwSyntaxErrorDetail(&format!("duplicated alias:{}", $field.as_ref().unwrap()))?;
+                    }
+                }
+            };
+        }
+        // 确保alias不能重复
+        let mut alias: HashSet<&str> = HashSet::new();
+        for select in &selectVec {
+            testDuplicate!(select.srcAlias, alias);
+            testDuplicate!(select.relationAlias, alias);
+            testDuplicate!(select.destAlias, alias);
+        }
 
         Ok(Command::Select(selectVec))
     }
@@ -1476,6 +1509,12 @@ pub struct Select {
     pub destAlias: Option<String>,
 }
 
+#[derive(Default, Debug)]
+pub struct Delete {
+    pub tableName: String,
+    pub filterExpr: Option<Expr>,
+}
+
 // ------------------------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1495,8 +1534,13 @@ mod test {
     }
 
     #[test]
-    pub fn testLink() {
-        // "link user(id > 1 and ( name = 'a' or code = 6)) to car (color='red') by usage(number = 13)"
+    pub fn testParseSelect() {
+        // parser::parse("select user[id,name](id=1 and 1=1) -usage(number > 9) as usage0-> car").unwrap();
+        parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> wheel").unwrap();
+    }
+
+    #[test]
+    pub fn testParseLink() {
         // parser::parse("link user(id > 1 and ( name = 'a' or code = (1 + 0) and true))").unwrap();
         // parser::parse("link user (a>0+6+1>a)").unwrap();
         // parser::parse("link user (a in (0,0+6,0+(a+1),))").unwrap();
@@ -1504,9 +1548,20 @@ mod test {
         // parser::parse("link user ((a = 1) = true)").unwrap();
         // parser::parse("link user (((a = 1)) = true)").unwrap();
         // parser::parse("link user ( a in (a,b,d))").unwrap();
-        // parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
-        // parser::parse("select user[id,name](id=1 and 1=1) -usage(number > 9) as usage0-> car").unwrap();
-        parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> wheel").unwrap();
+        parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
+    }
+
+    pub fn testA() {
+        
+    }
+
+    pub fn testUpdate() {}
+
+    pub fn testDrop() {}
+
+    #[test]
+    pub fn testParseDelete() {
+        parser::parse("delete from user(a=0)").unwrap();
     }
 }
 

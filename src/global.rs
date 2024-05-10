@@ -63,6 +63,7 @@ pub const 方括号1_CHAR: char = ']';
 pub const 方括号1_STR: &str = "]";
 
 pub const ROW_DATA_LEN_FIELD_LEN: usize = 4;
+pub const TX_ID_LEN: usize = 8;
 
 pub type ReachEnd = bool;
 
@@ -75,4 +76,6 @@ thread_local! {
     /// 有的时候需要的是untagged 序列化为"1"
     pub static UNTAGGED_ENUM_JSON: Cell<bool> = Cell::new(false);
 }
+
+pub const TOTAL_DATA_OF_TABLE: u64 = u64::MAX;
 

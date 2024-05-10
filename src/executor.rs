@@ -3,13 +3,15 @@ use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::Path;
 use std::ptr::read;
+use std::rc::Rc;
+use std::sync::Arc;
 use crate::config::CONFIG;
-use crate::{executor, global, prefix_plus_plus, throw};
+use crate::{executor, global, prefix_plus_plus, suffix_plus_plus, throw};
 use crate::meta::{Column, Table, TableType};
-use crate::parser::{Insert, Link, Select};
+use crate::parser::{Delete, Insert, Link, Select};
 use anyhow::Result;
 use dashmap::mapref::one::{Ref, RefMut};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Map, Value};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
@@ -137,14 +139,16 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
     if selectVec.len() == 1 && selectVec[0].relationName.is_none() {
         let select = &selectVec[0];
         let mut srcTable = getTableRefMutByName(select.srcName.as_str())?;
+
         let rows = scanSatisfiedRows(select.srcFilterExpr.as_ref(), srcTable.value_mut(), true, select.srcColumnNames.as_ref()).await?;
         let rows: Vec<RowData> = rows.into_iter().map(|tuple| tuple.1).collect();
-        println!("{:?}", rows);
+        JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
 
         return Ok(());
     }
 
-    #[derive(Deserialize, Debug)]
+    // 对应1个realtion的query的多个条目的1个
+    #[derive(Debug)]
     struct SelectResult {
         srcName: String,
         srcRowDatas: Vec<(RowDataPosition, RowData)>,
@@ -159,7 +163,6 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
 
     // 1个select对应Vec<SelectResult> 多个select对应Vec<Vec<SelectResult>>
     let mut selectVecResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectVec.len());
-    let mut valueVecVec = Vec::with_capacity(selectVec.len());
 
     'loopSelect: for select in selectVec {
         // 为什么要使用{} 不然的话有概率死锁 https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
@@ -170,7 +173,6 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
         };
 
         let mut selectResultVecInCurrentSelect = Vec::with_capacity(relationDatas.len());
-        let mut valueInCurrentSelect = Vec::with_capacity(relationDatas.len());
 
         let mut destPositionsInCurrentSelect = vec![];
 
@@ -191,7 +193,7 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
             let srcRowDatas = {
                 let mut srcTable = getTableRefMutByName(select.srcName.as_str())?;
 
-                // 上轮的dest 和 当前的 src 交集
+                // 上轮的全部的多个条目里边的dest的position 和 当前条目的src的position的交集
                 match destPositionsInPrevSelect {
                     Some(ref destPositionsInPrevSelect) => {
                         let intersect =
@@ -220,6 +222,7 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
                             }
                         }
 
+                        // 当前的使用intersect为源头
                         getRowsByPositions(&intersect, &mut srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref()).await?
                     }
                     // 只会在首轮的
@@ -242,17 +245,6 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
                 destPositionsInCurrentSelect.push(*destPosition);
             }
 
-            let mut json = json!({});
-
-            // 对json::Value来说需要注意的是serialize的调用发生在这边 而不是下边的serde_json::to_string()
-            JSON_ENUM_UNTAGGED!({
-                json[select.srcAlias.as_ref().unwrap_or_else(|| &select.srcName)] = json!(srcRowDatas);
-                json[select.relationAlias.as_ref().unwrap_or_else(|| select.relationName.as_ref().unwrap())] = json!(relationData);
-                json[select.destAlias.as_ref().unwrap_or_else(|| select.destName.as_ref().unwrap())] = json!(destRowDatas);
-            });
-
-            valueInCurrentSelect.push(json);
-
             selectResultVecInCurrentSelect.push(
                 SelectResult {
                     srcName: select.srcAlias.as_ref().unwrap_or_else(|| &select.srcName).to_string(),
@@ -271,38 +263,71 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
                 break 'loopSelect;
             }
 
+            // rust的这个去重有点不同只能去掉连续的重复的 故而需要先排序让重复的连续起来
             destPositionsInCurrentSelect.sort();
             destPositionsInCurrentSelect.dedup();
+
             Some(destPositionsInCurrentSelect)
         };
 
         selectVecResultVecVec.push(selectResultVecInCurrentSelect);
     }
 
-    // 遍历多个select的result
-    for selectResultVec in selectVecResultVecVec {
-        // 遍历单个select的result
-        for selectResult in selectResultVec {
+    /// ```[[[第1个select的第1行data],[第1个select的第2行data]],[[第2个select的第1行data],[第2个select的第2行data]]]```
+    /// 到时候要生成4条脉络
+    fn handleResult(selectVecResultVecVec: Vec<Vec<SelectResult>>) -> Vec<Value> {
+        let mut valueVec = Vec::default();
+
+        for selectResult in &selectVecResultVecVec[0] {
             let mut json = json!({});
 
-            // 对json::Value来说需要注意的是serialize的调用发生在这边 而不是下边的serde_json::to_string()
+            // 把tuple的position干掉
+            let srcRowDatas: Vec<&RowData> = selectResult.srcRowDatas.iter().map(|pair| &pair.1).collect();
+            let destRowDatas: Vec<&RowData> = selectResult.destRowDatas.iter().map(|pair| &pair.1).collect::<Vec<&RowData>>();
+
+            // 把map的src和dest干掉
+            let relationData: HashMap<&String, &GraphValue> = selectResult.relationData.iter().filter(|&pair| pair.0 != PointDesc::SRC && pair.0 != PointDesc::DEST).collect();
+
+            // 对json::Value来说需要注意的是serialize的调用发生在这边 而不是serde_json::to_string()
             JSON_ENUM_UNTAGGED!({
-                json[selectResult.srcName] = json!(selectResult.srcRowDatas);
-                json[selectResult.relationName] = json!(selectResult.relationData);
-                json[selectResult.destName] = json!(selectResult.destRowDatas);
+                json[selectResult.srcName.as_str()] = json!(srcRowDatas);
+                json[selectResult.relationName.as_str()] = json!(relationData);
+                json[selectResult.destName.as_str()] = json!(destRowDatas);
             });
 
-            valueVecVec.push(json);
+            let mut selectVecResultVecVecIndex = 1usize;
+            loop {
+                // 到下个select的维度上
+                let outerIndex = suffix_plus_plus!(selectVecResultVecVecIndex);
+                if outerIndex == selectVecResultVecVec.len() {
+                    break;
+                }
+
+                for selectResult in selectVecResultVecVec.get(outerIndex).unwrap() {
+                    json[selectResult.relationName.as_str()] = json!(selectResult.relationData);
+                    json[selectResult.destName.as_str()] = json!(selectResult.destRowDatas);
+                }
+            }
+
+            valueVec.push(json);
         }
+
+        valueVec
     }
 
-    println!("{}", serde_json::to_string(&valueVecVec)?);
-
-    fn handleResult(selectVecResultVecVec: Vec<Vec<SelectResult>>) {}
+    let valueVec = handleResult(selectVecResultVecVec);
+    println!("{}", serde_json::to_string(&valueVec)?);
 
     Ok(())
 }
 
+pub async fn delete(delete: &Delete) -> Result<()> {
+    let targetTable = getTableRefMutByName(delete.tableName.as_str())?;
+
+    // 对相应的data打上标识
+
+    Ok(())
+}
 
 async fn getRowsByPositions(positions: &[RowDataPosition],
                             table: &mut Table,
@@ -353,7 +378,7 @@ async fn scanSatisfiedRows(tableFilterExpr: Option<&Expr>,
 
             satisfiedRows
         } else {
-            vec![(u64::MAX, HashMap::default())]
+            vec![(global::TOTAL_DATA_OF_TABLE, HashMap::default())]
         };
 
     Ok(satisfiedRows)
@@ -493,6 +518,7 @@ fn writeBytesMut(rowData: &Value) -> Result<BytesMut> {
 
 #[cfg(test)]
 mod test {
+    use std::any::Any;
     use std::cell::{Cell, RefCell};
     use dashmap::DashMap;
     use serde::{Deserialize, Serialize, Serializer};

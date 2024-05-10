@@ -73,3 +73,9 @@ insert的values也要能支持expr 可以使用现有的parseInExpr 完成
 
 select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre
 data要有唯1标识 不能单使用position因为后续update后可能会变动
+select的alias不能重复
+
+data要有tx_min tx_max
+
+对相同的两个目标link了相同属性的相同relation 应该如何应对
+    应该是相当重调用1遍了update替换掉原来的
