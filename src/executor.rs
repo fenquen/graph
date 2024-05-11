@@ -2,13 +2,12 @@ use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::Path;
-use std::ptr::read;
 use std::rc::Rc;
 use std::sync::Arc;
 use crate::config::CONFIG;
 use crate::{executor, global, prefix_plus_plus, suffix_plus_plus, throw};
 use crate::meta::{Column, Table, TableType};
-use crate::parser::{Delete, Insert, Link, Select};
+use crate::parser::{Command, Delete, Insert, Link, Select};
 use anyhow::Result;
 use dashmap::mapref::one::{Ref, RefMut};
 use serde::{Deserialize, Serialize, Serializer};
@@ -18,24 +17,44 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufR
 use bytes::{BufMut, BytesMut};
 use lazy_static::lazy_static;
 use crate::expr::Expr;
-use crate::global::{ReachEnd, RowDataPosition};
+use crate::global::{ReachEnd, RowContentBinaryLen, RowDataPosition};
 use crate::graph_value::{GraphValue, PointDesc};
 
 type RowData = HashMap<String, GraphValue>;
 
-lazy_static! {
-    static ref DUMMY_ROW_DATA: RowData = RowData::default();
-}
-
 macro_rules! JSON_ENUM_UNTAGGED {
-    ($expr:expr) => {
-        global::UNTAGGED_ENUM_JSON.set(true);
-        $expr;
-        global::UNTAGGED_ENUM_JSON.set(false);
+    ($expr: expr) => {
+        {
+            global::UNTAGGED_ENUM_JSON.set(true);
+            let r = $expr;
+            global::UNTAGGED_ENUM_JSON.set(false);
+            r
+        }
     };
 }
 
-pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
+pub async fn execute(commands: Vec<Command>) -> Result<()> {
+    for command in commands {
+        match command {
+            Command::CreateTable(table) => createTable(table).await?,
+            Command::Insert(ref insertValues) => insert(insertValues).await?,
+            Command::Select(ref select) => executor::select(select).await?,
+            Command::Link(ref link) => executor::link(link).await?,
+            Command::Delete(ref delete) => executor::delete(delete).await?,
+            _ => throw!(&format!("unsupported command:{:?}", command)),
+        }
+    }
+
+    // 写wal buffer 写data buffer commit后wal buffer持久化
+    Ok(())
+}
+
+async fn writeWal() -> Result<()> {
+
+    Ok(())
+}
+
+async fn createTable(mut table: Table) -> Result<()> {
     if global::TABLE_NAME_TABLE.contains_key(table.name.as_str()) {
         throw!(&format!("table/relation: {} already exist",table.name))
     }
@@ -43,7 +62,7 @@ pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     // 表对应的data 文件
     let tableDataFilePath = (CONFIG.dataDir.as_ref() as &Path).join(&table.name);
 
-    if restore == false {
+    if table.restore == false {
         if tableDataFilePath.exists() {
             throw!(&format!("data file of table:{} has already exist", table.name));
         }
@@ -52,8 +71,10 @@ pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
 
         // table_record 文件
         let jsonString = serde_json::to_string(&table)?;
-        unsafe {
-            let mut tableRecordFile = global::TABLE_RECORD_FILE.as_ref().unwrap().write().await;
+
+        {
+            let option = &(**global::TABLE_RECORD_FILE.load());
+            let mut tableRecordFile = option.as_ref().unwrap().write().await;
             tableRecordFile.write_all([jsonString.as_bytes(), &[b'\r', b'\n']].concat().as_ref()).await?
         };
     }
@@ -67,7 +88,7 @@ pub async fn createTable(mut table: Table, restore: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn insert(insert: &Insert) -> Result<()> {
+async fn insert(insert: &Insert) -> Result<()> {
     // 对应的表是不是exist
     let mut table = getTableRefMutByName(&insert.tableName)?;
 
@@ -85,7 +106,7 @@ pub async fn insert(insert: &Insert) -> Result<()> {
 
 /// 它本质是向relation对应的data file写入
 /// 两个元素之间的relation只看种类不看里边的属性的
-pub async fn link(link: &Link) -> Result<()> {
+async fn link(link: &Link) -> Result<()> {
     // 得到3个表的对象
     let mut srcTable = getTableRefMutByName(link.srcTableName.as_str())?;
     let mut destTable = getTableRefMutByName(link.destTableName.as_str())?;
@@ -134,7 +155,7 @@ pub async fn link(link: &Link) -> Result<()> {
 }
 
 /// 如果不是含有relation的select 便是普通的select
-pub async fn select(selectVec: &[Select]) -> Result<()> {
+async fn select(selectVec: &[Select]) -> Result<()> {
     // 普通模式不含有relation
     if selectVec.len() == 1 && selectVec[0].relationName.is_none() {
         let select = &selectVec[0];
@@ -164,7 +185,8 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
     // 1个select对应Vec<SelectResult> 多个select对应Vec<Vec<SelectResult>>
     let mut selectVecResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectVec.len());
 
-    'loopSelect: for select in selectVec {
+    'loopSelect:
+    for select in selectVec {
         // 为什么要使用{} 不然的话有概率死锁 https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
         let relationDatas: Vec<HashMap<String, GraphValue>> = {
             let mut relation = getTableRefMutByName(select.relationName.as_ref().unwrap())?;
@@ -177,7 +199,8 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
         let mut destPositionsInCurrentSelect = vec![];
 
         // 遍历当前的select的多个relation
-        'loopRelationData: for relationData in relationDatas {
+        'loopRelationData:
+        for relationData in relationDatas {
             let srcPointDesc = relationData.get(PointDesc::SRC).unwrap().asPointDesc()?;
             // relation的src表的name不符合
             if srcPointDesc.tableName != select.srcName || srcPointDesc.positions.is_empty() {
@@ -289,11 +312,9 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
             let relationData: HashMap<&String, &GraphValue> = selectResult.relationData.iter().filter(|&pair| pair.0 != PointDesc::SRC && pair.0 != PointDesc::DEST).collect();
 
             // 对json::Value来说需要注意的是serialize的调用发生在这边 而不是serde_json::to_string()
-            JSON_ENUM_UNTAGGED!({
-                json[selectResult.srcName.as_str()] = json!(srcRowDatas);
-                json[selectResult.relationName.as_str()] = json!(relationData);
-                json[selectResult.destName.as_str()] = json!(destRowDatas);
-            });
+            json[selectResult.srcName.as_str()] = json!(srcRowDatas);
+            json[selectResult.relationName.as_str()] = json!(relationData);
+            json[selectResult.destName.as_str()] = json!(destRowDatas);
 
             let mut selectVecResultVecVecIndex = 1usize;
             loop {
@@ -315,13 +336,13 @@ pub async fn select(selectVec: &[Select]) -> Result<()> {
         valueVec
     }
 
-    let valueVec = handleResult(selectVecResultVecVec);
+    let valueVec = JSON_ENUM_UNTAGGED!(handleResult(selectVecResultVecVec));
     println!("{}", serde_json::to_string(&valueVec)?);
 
     Ok(())
 }
 
-pub async fn delete(delete: &Delete) -> Result<()> {
+async fn delete(delete: &Delete) -> Result<()> {
     let targetTable = getTableRefMutByName(delete.tableName.as_str())?;
 
     // 对相应的data打上标识
@@ -329,26 +350,49 @@ pub async fn delete(delete: &Delete) -> Result<()> {
     Ok(())
 }
 
+/// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
 async fn getRowsByPositions(positions: &[RowDataPosition],
                             table: &mut Table,
                             tableFilterExpr: Option<&Expr>,
                             selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(RowDataPosition, RowData)>> {
     let tableDataFile = table.dataFile.as_mut().unwrap();
 
-    let mut dataLenBuffer = [0; global::ROW_DATA_LEN_FIELD_LEN];
+    let mut dataLenBuffer = [0; 8];
 
-    let mut rowDatas = vec![];
+    // 要得到表的全部的data
+    let rowDatas =
+        if positions[0] == global::TOTAL_DATA_OF_TABLE {
+            tableDataFile.seek(SeekFrom::Start(0)).await?;
 
-    for position in positions {
-        tableDataFile.seek(SeekFrom::Start(*position)).await?;
-        if let (Some(rowData), _) = readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await? {
-            rowDatas.push((*position, rowData));
-        }
-    }
+            let mut rowDatas = Vec::default();
+
+            let mut position: RowDataPosition = 0;
+            loop {
+                if let (Some(rowData), _, rowDataBinaryLen) = readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await? {
+                    position += rowDataBinaryLen as RowDataPosition;
+                    rowDatas.push((position, rowData));
+                }
+                break;
+            }
+
+            rowDatas
+        } else {
+            let mut rowDatas = Vec::with_capacity(positions.len());
+
+            for position in positions {
+                tableDataFile.seek(SeekFrom::Start(*position)).await?;
+                if let (Some(rowData), _, _) = readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await? {
+                    rowDatas.push((*position, rowData));
+                }
+            }
+
+            rowDatas
+        };
 
     Ok(rowDatas)
 }
 
+/// 目标是普通表
 async fn scanSatisfiedRows(tableFilterExpr: Option<&Expr>,
                            table: &mut Table,
                            select: bool,
@@ -361,12 +405,12 @@ async fn scanSatisfiedRows(tableFilterExpr: Option<&Expr>,
         if tableFilterExpr.is_some() || select {
             let mut satisfiedRows = Vec::new();
 
-            let mut dataLenBuffer = [0; global::ROW_DATA_LEN_FIELD_LEN];
+            let mut dataLenBuffer = [0; 8];
+
+            let mut position: RowDataPosition = 0;
 
             loop {
-                let position = tableDataFile.seek(SeekFrom::Current(0)).await?;
-
-                let (rowData, reachEnd) = readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await?;
+                let (rowData, reachEnd, rowDataBinaryLen) = readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await?;
                 if reachEnd {
                     break;
                 }
@@ -374,6 +418,8 @@ async fn scanSatisfiedRows(tableFilterExpr: Option<&Expr>,
                 if rowData.is_some() {
                     satisfiedRows.push((position, rowData.unwrap()));
                 }
+
+                position += rowDataBinaryLen as RowDataPosition;
             }
 
             satisfiedRows
@@ -387,15 +433,33 @@ async fn scanSatisfiedRows(tableFilterExpr: Option<&Expr>,
 async fn readRow(tableDataFile: &mut File,
                  tableFilterExpr: Option<&Expr>,
                  selectedColumnNames: Option<&Vec<String>>,
-                 dataLenBuffer: &mut [u8]) -> Result<(Option<RowData>, ReachEnd)> {
+                 dataLenBuffer: &mut [u8]) -> Result<(Option<RowData>, ReachEnd, RowContentBinaryLen)> {
     // 相当的坑 有read()和read_buf() 前边看的是len后边看的是capactiy
     // 后边的是不能用的 虽然有Vec::with_capacity() 然而随读取的越多vec本身也会扩容的 后来改为 [0; global::ROW_DATA_LEN_FIELD_LEN]
+
+    // xmin
     let readCount = tableDataFile.read(dataLenBuffer).await?;
     if readCount == 0 {  // reach the end
-        return Ok((None, true));
+        return Ok((None, true, 0));
     }
 
-    assert_eq!(readCount, global::ROW_DATA_LEN_FIELD_LEN);
+    // xmax
+    let readCount = tableDataFile.read(dataLenBuffer).await?;
+    if readCount == 0 {  // reach the end
+        return Ok((None, true, 0));
+    }
+    // next valid position
+    let readCount = tableDataFile.read(dataLenBuffer).await?;
+    if readCount == 0 {  // reach the end
+        return Ok((None, true, 0));
+    }
+
+    let readCount = tableDataFile.read(&mut dataLenBuffer[0..global::ROW_CONTENT_LEN_FIELD_LEN]).await?;
+    if readCount == 0 {  // reach the end
+        return Ok((None, true, 0));
+    }
+
+    assert_eq!(readCount, global::ROW_CONTENT_LEN_FIELD_LEN);
 
     let dataLen = u32::from_be_bytes([dataLenBuffer[0], dataLenBuffer[1], dataLenBuffer[2], dataLenBuffer[3]]) as usize;
     let mut dataBuffer = vec![0u8; dataLen];
@@ -405,35 +469,39 @@ async fn readRow(tableDataFile: &mut File,
 
     let mut rowData: HashMap<String, GraphValue> = serde_json::from_str(&jsonString)?;
 
-    let rowData = if selectedColumnNames.is_some() {
-        let mut a = HashMap::with_capacity(rowData.len());
-        for selectedColumnName in selectedColumnNames.unwrap() {
-            let entry = rowData.remove_entry(selectedColumnName);
+    let rowData =
+        if selectedColumnNames.is_some() {
+            let mut a = HashMap::with_capacity(rowData.len());
 
-            // 说明指明的column不存在
-            if entry.is_none() {
-                throw!(&format!("not have column:{}", selectedColumnName));
+            for selectedColumnName in selectedColumnNames.unwrap() {
+                let entry = rowData.remove_entry(selectedColumnName);
+
+                // 说明指明的column不存在
+                if entry.is_none() {
+                    throw!(&format!("not have column:{}", selectedColumnName));
+                }
+
+                let entry = entry.unwrap();
+
+                a.insert(entry.0, entry.1);
             }
 
-            let entry = entry.unwrap();
+            a
+        } else {
+            rowData
+        };
 
-            a.insert(entry.0, entry.1);
-        }
-
-        a
-    } else {
-        rowData
-    };
+    let rowDataBinaryLen = (global::ROW_PREFIX_LEN + dataLen) as RowContentBinaryLen;
 
     if tableFilterExpr.is_none() {
-        return Ok((Some(rowData), false));
+        return Ok((Some(rowData), false, rowDataBinaryLen));
     }
 
     if let GraphValue::Boolean(satisfy) = tableFilterExpr.unwrap().calc(Some(&rowData))? {
         if satisfy {
-            Ok((Some(rowData), false))
+            Ok((Some(rowData), false, rowDataBinaryLen))
         } else {
-            Ok((None, false))
+            Ok((None, false, rowDataBinaryLen))
         }
     } else {
         throw!("table filter should get a boolean")
@@ -509,7 +577,10 @@ fn writeBytesMut(rowData: &Value) -> Result<BytesMut> {
 
     assert!(u32::MAX as usize >= jsonStringByte.len());
 
-    let mut bytesMut = BytesMut::with_capacity(global::ROW_DATA_LEN_FIELD_LEN + jsonStringByte.len());
+    let mut bytesMut = BytesMut::with_capacity(global::ROW_PREFIX_LEN + jsonStringByte.len());
+    bytesMut.put_u64(0);
+    bytesMut.put_u64(0);
+    bytesMut.put_u64(0);
     bytesMut.put_u32(dataLen as u32);
     bytesMut.put_slice(jsonStringByte);
 

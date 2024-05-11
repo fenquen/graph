@@ -12,6 +12,10 @@ use tokio::sync::RwLock;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::config::CONFIG;
 use crate::graph_value::GraphValue;
+use crate::parser::Command;
+
+pub const TABLE_RECORD_FILE_NAME: &str = "table_record";
+pub const WAL_FILE_NAME: &str = "wal";
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Table {
@@ -20,6 +24,8 @@ pub struct Table {
     pub type0: TableType,
     #[serde(skip_serializing, skip_deserializing)]
     pub dataFile: Option<File>,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub restore: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -144,13 +150,15 @@ pub async fn init() -> Result<()> {
     fs::create_dir_all(CONFIG.dataDir.as_str()).await?;
     fs::create_dir_all(CONFIG.metaDir.as_str()).await?;
 
-    // 用来记录表的文件
     let metaDirPath: &Path = CONFIG.metaDir.as_ref();
-    let tableRecordFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join("table_record")).await?;
 
-    unsafe {
-        global::TABLE_RECORD_FILE = Some(Arc::new(RwLock::new(tableRecordFile)));
-    }
+    // table_record
+    let tableRecordFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join(TABLE_RECORD_FILE_NAME)).await?;
+    global::TABLE_RECORD_FILE.store(Arc::new(Some(RwLock::new(tableRecordFile))));
+
+    // wal
+    let walFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join(WAL_FILE_NAME)).await?;
+    global::WAL_FILE.store(Arc::new(Some(RwLock::new(walFile))));
 
     // 还原
     rebuildTables().await?;
@@ -159,15 +167,15 @@ pub async fn init() -> Result<()> {
 }
 
 async fn rebuildTables() -> Result<()> {
-    unsafe {
-        let mut tableRecordFile = global::TABLE_RECORD_FILE.as_ref().unwrap().write().await;
+    let option = &(**global::TABLE_RECORD_FILE.load());
+    let mut tableRecordFile = option.as_ref().unwrap().write().await;
 
-        let bufReader = BufReader::new(&mut *tableRecordFile);
-        let mut lines = bufReader.lines();
-        while let Some(line) = lines.next_line().await? {
-            let table: Table = serde_json::from_str(&line)?;
-            executor::createTable(table, true).await?;
-        }
+    let bufReader = BufReader::new(&mut *tableRecordFile);
+    let mut lines = bufReader.lines();
+    while let Some(line) = lines.next_line().await? {
+        let mut table: Table = serde_json::from_str(&line)?;
+        table.restore = true;
+        executor::execute(vec![Command::CreateTable(table)]).await?;
     }
 
     Ok(())

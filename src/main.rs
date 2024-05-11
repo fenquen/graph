@@ -13,6 +13,7 @@ mod executor;
 mod a;
 mod expr;
 mod graph_value;
+mod session;
 
 use std::string::ToString;
 use anyhow::Result;
@@ -27,23 +28,14 @@ pub async fn main() -> Result<()> {
 
     let tableRecordFile = OpenOptions::new().read(true).open("sql.txt").await?;
     let bufReader = BufReader::new(tableRecordFile);
-    let mut lines = bufReader.lines();
-    while let Some(sql) = lines.next_line().await? {
+    let mut sqls = bufReader.lines();
+    while let Some(sql) = sqls.next_line().await? {
         if sql.starts_with("--") {
             continue;
         }
 
         let commandVec = parser::parse(sql.as_str())?;
-        for command in commandVec {
-            match command {
-                Command::CreateTable(table) => executor::createTable(table, false).await?,
-                Command::Insert(ref insertValues) => executor::insert(insertValues).await?,
-                Command::Select(ref select) => executor::select(select).await?,
-                Command::Link(ref link) => executor::link(link).await?,
-                Command::Delete(ref delete) => executor::delete(delete).await?,
-                _ => {}
-            }
-        }
+        executor::execute(commandVec).await?;
     }
 
     Ok(())

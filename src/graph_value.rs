@@ -265,6 +265,7 @@ impl GraphValue {
     }
 }
 
+/// relation data的用来描述两边的
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PointDesc {
     pub tableName: String,

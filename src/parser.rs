@@ -26,6 +26,7 @@ pub fn parse(sql: &str) -> Result<Vec<Command>> {
     parser.parse()
 }
 
+#[derive(Debug)]
 pub enum Command {
     CreateTable(Table),
     Insert(Insert),
@@ -34,6 +35,15 @@ pub enum Command {
     Update,
     Select(Vec<Select>),
     Delete(Delete),
+}
+
+impl Command {
+    pub fn isDml(&self) -> bool {
+        match self {
+            Command::Select(_) => false,
+            _ => true
+        }
+    }
 }
 
 #[derive(Default)]
@@ -76,7 +86,7 @@ impl Parser {
             let currentChar = self.currentChar();
             match currentChar {
                 // 空格如果不是文本内容的话不用记录抛弃
-                global::空格_CHAR => {
+                global::SPACE_CHAR => {
                     // 是不是文本本身的内容
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
@@ -1390,7 +1400,7 @@ impl Debug for Element {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Insert {
     pub tableName: String,
     /// insert into table (column) values ('a')
@@ -1551,9 +1561,7 @@ mod test {
         parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
     }
 
-    pub fn testA() {
-        
-    }
+    pub fn testA() {}
 
     pub fn testUpdate() {}
 
