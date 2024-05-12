@@ -21,6 +21,7 @@ pub enum GraphValue {
 
 impl Serialize for GraphValue {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> where S: Serializer {
+        /// 因为没有别的地方可以传递参数来标识了 不得已用threadLocal
         if global::UNTAGGED_ENUM_JSON.get() {
             match self {
                 GraphValue::Pending(s) => s.serialize(serializer),

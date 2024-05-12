@@ -5,7 +5,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use crate::config::CONFIG;
-use crate::{executor, global, prefix_plus_plus, suffix_plus_plus, throw};
+use crate::{command_executor, global, prefix_plus_plus, suffix_plus_plus, throw};
 use crate::meta::{Column, Table, TableType};
 use crate::parser::{Command, Delete, Insert, Link, Select};
 use anyhow::Result;
@@ -38,9 +38,9 @@ pub async fn execute(commands: Vec<Command>) -> Result<()> {
         match command {
             Command::CreateTable(table) => createTable(table).await?,
             Command::Insert(ref insertValues) => insert(insertValues).await?,
-            Command::Select(ref select) => executor::select(select).await?,
-            Command::Link(ref link) => executor::link(link).await?,
-            Command::Delete(ref delete) => executor::delete(delete).await?,
+            Command::Select(ref select) => command_executor::select(select).await?,
+            Command::Link(ref link) => command_executor::link(link).await?,
+            Command::Delete(ref delete) => command_executor::delete(delete).await?,
             _ => throw!(&format!("unsupported command:{:?}", command)),
         }
     }
@@ -597,7 +597,7 @@ mod test {
     use serde_json::json;
     use crate::graph_value::GraphValue;
     use crate::{global, meta, parser};
-    use crate::executor;
+    use crate::command_executor;
     use crate::parser::Command;
 
     #[test]
@@ -614,7 +614,7 @@ mod test {
         // select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car
         let commandVec = parser::parse("select user[id,name](id=1 and 0=0)").unwrap();
         if let Command::Select(ref select) = commandVec[0] {
-            executor::select(select).await.unwrap();
+            command_executor::select(select).await.unwrap();
         }
     }
 

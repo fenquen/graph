@@ -3,7 +3,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::{executor, global, throw};
+use crate::{command_executor, global, throw};
 use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
@@ -175,7 +175,7 @@ async fn rebuildTables() -> Result<()> {
     while let Some(line) = lines.next_line().await? {
         let mut table: Table = serde_json::from_str(&line)?;
         table.restore = true;
-        executor::execute(vec![Command::CreateTable(table)]).await?;
+        command_executor::execute(vec![Command::CreateTable(table)]).await?;
     }
 
     Ok(())

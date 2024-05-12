@@ -9,7 +9,7 @@ mod graph_error;
 mod global;
 mod parser;
 mod meta;
-mod executor;
+mod command_executor;
 mod a;
 mod expr;
 mod graph_value;
@@ -35,7 +35,7 @@ pub async fn main() -> Result<()> {
         }
 
         let commandVec = parser::parse(sql.as_str())?;
-        executor::execute(commandVec).await?;
+        command_executor::execute(commandVec).await?;
     }
 
     Ok(())

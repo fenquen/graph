@@ -44,6 +44,7 @@ thread_local! {
     /// enum使用json序列化 默认是tagged的 <br>
     /// GraphValue::String("a") 会变为 {"String":"a"} <br>
     /// 有的时候需要的是untagged 序列化为"1"
+    /// 有个要点是内部不能使用async函数 不然的话可能会跑到别的os线程上去污染
     pub static UNTAGGED_ENUM_JSON: Cell<bool> = Cell::new(false);
 }
 
