@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::parser::Command;
+use crate::session::Session;
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
@@ -29,13 +30,15 @@ pub async fn main() -> Result<()> {
     let tableRecordFile = OpenOptions::new().read(true).open("sql.txt").await?;
     let bufReader = BufReader::new(tableRecordFile);
     let mut sqls = bufReader.lines();
+
+    let mut session = Session::new();
+
     while let Some(sql) = sqls.next_line().await? {
         if sql.starts_with("--") {
             continue;
         }
 
-        let commandVec = parser::parse(sql.as_str())?;
-        command_executor::execute(commandVec).await?;
+        session.executeSql(sql.as_str()).await?;
     }
 
     Ok(())

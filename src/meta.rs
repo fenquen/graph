@@ -1,4 +1,5 @@
 use std::fmt::{Display, Formatter};
+use std::io::SeekFrom;
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
@@ -8,11 +9,13 @@ use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use crate::config::CONFIG;
 use crate::graph_value::GraphValue;
 use crate::parser::Command;
+use crate::session::Session;
 
 pub const TABLE_RECORD_FILE_NAME: &str = "table_record";
 pub const WAL_FILE_NAME: &str = "wal";
@@ -153,29 +156,42 @@ pub async fn init() -> Result<()> {
     let metaDirPath: &Path = CONFIG.metaDir.as_ref();
 
     // table_record
-    let tableRecordFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join(TABLE_RECORD_FILE_NAME)).await?;
-    global::TABLE_RECORD_FILE.store(Arc::new(Some(RwLock::new(tableRecordFile))));
+    let mut tableRecordFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join(TABLE_RECORD_FILE_NAME)).await?;
 
     // wal
-    let walFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join(WAL_FILE_NAME)).await?;
-    global::WAL_FILE.store(Arc::new(Some(RwLock::new(walFile))));
+    let mut walFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join(WAL_FILE_NAME)).await?;
 
     // 还原
-    rebuildTables().await?;
+    restoreDB(&mut tableRecordFile, &mut walFile).await?;
+
+    global::TABLE_RECORD_FILE.store(Arc::new(Some(RwLock::new(tableRecordFile))));
+    global::WAL_FILE.store(Arc::new(Some(RwLock::new(walFile))));
 
     Ok(())
 }
 
-async fn rebuildTables() -> Result<()> {
-    let option = &(**global::TABLE_RECORD_FILE.load());
-    let mut tableRecordFile = option.as_ref().unwrap().write().await;
+async fn restoreDB(tableRecordFile: &mut File, walFile: &mut File) -> Result<()> {
+    // 还原table
+    {
+        let bufReader = BufReader::new(tableRecordFile);
+        let mut lines = bufReader.lines();
 
-    let bufReader = BufReader::new(&mut *tableRecordFile);
-    let mut lines = bufReader.lines();
-    while let Some(line) = lines.next_line().await? {
-        let mut table: Table = serde_json::from_str(&line)?;
-        table.restore = true;
-        command_executor::execute(vec![Command::CreateTable(table)]).await?;
+        let mut session = Session::new();
+
+        while let Some(line) = lines.next_line().await? {
+            let mut table: Table = serde_json::from_str(&line)?;
+            table.restore = true;
+            session.executeCommands(&vec![Command::CreateTable(table)]).await?;
+        }
+    }
+
+    // 还原 txId
+    {
+        walFile.seek(SeekFrom::End(global::TX_ID_LEN as i64 * -1)).await?;
+        let lastTxId = walFile.read_u64().await?;
+        global::TX_ID.store(lastTxId, Ordering::SeqCst);
+
+        println!("lastTxId:{}", lastTxId);
     }
 
     Ok(())

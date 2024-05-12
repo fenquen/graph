@@ -6,7 +6,7 @@ use crate::parser::{Element, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
 use crate::{global, throw};
 use anyhow::Result;
 use serde::ser::SerializeMap;
-use crate::global::RowDataPosition;
+use crate::global::DataPosition;
 
 #[derive(Deserialize, Debug, Clone)]
 pub enum GraphValue {
@@ -21,7 +21,7 @@ pub enum GraphValue {
 
 impl Serialize for GraphValue {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> where S: Serializer {
-        /// 因为没有别的地方可以传递参数来标识了 不得已用threadLocal
+        // 因为没有别的地方可以传递参数来标识了 不得已用threadLocal
         if global::UNTAGGED_ENUM_JSON.get() {
             match self {
                 GraphValue::Pending(s) => s.serialize(serializer),
@@ -270,7 +270,7 @@ impl GraphValue {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PointDesc {
     pub tableName: String,
-    pub positions: Vec<RowDataPosition>,
+    pub positions: Vec<DataPosition>,
 }
 
 impl PointDesc {

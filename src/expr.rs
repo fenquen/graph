@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use serde_json::Value;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use crate::graph_value::GraphValue;
 use crate::parser::{Element, MathCmpOp, Op, SqlOp};
 use crate::throw;
 
 // 碰到"(" 下钻递归,返回后落地到上级的left right
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Expr {
     Single(Element),
     BiDirection {

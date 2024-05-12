@@ -12,8 +12,10 @@ use crate::meta::Table;
 
 pub type TxId = u64;
 
-/// 类似pg的xmin和xmax用途的长度
-pub const TX_ID_LEN: usize = mem::size_of::<TxId>();
+pub type ReachEnd = bool;
+pub type DataPosition = u64;
+pub type ContentBinaryLen = u32;
+
 
 lazy_static! {
     pub static ref TABLE_NAME_TABLE: DashMap<String, Table> = DashMap::new();
@@ -25,19 +27,17 @@ lazy_static! {
 pub const TX_ID_INVALID: TxId = 0;
 pub const TX_ID_MIN: TxId = 3;
 
-pub const WAL_CONTENT_FIELD_LEN: usize = mem::size_of::<u32>();
+/// 类似pg的xmin和xmax用途的长度
+pub const TX_ID_LEN: usize = mem::size_of::<TxId>();
+
+pub const WAL_CONTENT_FIELD_LEN: usize = mem::size_of::<ContentBinaryLen>();
+pub const WAL_PREFIX_LEN: usize = TX_ID_LEN + WAL_CONTENT_FIELD_LEN;
 
 /// 如果当前的rowData已是失效的话会指向实际的有效的data的position
-pub const ROW_NEXT_POSITION_LEN: usize = mem::size_of::<RowDataPosition>();
-
+pub const ROW_NEXT_POSITION_LEN: usize = mem::size_of::<DataPosition>();
 /// 标识rowData长度
-pub const ROW_CONTENT_LEN_FIELD_LEN: usize = mem::size_of::<RowContentBinaryLen>();
-
+pub const ROW_CONTENT_LEN_FIELD_LEN: usize = mem::size_of::<ContentBinaryLen>();
 pub const ROW_PREFIX_LEN: usize = TX_ID_LEN + TX_ID_LEN + ROW_NEXT_POSITION_LEN + ROW_CONTENT_LEN_FIELD_LEN;
-
-pub type ReachEnd = bool;
-pub type RowDataPosition = u64;
-pub type RowContentBinaryLen = u32;
 
 thread_local! {
     /// https://www.cnblogs.com/jiangbo4444/p/15932305.html <br>

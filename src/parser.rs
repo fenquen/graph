@@ -5,6 +5,7 @@ use std::str::FromStr;
 use crate::{global, prefix_plus_plus, suffix_minus_minus, suffix_plus_plus, throw};
 use anyhow::Result;
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 use strum_macros::{Display as DisplayStrum, Display, EnumString};
 use crate::expr::Expr;
 use crate::graph_error::GraphError;
@@ -26,12 +27,11 @@ pub fn parse(sql: &str) -> Result<Vec<Command>> {
     parser.parse()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Command {
     CreateTable(Table),
     Insert(Insert),
     Link(Link),
-    A,
     Update,
     Select(Vec<Select>),
     Delete(Delete),
@@ -40,7 +40,7 @@ pub enum Command {
 impl Command {
     pub fn isDml(&self) -> bool {
         match self {
-            Command::Select(_) => false,
+            Command::Select(_) | Command::CreateTable(_) => false,
             _ => true
         }
     }
@@ -1313,7 +1313,7 @@ impl Parser {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Element {
     /// 如果只有TextLiteral的话 还是不能区分 (')') 的两个右括号的
     TextLiteral(String),
@@ -1400,7 +1400,7 @@ impl Debug for Element {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Insert {
     pub tableName: String,
     /// insert into table (column) values ('a')
@@ -1409,7 +1409,7 @@ pub struct Insert {
     pub columnExprs: Vec<Expr>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Op {
     MathCmpOp(MathCmpOp),
     SqlOp(SqlOp),
@@ -1429,7 +1429,7 @@ impl Display for Op {
 }
 
 // https://note.qidong.name/2023/03/rust-enum-str/
-#[derive(DisplayStrum, Clone, Debug, Copy)]
+#[derive(DisplayStrum, Clone, Debug, Copy, Serialize, Deserialize)]
 pub enum MathCmpOp {
     Equal,
     GreaterThan,
@@ -1456,18 +1456,18 @@ impl FromStr for MathCmpOp {
     }
 }
 
-#[derive(DisplayStrum, Clone, Debug, Copy)]
+#[derive(DisplayStrum, Clone, Debug, Copy, Serialize, Deserialize)]
 pub enum LogicalOp {
     And,
     Or,
 }
 
-#[derive(DisplayStrum, Clone, Debug, Copy)]
+#[derive(DisplayStrum, Clone, Debug, Copy, Serialize, Deserialize)]
 pub enum SqlOp {
     In,
 }
 
-#[derive(DisplayStrum, Clone, Debug, Copy)]
+#[derive(DisplayStrum, Clone, Debug, Copy, Serialize, Deserialize)]
 pub enum MathCalcOp {
     Plus,
     Divide,
@@ -1488,7 +1488,7 @@ impl MathCalcOp {
 }
 
 /// link user(id = 1) to car(color = 'red') by usage(number = 2)
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Link {
     pub srcTableName: String,
     pub srcTableFilterExpr: Option<Expr>,
@@ -1501,7 +1501,7 @@ pub struct Link {
     pub relationColumnExprs: Vec<Expr>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Select {
     pub srcName: String,
     pub srcColumnNames: Option<Vec<String>>,
@@ -1519,7 +1519,7 @@ pub struct Select {
     pub destAlias: Option<String>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Delete {
     pub tableName: String,
     pub filterExpr: Option<Expr>,
