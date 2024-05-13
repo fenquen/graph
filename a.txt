@@ -81,3 +81,9 @@ data要有tx_min tx_max
     应该是相当重调用1遍了update替换掉原来的
 
 要能够应对like
+
+使用binary保存
+buffer
+walbuffer
+databuffer
+select 的 order by

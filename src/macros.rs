@@ -49,3 +49,17 @@ macro_rules! suffix_minus_minus {
         }
     };
 }
+
+#[macro_export]
+macro_rules! file_goto_start {
+    ($file:expr) => {
+         $file.seek(std::io::SeekFrom::Start(0)).await?
+    };
+}
+
+#[macro_export]
+macro_rules! file_goto_end {
+    ($file:expr) => {
+         $file.seek(std::io::SeekFrom::End(0)).await?
+    };
+}

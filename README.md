@@ -39,6 +39,7 @@ link car (id =34) to tyre(name ='stone') by own(number=1);
 ```sql
 select user(id=1 and 0=0)
 ```
+
 ```json
 [
   {
@@ -159,7 +160,9 @@ select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -
 
 ## delete
 
-developing
+```sql
+delete from user(id=1)
+```
 
 ## update
 

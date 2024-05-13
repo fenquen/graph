@@ -4,7 +4,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::{command_executor, global, throw};
+use crate::{command_executor, file_goto_start, global, throw};
 use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
@@ -156,10 +156,13 @@ pub async fn init() -> Result<()> {
     let metaDirPath: &Path = CONFIG.metaDir.as_ref();
 
     // table_record
-    let mut tableRecordFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join(TABLE_RECORD_FILE_NAME)).await?;
+    let mut tableRecordFile = OpenOptions::new().write(true).read(true).create(true).open(metaDirPath.join(TABLE_RECORD_FILE_NAME)).await?;
+    // 上边不能使用append(true),不然的话不论如何seek都只会到末尾append
+    file_goto_start!(tableRecordFile);
 
     // wal
-    let mut walFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(metaDirPath.join(WAL_FILE_NAME)).await?;
+    let mut walFile = OpenOptions::new().write(true).read(true).create(true).open(metaDirPath.join(WAL_FILE_NAME)).await?;
+    file_goto_start!(walFile);
 
     // 还原
     restoreDB(&mut tableRecordFile, &mut walFile).await?;
@@ -187,11 +190,13 @@ async fn restoreDB(tableRecordFile: &mut File, walFile: &mut File) -> Result<()>
 
     // 还原 txId
     {
-        walFile.seek(SeekFrom::End(global::TX_ID_LEN as i64 * -1)).await?;
-        let lastTxId = walFile.read_u64().await?;
-        global::TX_ID.store(lastTxId, Ordering::SeqCst);
+        if walFile.seek(SeekFrom::End(0)).await? > 0 {
+            walFile.seek(SeekFrom::End(global::TX_ID_LEN as i64 * -1)).await?;
+            let lastTxId = walFile.read_u64().await?;
+            global::TX_ID_COUNTER.store(lastTxId, Ordering::SeqCst);
 
-        println!("lastTxId:{}", lastTxId);
+            println!("lastTxId:{}", lastTxId);
+        }
     }
 
     Ok(())

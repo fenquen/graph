@@ -3,7 +3,7 @@ use crate::{command_executor, global, parser};
 use anyhow::Result;
 use tokio::io::AsyncWriteExt;
 use crate::command_executor::CommandExecutor;
-use crate::global::{ContentBinaryLen, TX_ID, TxId};
+use crate::global::{DataLen, TX_ID_COUNTER, TxId};
 use crate::parser::{Command, SqlOp};
 
 pub struct Session {
@@ -28,7 +28,7 @@ impl Session {
 
     pub async fn executeCommands(&mut self, commands: &[Command]) -> Result<()> {
         if self.autoCommit || self.txId == global::TX_ID_INVALID {
-            self.txId = global::TX_ID.fetch_add(1, Ordering::SeqCst);
+            self.txId = global::TX_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
         }
 
         let commandExecutor = CommandExecutor::new(self);
@@ -83,7 +83,7 @@ impl Session {
         walFile.write_u64(txId).await?;
 
         // content length
-        walFile.write_u32(jsonStringByte.len() as ContentBinaryLen).await?;
+        walFile.write_u32(jsonStringByte.len() as DataLen).await?;
 
         // content
         walFile.write_all(jsonStringByte).await?;

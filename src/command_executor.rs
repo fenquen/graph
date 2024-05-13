@@ -5,7 +5,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use crate::config::CONFIG;
-use crate::{command_executor, global, prefix_plus_plus, suffix_plus_plus, throw};
+use crate::{command_executor, file_goto_start, global, prefix_plus_plus, suffix_plus_plus, throw};
 use crate::meta::{Column, Table, TableType};
 use crate::parser::{Command, Delete, Insert, Link, Select};
 use anyhow::Result;
@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufR
 use bytes::{BufMut, BytesMut};
 use lazy_static::lazy_static;
 use crate::expr::Expr;
-use crate::global::{ReachEnd, ContentBinaryLen, DataPosition};
+use crate::global::{ReachEnd, DataLen, DataPosition, TX_ID_COUNTER, TxId};
 use crate::graph_value::{GraphValue, PointDesc};
 use crate::session::Session;
 
@@ -83,7 +83,6 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 throw!(&format!("data file of table:{} has already exist", table.name));
             }
 
-            File::create(tableDataFilePath.as_path()).await?;
 
             // table_record 文件
             let jsonString = serde_json::to_string(&table)?;
@@ -95,7 +94,10 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             };
         }
 
-        let tableDataFile = OpenOptions::new().write(true).read(true).create(true).append(true).open(tableDataFilePath.as_path()).await?;
+        let mut tableDataFile = OpenOptions::new().write(true).read(true).create(true).open(tableDataFilePath.as_path()).await?;
+
+        file_goto_start!(tableDataFile);
+
         table.dataFile = Some(tableDataFile);
 
         // map
@@ -199,7 +201,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         let mut destPositionsInPrevSelect: Option<Vec<DataPosition>> = None;
 
         // 1个select对应Vec<SelectResult> 多个select对应Vec<Vec<SelectResult>>
-        let mut selectVecResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectVec.len());
+        let mut selectResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectVec.len());
 
         'loopSelect:
         for select in selectVec {
@@ -244,7 +246,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                             }
 
                             // 当前的select的src确定了 还要回去修改上轮的dest
-                            if let Some(prevSelectResultVec) = selectVecResultVecVec.last_mut() {
+                            if let Some(prevSelectResultVec) = selectResultVecVec.last_mut() {
 
                                 // 遍历上轮的各个result的dest,把intersect之外的去掉
                                 for prevSelectResult in &mut *prevSelectResultVec {
@@ -309,15 +311,20 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 Some(destPositionsInCurrentSelect)
             };
 
-            selectVecResultVecVec.push(selectResultVecInCurrentSelect);
+            selectResultVecVec.push(selectResultVecInCurrentSelect);
         }
 
         /// ```[[[第1个select的第1行data],[第1个select的第2行data]],[[第2个select的第1行data],[第2个select的第2行data]]]```
         /// 到时候要生成4条脉络
-        fn handleResult(selectVecResultVecVec: Vec<Vec<SelectResult>>) -> Vec<Value> {
+        fn handleResult(selectResultVecVec: Vec<Vec<SelectResult>>) -> Vec<Value> {
             let mut valueVec = Vec::default();
 
-            for selectResult in &selectVecResultVecVec[0] {
+
+            if selectResultVecVec.is_empty() {
+                return valueVec;
+            }
+
+            for selectResult in &selectResultVecVec[0] {
                 let mut json = json!({});
 
                 // 把tuple的position干掉
@@ -336,11 +343,11 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 loop {
                     // 到下个select的维度上
                     let outerIndex = suffix_plus_plus!(selectVecResultVecVecIndex);
-                    if outerIndex == selectVecResultVecVec.len() {
+                    if outerIndex == selectResultVecVec.len() {
                         break;
                     }
 
-                    for selectResult in selectVecResultVecVec.get(outerIndex).unwrap() {
+                    for selectResult in selectResultVecVec.get(outerIndex).unwrap() {
                         json[selectResult.relationName.as_str()] = json!(selectResult.relationData);
                         json[selectResult.destName.as_str()] = json!(selectResult.destRowDatas);
                     }
@@ -352,7 +359,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             valueVec
         }
 
-        let valueVec = JSON_ENUM_UNTAGGED!(handleResult(selectVecResultVecVec));
+        let valueVec = JSON_ENUM_UNTAGGED!(handleResult(selectResultVecVec));
         println!("{}", serde_json::to_string(&valueVec)?);
 
         Ok(())
@@ -360,9 +367,19 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
     /// 得到满足expr的record 然后把它的xmax变为当前的txId
     async fn delete(&self, delete: &Delete) -> Result<()> {
-        let targetTable = self.getTableRefMutByName(delete.tableName.as_str())?;
+        let mut table = self.getTableRefMutByName(delete.tableName.as_str())?;
 
-        // 对相应的data打上标识
+        let pairs = self.scanSatisfiedRows(delete.filterExpr.as_ref(), table.value_mut(), true, None).await?;
+
+        let tableDataFile = table.value_mut().dataFile.as_mut().unwrap();
+
+        // 遍历更改的xmax
+        for (dataPosition, _) in pairs {
+            // 要更改的是xmax 在xmin后边
+            // 之前发现即使seek到了正确的位置,写入还是到末尾append的 原因是openOptions设置了append
+            tableDataFile.seek(SeekFrom::Start(dataPosition + global::TX_ID_LEN as u64)).await?;
+            tableDataFile.write_u64(self.session.txId).await?;
+        }
 
         Ok(())
     }
@@ -378,36 +395,20 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         let mut dataLenBuffer = [0; 8];
 
         // 要得到表的全部的data
-        let rowDatas =
-            if positions[0] == global::TOTAL_DATA_OF_TABLE {
-                tableDataFile.seek(SeekFrom::Start(0)).await?;
+        if positions[0] == global::TOTAL_DATA_OF_TABLE {
+            self.scanSatisfiedRows(tableFilterExpr, table, true, selectedColumnNames).await
+        } else {
+            let mut rowDatas = Vec::with_capacity(positions.len());
 
-                let mut rowDatas = Vec::default();
-
-                let mut position: DataPosition = 0;
-                loop {
-                    if let (Some(rowData), _, rowDataBinaryLen) = self.readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await? {
-                        position += rowDataBinaryLen as DataPosition;
-                        rowDatas.push((position, rowData));
-                    }
-                    break;
+            for position in positions {
+                tableDataFile.seek(SeekFrom::Start(*position)).await?;
+                if let (Some(rowData), _, _) = self.readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await? {
+                    rowDatas.push((*position, rowData));
                 }
+            }
 
-                rowDatas
-            } else {
-                let mut rowDatas = Vec::with_capacity(positions.len());
-
-                for position in positions {
-                    tableDataFile.seek(SeekFrom::Start(*position)).await?;
-                    if let (Some(rowData), _, _) = self.readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await? {
-                        rowDatas.push((*position, rowData));
-                    }
-                }
-
-                rowDatas
-            };
-
-        Ok(rowDatas)
+            Ok(rowDatas)
+        }
     }
 
     /// 目标是普通表
@@ -449,42 +450,61 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         Ok(satisfiedRows)
     }
 
+    /// 调用的前提是当前文件的位置到了row的start
     async fn readRow(&self,
                      tableDataFile: &mut File,
                      tableFilterExpr: Option<&Expr>,
                      selectedColumnNames: Option<&Vec<String>>,
-                     dataLenBuffer: &mut [u8]) -> Result<(Option<RowData>, ReachEnd, ContentBinaryLen)> {
+                     dataLenBuffer: &mut [u8; 8]) -> Result<(Option<RowData>, ReachEnd, DataLen)> {
         // 相当的坑 有read()和read_buf() 前边看的是len后边看的是capactiy
         // 后边的是不能用的 虽然有Vec::with_capacity() 然而随读取的越多vec本身也会扩容的 后来改为 [0; global::ROW_DATA_LEN_FIELD_LEN]
 
+        macro_rules! expand {
+            ($dataLenBuffer: expr) => {
+                [$dataLenBuffer[0], $dataLenBuffer[1], $dataLenBuffer[2], $dataLenBuffer[3], $dataLenBuffer[4], $dataLenBuffer[5], $dataLenBuffer[6], $dataLenBuffer[7]]
+            };
+        }
         // xmin
         let readCount = tableDataFile.read(dataLenBuffer).await?;
         if readCount == 0 {  // reach the end
             return Ok((None, true, 0));
         }
+        assert_eq!(readCount, global::TX_ID_LEN);
+        let xmin: TxId = TxId::from_be_bytes(expand!(dataLenBuffer));
 
         // xmax
         let readCount = tableDataFile.read(dataLenBuffer).await?;
         if readCount == 0 {  // reach the end
             return Ok((None, true, 0));
         }
+        assert_eq!(readCount, global::TX_ID_LEN);
+        let xmax: TxId = TxId::from_be_bytes(expand!(dataLenBuffer));
+
         // next valid position
         let readCount = tableDataFile.read(dataLenBuffer).await?;
         if readCount == 0 {  // reach the end
             return Ok((None, true, 0));
         }
+        assert_eq!(readCount, global::ROW_NEXT_POSITION_LEN);
+        let nextPosition: DataPosition = DataPosition::from_be_bytes(expand!(dataLenBuffer));
 
+        // 读取content
         let readCount = tableDataFile.read(&mut dataLenBuffer[0..global::ROW_CONTENT_LEN_FIELD_LEN]).await?;
         if readCount == 0 {  // reach the end
             return Ok((None, true, 0));
         }
-
         assert_eq!(readCount, global::ROW_CONTENT_LEN_FIELD_LEN);
+        let contentLen = u32::from_be_bytes([dataLenBuffer[0], dataLenBuffer[1], dataLenBuffer[2], dataLenBuffer[3]]) as usize;
+        let rowTotalLen: DataLen = (global::ROW_PREFIX_LEN + contentLen) as DataLen;
 
-        let dataLen = u32::from_be_bytes([dataLenBuffer[0], dataLenBuffer[1], dataLenBuffer[2], dataLenBuffer[3]]) as usize;
-        let mut dataBuffer = vec![0u8; dataLen];
+        // 不在可视范围里边
+        if xmin > self.session.txId || (xmax != global::TX_ID_INVALID && self.session.txId >= xmax) {
+            return Ok((None, false, rowTotalLen));
+        }
+
+        let mut dataBuffer = vec![0u8; contentLen];
         let readCount = tableDataFile.read(&mut dataBuffer).await?;
-        assert_eq!(readCount, dataLen);
+        assert_eq!(readCount, contentLen);
         let jsonString = String::from_utf8(dataBuffer)?;
 
         let mut rowData: HashMap<String, GraphValue> = serde_json::from_str(&jsonString)?;
@@ -511,17 +531,15 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 rowData
             };
 
-        let rowDataBinaryLen = (global::ROW_PREFIX_LEN + dataLen) as ContentBinaryLen;
-
         if tableFilterExpr.is_none() {
-            return Ok((Some(rowData), false, rowDataBinaryLen));
+            return Ok((Some(rowData), false, rowTotalLen));
         }
 
         if let GraphValue::Boolean(satisfy) = tableFilterExpr.unwrap().calc(Some(&rowData))? {
             if satisfy {
-                Ok((Some(rowData), false, rowDataBinaryLen))
+                Ok((Some(rowData), false, rowTotalLen))
             } else {
-                Ok((None, false, rowDataBinaryLen))
+                Ok((None, false, rowTotalLen))
             }
         } else {
             throw!("table filter should get a boolean")
@@ -624,13 +642,17 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 mod test {
     use std::any::Any;
     use std::cell::{Cell, RefCell};
+    use std::io::{SeekFrom, Write};
     use dashmap::DashMap;
     use serde::{Deserialize, Serialize, Serializer};
     use serde::ser::{SerializeMap, SerializeStruct};
     use serde_json::json;
+    use tokio::fs::OpenOptions;
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     use crate::graph_value::GraphValue;
     use crate::{global, meta, parser};
     use crate::command_executor;
+    use crate::meta::TABLE_RECORD_FILE_NAME;
     use crate::parser::Command;
 
     #[test]
@@ -675,5 +697,17 @@ mod test {
         println!("{}", serde_json::to_string(&a).unwrap());
 
         let a: A = serde_json::from_str("{\"S\":\"1\"}").unwrap();
+    }
+
+    #[tokio::test]
+    pub async fn testWriteU64() {
+        // 如果设置了append 即使再怎么seek 也只会到末尾append
+        let mut file = OpenOptions::new().write(true).read(true).create(true).open("data/user").await.unwrap();
+        println!("{}", file.seek(SeekFrom::Start(8)).await.unwrap());
+        println!("{}", file.seek(SeekFrom::Current(0)).await.unwrap());
+
+        file.into_std().await.write(&[9]).unwrap();
+        //  file.write_u8(9).await.unwrap();
+        // file.write_u64(1u64).await.unwrap();
     }
 }
