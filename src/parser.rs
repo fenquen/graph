@@ -1,5 +1,5 @@
 use std::cmp::PartialEq;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter, Pointer};
 use std::str::FromStr;
 use crate::{global, prefix_plus_plus, suffix_minus_minus, suffix_plus_plus, throw};
@@ -32,7 +32,7 @@ pub enum Command {
     CreateTable(Table),
     Insert(Insert),
     Link(Link),
-    Update,
+    Update(Update),
     Select(Vec<Select>),
     Delete(Delete),
 }
@@ -70,6 +70,19 @@ impl Parser {
         parser.chars = parser.sql.chars().collect::<Vec<char>>();
 
         parser
+    }
+
+    pub fn clear(&mut self) {
+        self.sql.clear();
+
+        self.chars.clear();
+        self.currentCharIndex = 0;
+        self.pendingChars.clear();
+        self.单引号as文本边界的数量 = 0;
+
+        self.elementVecVec.clear();
+        self.currentElementVecIndex = 0;
+        self.currentElementIndex = 0;
     }
 
     fn parseElement(&mut self) -> Result<()> {
@@ -683,8 +696,92 @@ impl Parser {
         Ok(Command::Delete(delete))
     }
 
+    /// ```update user[name='a',order=7](id=1)```
     fn parseUpdate(&mut self) -> Result<Command> {
-        Ok(Command::Update)
+        let mut update = Update::default();
+
+        update.tableName = self.getCurrentElementAdvance()?.expectTextLiteral("update should followed by table name")?;
+
+        // []中的set values
+        {
+            self.getCurrentElementAdvance()?.expectTextLiteralContent(global::方括号_STR)?;
+            enum State {
+                ReadName,
+                ReadEual,
+                ReadExpr,
+                AfterReadExpr,
+            }
+
+            let mut state = State::ReadName;
+            let mut parserMini = Parser::default();
+
+            let mut columnName = None;
+
+            'outerLoop:
+            loop {
+                let currentElement = self.getCurrentElementAdvance()?;
+
+                match state {
+                    State::ReadName => {
+                        columnName = Some(currentElement.expectTextLiteral("expect a column name")?);
+
+                        state = State::ReadEual;
+                    }
+                    State::ReadEual => {
+                        if let Element::Op(Op::MathCmpOp(MathCmpOp::Equal)) = currentElement {
+                            continue;
+                        } else {
+                            self.throwSyntaxErrorDetail("column name should followed by equal")?;
+                        }
+
+                        state = State::ReadExpr;
+                    }
+                    State::ReadExpr => {
+                        parserMini.clear();
+
+                        let mut elementVec = Vec::new();
+
+                        'innerLoop:
+                        loop {
+                            let currentElement = self.getCurrentElementAdvance()?;
+
+                            if currentElement.expectTextLiteralContentBool(global::逗号_STR) {
+                                parserMini.elementVecVec.push(elementVec);
+                                parserMini.parseExpr(false)?;
+                                break 'innerLoop;
+                            }
+
+                            if currentElement.expectTextLiteralContentBool(global::方括号1_STR) {
+                                parserMini.elementVecVec.push(elementVec);
+                                parserMini.parseExpr(false)?;
+                                break 'outerLoop;
+                            }
+
+                            elementVec.push(currentElement.clone());
+                        }
+                    }
+                    State::AfterReadExpr => {}
+                }
+
+                match currentElement {
+                    Element::TextLiteral(text) => {
+                        match text.as_str() {
+                            global::方括号1_STR => break,
+                            // expr结束,下个name开始
+                            global::逗号_STR => {}
+                            _ => {}
+                        }
+                    }
+                    // 当前的name结束,expr开始
+                    Element::Op(Op::MathCmpOp(MathCmpOp::Equal)) => {}
+                    _ => {}
+                }
+
+                break;
+            }
+        }
+
+        Ok(Command::Update(update))
     }
 
     /// ```select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre```
@@ -1522,6 +1619,13 @@ pub struct Select {
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Delete {
     pub tableName: String,
+    pub filterExpr: Option<Expr>,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub struct Update {
+    pub tableName: String,
+    pub columnName_expr: HashMap<String, Expr>,
     pub filterExpr: Option<Expr>,
 }
 

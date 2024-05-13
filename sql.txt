@@ -9,6 +9,4 @@
 --delete from user(id=1)
 --select user(id=1 and 0=0)
 --select user(id=1 and 0=0) -usage(number > 0) as usage0-> car
-select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre
-
-update user [a=1,a=2](id=1)
+--select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre
