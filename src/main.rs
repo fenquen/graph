@@ -14,6 +14,7 @@ mod a;
 mod expr;
 mod graph_value;
 mod session;
+mod codec;
 
 use std::string::ToString;
 use anyhow::Result;

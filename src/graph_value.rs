@@ -5,8 +5,10 @@ use crate::graph_error::GraphError;
 use crate::parser::{Element, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
 use crate::{global, throw};
 use anyhow::Result;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::ser::SerializeMap;
-use crate::global::DataPosition;
+use crate::codec::{BinaryCodec, MyBytes};
+use crate::global::{Byte, DataPosition};
 
 #[derive(Deserialize, Debug, Clone)]
 pub enum GraphValue {
@@ -17,6 +19,69 @@ pub enum GraphValue {
     Integer(i64),
     Decimal(f64),
     PointDesc(PointDesc),
+}
+
+/// type标识(u8) + 内容长度(u32,对应的是变长的 Pending String PoinstDesc) + 内容
+impl BinaryCodec for GraphValue {
+    type OutputType = GraphValue;
+
+    fn decode(srcByteSlice: &mut MyBytes) -> Result<GraphValue> {
+        // 读取type标识
+        let typeTag = srcByteSlice.bytes.get_u8();
+
+        match typeTag {
+            GraphValue::PENDING | GraphValue::STRING | GraphValue::POINT_DESC => {
+                let contentLen = srcByteSlice.bytes.get_u32() as usize;
+                let currentPos = srcByteSlice.position();
+                let slice = &*srcByteSlice.bytes.slice(currentPos..currentPos + contentLen);
+
+                match typeTag {
+                    GraphValue::PENDING => Ok(GraphValue::Pending(String::from_utf8_lossy(slice).to_string())),
+                    GraphValue::STRING => Ok(GraphValue::String(String::from_utf8_lossy(slice).to_string())),
+                    GraphValue::POINT_DESC => Ok(GraphValue::PointDesc(serde_json::from_slice(slice)?)),
+                    _ => panic!("impossible")
+                }
+            }
+            GraphValue::BOOLEAN => Ok(GraphValue::Boolean(srcByteSlice.bytes.get_u8() == 0)),
+            GraphValue::INTEGER => Ok(GraphValue::Integer(srcByteSlice.bytes.get_i64())),
+            GraphValue::DECIMAL => Ok(GraphValue::Decimal(srcByteSlice.bytes.get_f64())),
+            _ => throw!(&format!("unknown type tag:{}",typeTag))
+        }
+    }
+
+    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
+        match self {
+            GraphValue::Pending(s) => {
+                destByteSlice.put_u8(GraphValue::PENDING);
+                destByteSlice.put_u32(s.len() as u32);
+                destByteSlice.put_slice(s.as_bytes());
+            }
+            GraphValue::String(s) => {
+                destByteSlice.put_u8(GraphValue::STRING);
+                destByteSlice.put_u32(s.len() as u32);
+                destByteSlice.put_slice(s.as_bytes());
+            }
+            GraphValue::Boolean(s) => {
+                destByteSlice.put_u8(GraphValue::BOOLEAN);
+                destByteSlice.put_u8(if *s { 1 } else { 0 });
+            }
+            GraphValue::Integer(s) => {
+                destByteSlice.put_u8(GraphValue::INTEGER);
+                destByteSlice.put_i64(*s);
+            }
+            GraphValue::Decimal(s) => {
+                destByteSlice.put_u8(GraphValue::DECIMAL);
+                destByteSlice.put_f64(*s);
+            }
+            GraphValue::PointDesc(pointDesc) => {
+                destByteSlice.put_u8(GraphValue::POINT_DESC);
+                let jsonString = serde_json::to_string(pointDesc)?;
+                destByteSlice.put_u32(jsonString.as_bytes().len() as u32);
+                destByteSlice.put_slice(jsonString.as_bytes());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Serialize for GraphValue {
@@ -95,6 +160,14 @@ impl TryFrom<&Element> for GraphValue {
 }
 
 impl GraphValue {
+    // 以下codec时候的type标识
+    pub const PENDING: Byte = 0;
+    pub const STRING: Byte = 1;
+    pub const BOOLEAN: Byte = 2;
+    pub const INTEGER: Byte = 3;
+    pub const DECIMAL: Byte = 4;
+    pub const POINT_DESC: Byte = 5;
+
     pub fn boolValue(&self) -> Result<bool> {
         if let GraphValue::Boolean(bool) = self {
             Ok(*bool)
