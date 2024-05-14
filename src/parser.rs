@@ -709,7 +709,6 @@ impl Parser {
                 ReadName,
                 ReadEual,
                 ReadExpr,
-                AfterReadExpr,
             }
 
             let mut state = State::ReadName;
@@ -723,63 +722,63 @@ impl Parser {
 
                 match state {
                     State::ReadName => {
-                        columnName = Some(currentElement.expectTextLiteral("expect a column name")?);
+                        columnName.replace(currentElement.expectTextLiteral("expect a column name")?);
 
                         state = State::ReadEual;
                     }
                     State::ReadEual => {
                         if let Element::Op(Op::MathCmpOp(MathCmpOp::Equal)) = currentElement {
+                            state = State::ReadExpr;
                             continue;
                         } else {
                             self.throwSyntaxErrorDetail("column name should followed by equal")?;
                         }
-
-                        state = State::ReadExpr;
                     }
                     State::ReadExpr => {
                         parserMini.clear();
 
                         let mut elementVec = Vec::new();
 
+                        macro_rules! getPair {
+                            () => {
+                                let columnName = columnName.take().unwrap();
+
+                                parserMini.elementVecVec.push(elementVec);
+                                let expr = parserMini.parseExpr(false)?;
+
+                                update.columnName_expr.insert(columnName, expr);
+                            };
+                        }
+
+                        self.skipElement(-1)?;
+
                         'innerLoop:
                         loop {
                             let currentElement = self.getCurrentElementAdvance()?;
 
                             if currentElement.expectTextLiteralContentBool(global::逗号_STR) {
-                                parserMini.elementVecVec.push(elementVec);
-                                parserMini.parseExpr(false)?;
+                                getPair!();
                                 break 'innerLoop;
                             }
 
                             if currentElement.expectTextLiteralContentBool(global::方括号1_STR) {
-                                parserMini.elementVecVec.push(elementVec);
-                                parserMini.parseExpr(false)?;
+                                getPair!();
                                 break 'outerLoop;
                             }
 
                             elementVec.push(currentElement.clone());
                         }
-                    }
-                    State::AfterReadExpr => {}
-                }
 
-                match currentElement {
-                    Element::TextLiteral(text) => {
-                        match text.as_str() {
-                            global::方括号1_STR => break,
-                            // expr结束,下个name开始
-                            global::逗号_STR => {}
-                            _ => {}
-                        }
+                        state = State::ReadName;
                     }
-                    // 当前的name结束,expr开始
-                    Element::Op(Op::MathCmpOp(MathCmpOp::Equal)) => {}
-                    _ => {}
                 }
-
-                break;
             }
         }
+
+        // 读取表的过滤expr
+        update.filterExpr = Some(self.parseExpr(false)?);
+
+        println!("{update:?}");
 
         Ok(Command::Update(update))
     }
@@ -1667,7 +1666,10 @@ mod test {
 
     pub fn testA() {}
 
-    pub fn testUpdate() {}
+    #[test]
+    pub fn testUpdate() {
+        parser::parse("update user[name='a',order=7](id=1)").unwrap();
+    }
 
     pub fn testDrop() {}
 
