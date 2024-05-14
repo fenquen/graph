@@ -54,6 +54,8 @@ pub const TOTAL_DATA_OF_TABLE: u64 = u64::MAX;
 pub const NOT_SELECT_COLUMNS_PTR: *const Vec<String> = &NOT_SELECT_COLUMNS as *const Vec<String>;
 const NOT_SELECT_COLUMNS: Vec<String> = vec![];
 
+pub type Byte = u8;
+
 // --------------------------------------------------------
 
 pub const SPACE_CHAR: char = ' ';
