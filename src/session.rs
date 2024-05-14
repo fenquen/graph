@@ -95,7 +95,6 @@ impl Session {
 
         // walFile.write()
 
-
         Ok(())
     }
 }

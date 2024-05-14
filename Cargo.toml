@@ -18,6 +18,7 @@ strum_macros = "0.26"
 tokio = { version = "1", features = ["full"] }
 bytes = "1.6.0"
 arc-swap = "1.7.1"
+rocksdb = { version = "0.22.0", features = ["multi-threaded-cf"] }
 
 # https://course.rs/cargo/reference/profiles.html
 [profile.release]

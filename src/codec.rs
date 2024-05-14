@@ -1,5 +1,4 @@
 use bytes::{Buf, Bytes, BytesMut};
-use crate::global::Byte;
 use anyhow::Result;
 
 pub trait BinaryCodec {
@@ -32,5 +31,41 @@ impl From<Bytes> for MyBytes {
             len: bytes.remaining(),
             bytes,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use anyhow::Result;
+    use bytes::{BufMut, BytesMut};
+    use rocksdb::{IteratorMode, OptimisticTransactionDB};
+
+    #[test]
+    fn testRocksDb() {
+        use rocksdb::{DB, ColumnFamilyDescriptor, Options};
+
+        let path = "rocksdb";
+
+        let mut cf_opts = Options::default();
+        cf_opts.set_max_write_buffer_number(16);
+        let cf = ColumnFamilyDescriptor::new("cf1", cf_opts);
+
+        let mut db_opts = Options::default();
+        db_opts.set_max_write_buffer_number(1);
+        db_opts.create_missing_column_families(true);
+        db_opts.create_if_missing(true);
+        {
+            let db:OptimisticTransactionDB = OptimisticTransactionDB::open_cf_descriptors(&db_opts, path, vec![cf]).unwrap();
+
+            db.cf_handle("cf1").unwrap();
+            let tx = db.transaction();
+
+            tx.put_cf( &db.cf_handle("cf1").unwrap(), &[1][..], &[0][..]).unwrap();
+            tx.commit().unwrap();
+
+            db.create_cf("cf7",&Options::default()).unwrap();
+            db.put_cf( &db.cf_handle("cf7").unwrap(), &[1][..], &[0][..]).unwrap();
+        }
+
     }
 }
