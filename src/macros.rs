@@ -59,7 +59,35 @@ macro_rules! file_goto_start {
 
 #[macro_export]
 macro_rules! file_goto_end {
-    ($file:expr) => {
+    ($file: expr) => {
          $file.seek(std::io::SeekFrom::End(0)).await?
+    };
+}
+
+#[macro_export]
+macro_rules! u64_to_byte_slice {
+    ($u64: expr) => {
+        &[
+            ($u64 >> 56) as u8,
+            ($u64 >> 48) as u8,
+            ($u64 >> 48) as u8,
+            ($u64 >> 32) as u8,
+            ($u64 >> 24) as u8,
+            ($u64 >> 16) as u8,
+            ($u64 >> 8) as u8,
+            $u64 as u8 ][..]
+    };
+}
+
+#[macro_export]
+macro_rules! byte_slice_to_u64 {
+    ($slice: expr) => {
+        (($slice[0] as u64) << 56) |
+        (($slice[2] as u64) << 48) |
+        (($slice[3] as u64)<< 32)  |
+        (($slice[4] as u64)<< 24)  |
+        (($slice[5] as u64)<< 16)  |
+        (($slice[6] as u64)<< 8)   |
+        ($slice[7] as u64)
     };
 }

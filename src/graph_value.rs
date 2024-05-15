@@ -32,8 +32,11 @@ impl BinaryCodec for GraphValue {
         match typeTag {
             GraphValue::PENDING | GraphValue::STRING | GraphValue::POINT_DESC => {
                 let contentLen = srcByteSlice.bytes.get_u32() as usize;
-                let currentPos = srcByteSlice.position();
-                let slice = &*srcByteSlice.bytes.slice(currentPos..currentPos + contentLen);
+                // let currentPos = srcByteSlice.position();
+                // 不需要绝对的position 需要相对的 上边的绝对的currentPos用不到了
+                let slice = &*srcByteSlice.bytes.slice(.. contentLen);
+                // 需要手动advence
+                srcByteSlice.bytes.advance(contentLen);
 
                 match typeTag {
                     GraphValue::PENDING => Ok(GraphValue::Pending(String::from_utf8_lossy(slice).to_string())),
@@ -154,6 +157,7 @@ impl TryFrom<&Element> for GraphValue {
             Element::IntegerLiteral(integer) => Ok(GraphValue::Integer(*integer)),
             Element::DecimalLiteral(decimal) => Ok(GraphValue::Decimal(*decimal)),
             Element::TextLiteral(columnName) => Ok(GraphValue::Pending(columnName.clone())),
+            Element::PointDesc(pointDesc) => Ok(GraphValue::PointDesc(pointDesc.clone())),
             _ => throw!(&format!("element:{element:?} can not be transform to GraphValue")),
         }
     }

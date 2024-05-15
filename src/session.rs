@@ -1,14 +1,16 @@
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use crate::{command_executor, global, parser};
+use crate::{command_executor, global, meta, parser, throw};
 use anyhow::Result;
+use rocksdb::{BoundColumnFamily, OptimisticTransactionDB, Transaction};
 use tokio::io::AsyncWriteExt;
 use crate::command_executor::CommandExecutor;
 use crate::global::{DataLen, TX_ID_COUNTER, TxId};
 use crate::parser::{Command, SqlOp};
 
 pub struct Session {
-    pub autoCommit: bool,
-    pub txId: TxId,
+    autoCommit: bool,
+    currentTx: Option<Transaction<'static, OptimisticTransactionDB>>,
 }
 
 impl Session {
@@ -27,75 +29,36 @@ impl Session {
     }
 
     pub async fn executeCommands(&mut self, commands: &[Command]) -> Result<()> {
-        if self.autoCommit || self.txId == global::TX_ID_INVALID {
-            self.txId = global::TX_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-        }
+        self.currentTx = Some(meta::STORE.data.transaction());
 
         let commandExecutor = CommandExecutor::new(self);
         commandExecutor.execute(commands).await?;
 
         if self.autoCommit {
-            self.commit(commands).await?;
+            self.currentTx.take().unwrap().commit()?;
         }
 
         Ok(())
     }
 
-    pub async fn commit(&mut self, commands: &[Command]) -> Result<()> {
-        let txId = self.txId;
-
-        // 手动
-        if self.autoCommit == false {
-            self.txId = global::TX_ID_INVALID;
-        }
-
-        let mut collect = Vec::with_capacity(commands.len());
-
-        for command in commands {
-            if command.isDml() == false {
-                continue;
-            }
-
-            collect.push(command);
-        }
-
-        self.writeWal(&collect, txId).await?;
-
+    pub async fn commit(&mut self) -> Result<()> {
+        self.currentTx.take().unwrap().commit()?;
         Ok(())
     }
 
-    /// commandVec里的dml的json string
-    /// 8byte txId + 4byte content length + content + 8byte txId
-    pub async fn writeWal(&self, dmlCommands: &[&Command], txId: TxId) -> Result<()> {
-        if dmlCommands.is_empty() {
-            return Ok(());
+    #[inline]
+    pub fn getCurrentTx(&self) -> Result<&Transaction<'static, OptimisticTransactionDB>> {
+        match self.currentTx.as_ref() {
+            Some(tx) => Ok(tx),
+            None => throw!("not in a transaction")
         }
+    }
 
-        // 第1个deref得到的是Arc<Option<RwLock<File>>>
-        // 第2个deref得到的是Option<RwLock<File>>
-        let option = &(**global::WAL_FILE.load());
-        let mut walFile = option.as_ref().unwrap().write().await;
-
-        let jsonString = serde_json::to_string(dmlCommands)?;
-        let jsonStringByte = jsonString.as_bytes();
-
-        // 打头的tx_id
-        walFile.write_u64(txId).await?;
-
-        // content length
-        walFile.write_u32(jsonStringByte.len() as DataLen).await?;
-
-        // content
-        walFile.write_all(jsonStringByte).await?;
-
-        // 收尾的tx_id
-        walFile.write_u64(txId).await?;
-
-        walFile.sync_data().await?;
-
-        // walFile.write()
-
-        Ok(())
+    pub fn getColFamily(&self, colFamilyName: &str) -> Result<Arc<BoundColumnFamily>> {
+        match meta::STORE.data.cf_handle(colFamilyName) {
+            Some(cf) => Ok(cf),
+            None => throw!(&format!("column family:{} not exist",colFamilyName))
+        }
     }
 }
 
@@ -103,7 +66,7 @@ impl Default for Session {
     fn default() -> Self {
         Session {
             autoCommit: true,
-            txId: global::TX_ID_INVALID,
+            currentTx: None,
         }
     }
 }

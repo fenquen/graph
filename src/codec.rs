@@ -1,5 +1,7 @@
 use bytes::{Buf, Bytes, BytesMut};
 use anyhow::Result;
+use crate::graph_error::GraphError;
+use crate::graph_value::GraphValue;
 
 pub trait BinaryCodec {
     type OutputType;
@@ -12,6 +14,32 @@ pub trait BinaryCodec {
     fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()>;
 }
 
+impl<T: BinaryCodec<OutputType=T>> BinaryCodec for Vec<T> {
+    type OutputType = Vec<T>;
+
+    fn decode(srcByteSlice: &mut MyBytes) -> Result<Self::OutputType> {
+        let mut vec = vec![];
+
+        loop {
+            if srcByteSlice.bytes.has_remaining() == false {
+                break;
+            }
+
+            vec.push(T::decode(srcByteSlice)?);
+        }
+
+        Ok(vec)
+    }
+
+    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
+        for t in self {
+            t.encode(destByteSlice)?;
+        }
+
+        Ok(())
+    }
+}
+
 pub struct MyBytes {
     pub bytes: Bytes,
     /// Bytes的len()函数相当的坑 其实是remaining()
@@ -21,7 +49,7 @@ pub struct MyBytes {
 impl MyBytes {
     /// bytes尚未提供position()
     pub fn position(&self) -> usize {
-        self.len - self.bytes.remaining()
+        self.len - self.bytes.remaining()-1
     }
 }
 
@@ -31,6 +59,15 @@ impl From<Bytes> for MyBytes {
             len: bytes.remaining(),
             bytes,
         }
+    }
+}
+
+
+impl TryFrom<&mut MyBytes> for Vec<GraphValue> {
+    type Error = anyhow::Error;
+
+    fn try_from(myBytes: &mut MyBytes) -> Result<Self, Self::Error> {
+        Ok(Vec::<GraphValue>::decode(myBytes)?)
     }
 }
 
@@ -51,21 +88,24 @@ mod test {
         let cf = ColumnFamilyDescriptor::new("cf1", cf_opts);
 
         let mut db_opts = Options::default();
+        db_opts.set_keep_log_file_num(1);
         db_opts.set_max_write_buffer_number(1);
         db_opts.create_missing_column_families(true);
         db_opts.create_if_missing(true);
         {
-            let db:OptimisticTransactionDB = OptimisticTransactionDB::open_cf_descriptors(&db_opts, path, vec![cf]).unwrap();
+            let db: OptimisticTransactionDB = OptimisticTransactionDB::open_cf_descriptors(&db_opts, path, vec![cf]).unwrap();
 
-            db.cf_handle("cf1").unwrap();
+            let a = db.cf_handle("cf1").unwrap();
             let tx = db.transaction();
 
-            tx.put_cf( &db.cf_handle("cf1").unwrap(), &[1][..], &[0][..]).unwrap();
+            // let iterator = tx.iterator(IteratorMode::Start);
+
+
+            tx.put_cf(&db.cf_handle("cf1").unwrap(), &[1][..], &[0][..]).unwrap();
             tx.commit().unwrap();
 
-            db.create_cf("cf7",&Options::default()).unwrap();
-            db.put_cf( &db.cf_handle("cf7").unwrap(), &[1][..], &[0][..]).unwrap();
+            db.create_cf("cf7", &Options::default()).unwrap();
+            db.put_cf(&db.cf_handle("cf7").unwrap(), &[1][..], &[0][..]).unwrap();
         }
-
     }
 }

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use strum_macros::{Display as DisplayStrum, Display, EnumString};
 use crate::expr::Expr;
 use crate::graph_error::GraphError;
+use crate::graph_value::PointDesc;
 use crate::meta::{Column, ColumnType, Table, TableType};
 
 pub fn parse(sql: &str) -> Result<Vec<Command>> {
@@ -1421,6 +1422,8 @@ pub enum Element {
     Boolean(bool),
     /// 对应"->"
     To,
+    /// parse时候用不到的 link用到
+    PointDesc(PointDesc),
 }
 
 impl Element {
@@ -1486,6 +1489,7 @@ impl Display for Element {
             Element::Boolean(bool) => write!(f, "Boolean({})", bool),
             Element::Op(op) => write!(f, "Op({})", op),
             Element::To => write!(f, "To"),
+            _ => write!(f, "unknown")
         }
     }
 }
@@ -1664,14 +1668,10 @@ mod test {
         parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
     }
 
-    pub fn testA() {}
-
     #[test]
     pub fn testUpdate() {
         parser::parse("update user[name='a',order=7](id=1)").unwrap();
     }
-
-    pub fn testDrop() {}
 
     #[test]
     pub fn testParseDelete() {

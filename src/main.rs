@@ -1,7 +1,5 @@
 #![allow(non_snake_case, unused_imports)]
 
-extern crate core;
-
 mod config;
 mod command_line;
 mod macros;
@@ -15,6 +13,7 @@ mod expr;
 mod graph_value;
 mod session;
 mod codec;
+mod utils;
 
 use std::string::ToString;
 use anyhow::Result;
@@ -26,7 +25,7 @@ use crate::session::Session;
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
-    meta::init().await?;
+    meta::init()?;
 
     let tableRecordFile = OpenOptions::new().read(true).open("sql.txt").await?;
     let bufReader = BufReader::new(tableRecordFile);

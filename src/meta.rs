@@ -4,21 +4,34 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::{command_executor, file_goto_start, global, throw};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, throw};
 use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+use dashmap::DashMap;
+use lazy_static::lazy_static;
+use rocksdb::{BoundColumnFamily, ColumnFamilyDescriptor, DBCommon, DBRawIteratorWithThreadMode, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options};
 use tokio::sync::RwLock;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use crate::config::CONFIG;
 use crate::graph_value::GraphValue;
 use crate::parser::Command;
 use crate::session::Session;
+use crate::utils::TrickyContainer;
 
-pub const TABLE_RECORD_FILE_NAME: &str = "table_record";
-pub const WAL_FILE_NAME: &str = "wal";
+pub type RowId = u64;
+
+lazy_static! {
+    pub static ref STORE: TrickyContainer<Store> = TrickyContainer::new();
+    pub static ref TABLE_NAME_TABLE: DashMap<String, Table> = DashMap::new();
+}
+
+pub struct Store {
+    pub meta: OptimisticTransactionDB,
+    pub data: OptimisticTransactionDB,
+}
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Table {
@@ -26,9 +39,7 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub type0: TableType,
     #[serde(skip_serializing, skip_deserializing)]
-    pub dataFile: Option<File>,
-    #[serde(skip_serializing, skip_deserializing)]
-    pub restore: bool,
+    pub rowIdCounter: AtomicU64,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -67,6 +78,8 @@ pub enum ColumnType {
     String,
     Integer,
     Decimal,
+    /// 内部使用的 当创建relation时候用到 用来给realtion添加2个额外的字段 src dest
+    PointDesc,
     Unknown,
 }
 
@@ -82,6 +95,7 @@ impl ColumnType {
             (ColumnType::String, GraphValue::String(_)) => true,
             (ColumnType::Integer, GraphValue::Integer(_)) => true,
             (ColumnType::Decimal, GraphValue::Decimal(_)) => true,
+            (ColumnType::PointDesc, GraphValue::PointDesc(_)) => true,
             _ => false
         }
     }
@@ -122,6 +136,76 @@ impl Display for ColumnType {
     }
 }
 
+pub fn init() -> Result<()> {
+    // 用来后边dataStore时候对应各个的columnFamily
+    let mut tableNames = Vec::new();
+
+    // 生成用来保存表文件和元数据的目录
+    // meta的保存格式是 tableName->json
+    let metaStore = {
+        std::fs::create_dir_all(CONFIG.metaDir.as_str())?;
+
+        let mut metaStoreOption = Options::default();
+        metaStoreOption.set_keep_log_file_num(1);
+        metaStoreOption.set_max_write_buffer_number(2);
+        metaStoreOption.create_if_missing(true);
+
+        let metaStore: OptimisticTransactionDB = OptimisticTransactionDB::open(&metaStoreOption, CONFIG.metaDir.as_str())?;
+
+        let iterator = metaStore.iterator(IteratorMode::Start);
+        for iterResult in iterator {
+            let pair = iterResult?;
+            let table: Table = serde_json::from_slice(&*pair.1)?;
+
+            tableNames.push(table.name.clone());
+
+            TABLE_NAME_TABLE.insert(table.name.to_owned(), table);
+        }
+
+        metaStore
+    };
+
+    let dataStore: OptimisticTransactionDB = {
+        let columnFamilyDescVec: Vec<ColumnFamilyDescriptor> =
+            tableNames.iter().map(|tableName| {
+                let mut columnFamilyOption = Options::default();
+                columnFamilyOption.set_max_write_buffer_number(2);
+                ColumnFamilyDescriptor::new(tableName, columnFamilyOption)
+            }).collect::<Vec<ColumnFamilyDescriptor>>();
+
+        std::fs::create_dir_all(CONFIG.dataDir.as_str())?;
+
+        let mut dataStoreOption = Options::default();
+        dataStoreOption.set_keep_log_file_num(1);
+        dataStoreOption.set_max_write_buffer_number(2);
+        dataStoreOption.create_missing_column_families(true);
+        dataStoreOption.create_if_missing(true);
+
+        let dataStore: OptimisticTransactionDB = OptimisticTransactionDB::open_cf_descriptors(&dataStoreOption, CONFIG.dataDir.as_str(), columnFamilyDescVec)?;
+
+        dataStore
+    };
+
+    for ref tableName in tableNames {
+        let cf = dataStore.cf_handle(tableName.as_str()).unwrap();
+        let mut iterator = dataStore.raw_iterator_cf(&cf);
+        // 到last条目而不是末尾 不用去调用prev()
+        iterator.seek_to_last();
+        if let Some(key) = iterator.key() {
+            let lastRowId = byte_slice_to_u64!(key);
+            // println!("{tableName}, {}", lastRowId);
+            TABLE_NAME_TABLE.get_mut(tableName.as_str()).unwrap().rowIdCounter.store(lastRowId + 1, Ordering::Release);
+        }
+    }
+
+    STORE.set(Store {
+        meta: metaStore,
+        data: dataStore,
+    });
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
     use crate::graph_value::GraphValue;
@@ -146,58 +230,4 @@ mod test {
         let b = "a".to_string();
         println!("{}", a == b);
     }
-}
-
-pub async fn init() -> Result<()> {
-    // 生成用来保存表文件和元数据的目录
-    fs::create_dir_all(CONFIG.dataDir.as_str()).await?;
-    fs::create_dir_all(CONFIG.metaDir.as_str()).await?;
-
-    let metaDirPath: &Path = CONFIG.metaDir.as_ref();
-
-    // table_record
-    let mut tableRecordFile = OpenOptions::new().write(true).read(true).create(true).open(metaDirPath.join(TABLE_RECORD_FILE_NAME)).await?;
-    // 上边不能使用append(true),不然的话不论如何seek都只会到末尾append
-    file_goto_start!(tableRecordFile);
-
-    // wal
-    let mut walFile = OpenOptions::new().write(true).read(true).create(true).open(metaDirPath.join(WAL_FILE_NAME)).await?;
-    file_goto_start!(walFile);
-
-    // 还原
-    restoreDB(&mut tableRecordFile, &mut walFile).await?;
-
-    global::TABLE_RECORD_FILE.store(Arc::new(Some(RwLock::new(tableRecordFile))));
-    global::WAL_FILE.store(Arc::new(Some(RwLock::new(walFile))));
-
-    Ok(())
-}
-
-async fn restoreDB(tableRecordFile: &mut File, walFile: &mut File) -> Result<()> {
-    // 还原table
-    {
-        let bufReader = BufReader::new(tableRecordFile);
-        let mut lines = bufReader.lines();
-
-        let mut session = Session::new();
-
-        while let Some(line) = lines.next_line().await? {
-            let mut table: Table = serde_json::from_str(&line)?;
-            table.restore = true;
-            session.executeCommands(&vec![Command::CreateTable(table)]).await?;
-        }
-    }
-
-    // 还原 txId
-    {
-        if walFile.seek(SeekFrom::End(0)).await? > 0 {
-            walFile.seek(SeekFrom::End(global::TX_ID_LEN as i64 * -1)).await?;
-            let lastTxId = walFile.read_u64().await?;
-            global::TX_ID_COUNTER.store(lastTxId, Ordering::SeqCst);
-
-            println!("lastTxId:{}", lastTxId);
-        }
-    }
-
-    Ok(())
 }

@@ -8,17 +8,16 @@ use lazy_static::lazy_static;
 use tokio::fs::File;
 use tokio::sync::RwLock;
 use crate::graph_error::GraphError;
+use crate::meta;
 use crate::meta::Table;
 
 pub type TxId = u64;
 
 pub type ReachEnd = bool;
-pub type DataPosition = u64;
+pub type DataPosition = meta::RowId;
 pub type DataLen = u32;
 
-
 lazy_static! {
-    pub static ref TABLE_NAME_TABLE: DashMap<String, Table> = DashMap::new();
     pub static ref TX_ID_COUNTER: AtomicU64 = AtomicU64::new(TX_ID_MIN);
     pub static ref TABLE_RECORD_FILE: ArcSwap<Option<RwLock<File>>> = ArcSwap::default();
     pub static ref WAL_FILE: ArcSwap<Option<RwLock<File>>> = ArcSwap::default();
@@ -50,9 +49,6 @@ thread_local! {
 }
 
 pub const TOTAL_DATA_OF_TABLE: u64 = u64::MAX;
-
-pub const NOT_SELECT_COLUMNS_PTR: *const Vec<String> = &NOT_SELECT_COLUMNS as *const Vec<String>;
-const NOT_SELECT_COLUMNS: Vec<String> = vec![];
 
 pub type Byte = u8;
 

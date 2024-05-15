@@ -4,18 +4,21 @@ use std::io::SeekFrom;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::CONFIG;
-use crate::{command_executor, file_goto_start, global, prefix_plus_plus, suffix_plus_plus, throw};
-use crate::meta::{Column, Table, TableType};
-use crate::parser::{Command, Delete, Insert, Link, Select};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_slice};
+use crate::meta::{Column, ColumnType, RowId, Table, TableType};
+use crate::parser::{Command, Delete, Element, Insert, Link, Select};
 use anyhow::Result;
 use dashmap::mapref::one::{Ref, RefMut};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Map, Value};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
+use rocksdb::{IteratorMode, Options};
+use crate::codec::{BinaryCodec, MyBytes};
 use crate::expr::Expr;
 use crate::global::{ReachEnd, DataLen, DataPosition, TX_ID_COUNTER, TxId};
 use crate::graph_value::{GraphValue, PointDesc};
@@ -53,9 +56,9 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                         name: table.name.clone(),
                         columns: table.columns.clone(),
                         type0: table.type0.clone(),
-                        dataFile: None,
-                        restore: table.restore,
+                        rowIdCounter: AtomicU64::default(),
                     };
+
                     self.createTable(table).await?;
                 }
                 Command::Insert(insertValues) => self.insert(insertValues).await?,
@@ -66,58 +69,62 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             }
         }
 
-        // 写wal buffer 写data buffer commit后wal buffer持久化
         Ok(())
     }
 
     async fn createTable(&self, mut table: Table) -> Result<()> {
-        if global::TABLE_NAME_TABLE.contains_key(table.name.as_str()) {
-            throw!(&format!("table/relation: {} already exist",table.name))
+        if meta::TABLE_NAME_TABLE.contains_key(table.name.as_str()) {
+            throw!(&format!("table/relation: {} already exist", table.name))
         }
 
-        // 表对应的data 文件
-        let tableDataFilePath = (CONFIG.dataDir.as_ref() as &Path).join(&table.name);
+        if let TableType::Relation = table.type0 {
+            table.columns.push(
+                Column {
+                    name: "src".to_string(),
+                    type0: ColumnType::PointDesc,
+                }
+            );
 
-        if table.restore == false {
-            if tableDataFilePath.exists() {
-                throw!(&format!("data file of table:{} has already exist", table.name));
-            }
-
-
-            // table_record 文件
-            let jsonString = serde_json::to_string(&table)?;
-
-            {
-                let option = &(**global::TABLE_RECORD_FILE.load());
-                let mut tableRecordFile = option.as_ref().unwrap().write().await;
-                tableRecordFile.write_all([jsonString.as_bytes(), &[b'\r', b'\n']].concat().as_ref()).await?
-            };
+            table.columns.push(
+                Column {
+                    name: "dest".to_string(),
+                    type0: ColumnType::PointDesc,
+                }
+            );
         }
 
-        let mut tableDataFile = OpenOptions::new().write(true).read(true).create(true).open(tableDataFilePath.as_path()).await?;
+        // 生成column family
+        meta::STORE.data.create_cf(table.name.as_str(), &Options::default())?;
 
-        file_goto_start!(tableDataFile);
-
-        table.dataFile = Some(tableDataFile);
+        let key = table.name.as_bytes();
+        let json = serde_json::to_string(&table)?;
+        meta::STORE.meta.put(key, json.as_bytes())?;
 
         // map
-        global::TABLE_NAME_TABLE.insert(table.name.to_string(), table);
+        meta::TABLE_NAME_TABLE.insert(table.name.to_string(), table);
 
         Ok(())
     }
 
     async fn insert(&self, insert: &Insert) -> Result<()> {
         // 对应的表是不是exist
-        let mut table = self.getTableRefMutByName(&insert.tableName)?;
+        let table = self.getTableRefByName(&insert.tableName)?;
 
         // 不能对relation使用insert into
         if let TableType::Relation = table.type0 {
             throw!(&format!("{} is a RELATION , can not use insert into on RELATION", insert.tableName));
         }
 
-        let rowData = self.generateInsertValuesJson(&insert, &*table)?;
-        let bytesMut = self.writeBytesMut(&rowData)?;
-        table.dataFile.as_mut().unwrap().write_all(bytesMut.as_ref()).await?;
+        let rowData = self.generateInsertValuesBinary(&insert, &*table)?;
+
+        let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
+        let key = u64_to_byte_slice!(rowId);
+
+        let value = rowData.as_ref();
+
+        let columnFamily = self.session.getColFamily(table.name.as_str())?;
+
+        self.session.getCurrentTx()?.put_cf(&columnFamily, key, value)?;
 
         Ok(())
     }
@@ -126,17 +133,17 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
     /// 两个元素之间的relation只看种类不看里边的属性的
     async fn link(&self, link: &Link) -> Result<()> {
         // 得到3个表的对象
-        let mut srcTable = self.getTableRefMutByName(link.srcTableName.as_str())?;
-        let mut destTable = self.getTableRefMutByName(link.destTableName.as_str())?;
+        let srcTable = self.getTableRefByName(link.srcTableName.as_str())?;
+        let destTable = self.getTableRefByName(link.destTableName.as_str())?;
 
         // 对src table和dest table调用expr筛选
-        let srcSatisfiedPositions = self.scanSatisfiedRows(link.srcTableFilterExpr.as_ref(), srcTable.value_mut(), false, None).await?;
+        let srcSatisfiedPositions = self.scanSatisfiedRowsBinary(link.srcTableFilterExpr.as_ref(), srcTable.value(), false, None)?;
         // src 空的 link 不成立
         if srcSatisfiedPositions.is_empty() {
             return Ok(());
         }
 
-        let destSatisfiedPositions = self.scanSatisfiedRows(link.destTableFilterExpr.as_ref(), destTable.value_mut(), false, None).await?;
+        let destSatisfiedPositions = self.scanSatisfiedRowsBinary(link.destTableFilterExpr.as_ref(), destTable.value(), false, None)?;
         // dest 空的 link 不成立
         if destSatisfiedPositions.is_empty() {
             return Ok(());
@@ -144,29 +151,40 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
         // 用insetValues套路
         {
-            let insertValues = Insert {
+            let mut insertValues = Insert {
                 tableName: link.relationName.clone(),
                 useExplicitColumnNames: true,
                 columnNames: link.relationColumnNames.clone(),
                 columnExprs: link.relationColumnExprs.clone(),
             };
-            let mut relationTable = self.getTableRefMutByName(link.relationName.as_str())?;
-            let mut rowData = self.generateInsertValuesJson(&insertValues, &*relationTable)?;
 
-            rowData["src"] = json!(GraphValue::PointDesc(PointDesc {
-            tableName:srcTable.name.clone(),
-            positions:srcSatisfiedPositions.iter().map(|tuple|tuple.0).collect(),
-        }));
-            rowData["dest"] = json!(GraphValue::PointDesc(PointDesc {
-            tableName:destTable.name.clone(),
-            positions:destSatisfiedPositions.iter().map(|tuple|tuple.0).collect(),
-        }));
+            insertValues.columnNames.push("src".to_string());
+            insertValues.columnExprs.push(Expr::Single(Element::PointDesc(
+                PointDesc {
+                    tableName: srcTable.name.clone(),
+                    positions: srcSatisfiedPositions.iter().map(|tuple| tuple.0).collect(),
+                }
+            )));
 
-            let bytesMut = self.writeBytesMut(&rowData)?;
+            insertValues.columnNames.push("dest".to_string());
+            insertValues.columnExprs.push(Expr::Single(Element::PointDesc(
+                PointDesc {
+                    tableName: destTable.name.clone(),
+                    positions: destSatisfiedPositions.iter().map(|tuple| tuple.0).collect(),
+                }
+            )));
 
-            let relationDataFile = relationTable.dataFile.as_mut().unwrap();
-            // bytesMut.as_ref() 也可以使用 &bytesMut[..]
-            relationDataFile.write_all(bytesMut.as_ref()).await?;
+            let relationTable = self.getTableRefByName(link.relationName.as_str())?;
+
+            let rowId: RowId = relationTable.rowIdCounter.fetch_add(1, Ordering::AcqRel);
+            let key = u64_to_byte_slice!(rowId);
+
+            let rowDataBinary = self.generateInsertValuesBinary(&insertValues, &*relationTable)?;
+            let value = rowDataBinary.as_ref();
+
+            let columnFamily = self.session.getColFamily(relationTable.name.as_str())?;
+
+            self.session.getCurrentTx()?.put_cf(&columnFamily, key, value)?;
         }
 
         Ok(())
@@ -177,9 +195,9 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         // 普通模式不含有relation
         if selectVec.len() == 1 && selectVec[0].relationName.is_none() {
             let select = &selectVec[0];
-            let mut srcTable = self.getTableRefMutByName(select.srcName.as_str())?;
+            let srcTable = self.getTableRefByName(select.srcName.as_str())?;
 
-            let rows = self.scanSatisfiedRows(select.srcFilterExpr.as_ref(), srcTable.value_mut(), true, select.srcColumnNames.as_ref()).await?;
+            let rows = self.scanSatisfiedRowsBinary(select.srcFilterExpr.as_ref(), srcTable.value(), true, select.srcColumnNames.as_ref())?;
             let rows: Vec<RowData> = rows.into_iter().map(|tuple| tuple.1).collect();
             JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
 
@@ -198,7 +216,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         }
 
         // 给next轮用的
-        let mut destPositionsInPrevSelect: Option<Vec<DataPosition>> = None;
+        let mut destPositionsInPrevSelect: Option<Vec<DataPosition>> = Default::default();
 
         // 1个select对应Vec<SelectResult> 多个select对应Vec<Vec<SelectResult>>
         let mut selectResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectVec.len());
@@ -206,9 +224,9 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         'loopSelect:
         for select in selectVec {
             // 为什么要使用{} 不然的话有概率死锁 https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
-            let relationDatas: Vec<HashMap<String, GraphValue>> = {
-                let mut relation = self.getTableRefMutByName(select.relationName.as_ref().unwrap())?;
-                let relationDatas = self.scanSatisfiedRows(select.relationFliterExpr.as_ref(), relation.value_mut(), true, select.relationColumnNames.as_ref()).await?;
+            let relationDatas: Vec<RowData> = {
+                let relation = self.getTableRefByName(select.relationName.as_ref().unwrap())?;
+                let relationDatas = self.scanSatisfiedRowsBinary(select.relationFliterExpr.as_ref(), relation.value(), true, select.relationColumnNames.as_ref())?;
                 relationDatas.into_iter().map(|tuple| tuple.1).collect()
             };
 
@@ -232,7 +250,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 }
 
                 let srcRowDatas = {
-                    let mut srcTable = self.getTableRefMutByName(select.srcName.as_str())?;
+                    let srcTable = self.getTableRefByName(select.srcName.as_str())?;
 
                     // 上轮的全部的多个条目里边的dest的position 和 当前条目的src的position的交集
                     match destPositionsInPrevSelect {
@@ -264,10 +282,10 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                             }
 
                             // 当前的使用intersect为源头
-                            self.getRowsByPositions(&intersect, &mut srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref()).await?
+                            self.getRowsByPosBinary(&intersect, &*srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref())?
                         }
                         // 只会在首轮的
-                        None => self.getRowsByPositions(&srcPointDesc.positions, &mut srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref()).await?,
+                        None => self.getRowsByPosBinary(&srcPointDesc.positions, &*srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref())?,
                     }
                 };
                 if srcRowDatas.is_empty() {
@@ -275,8 +293,8 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 }
 
                 let destRowDatas = {
-                    let mut destTable = self.getTableRefMutByName(select.destName.as_ref().unwrap())?;
-                    self.getRowsByPositions(&destPointDesc.positions, &mut destTable, select.destFilterExpr.as_ref(), select.destColumnNames.as_ref()).await?
+                    let destTable = self.getTableRefByName(select.destName.as_ref().unwrap())?;
+                    self.getRowsByPosBinary(&destPointDesc.positions, &*destTable, select.destFilterExpr.as_ref(), select.destColumnNames.as_ref())?
                 };
                 if destRowDatas.is_empty() {
                     continue;
@@ -367,42 +385,40 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
     /// 得到满足expr的record 然后把它的xmax变为当前的txId
     async fn delete(&self, delete: &Delete) -> Result<()> {
-        let mut table = self.getTableRefMutByName(delete.tableName.as_str())?;
+        let table = self.getTableRefByName(delete.tableName.as_str())?;
 
-        let pairs = self.scanSatisfiedRows(delete.filterExpr.as_ref(), table.value_mut(), true, None).await?;
+        let pairs = self.scanSatisfiedRowsBinary(delete.filterExpr.as_ref(), table.value(), true, None)?;
 
-        let tableDataFile = table.value_mut().dataFile.as_mut().unwrap();
+        let columnFamily = meta::STORE.data.cf_handle(table.name.as_str()).unwrap();
 
         // 遍历更改的xmax
         for (dataPosition, _) in pairs {
             // 要更改的是xmax 在xmin后边
             // 之前发现即使seek到了正确的位置,写入还是到末尾append的 原因是openOptions设置了append
-            tableDataFile.seek(SeekFrom::Start(dataPosition + global::TX_ID_LEN as u64)).await?;
-            tableDataFile.write_u64(self.session.txId).await?;
+            self.session.getCurrentTx()?.delete_cf(&columnFamily, u64_to_byte_slice!(dataPosition))?;
         }
 
         Ok(())
     }
 
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
-    async fn getRowsByPositions(&self,
-                                positions: &[DataPosition],
-                                table: &mut Table,
-                                tableFilterExpr: Option<&Expr>,
-                                selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(DataPosition, RowData)>> {
-        let tableDataFile = table.dataFile.as_mut().unwrap();
-
-        let mut dataLenBuffer = [0; 8];
-
+    fn getRowsByPosBinary(&self,
+                          positions: &[DataPosition],
+                          table: &Table,
+                          tableFilter: Option<&Expr>,
+                          selectedColNames: Option<&Vec<String>>) -> Result<Vec<(DataPosition, RowData)>> {
         // 要得到表的全部的data
         if positions[0] == global::TOTAL_DATA_OF_TABLE {
-            self.scanSatisfiedRows(tableFilterExpr, table, true, selectedColumnNames).await
+            self.scanSatisfiedRowsBinary(tableFilter, table, true, selectedColNames)
         } else {
             let mut rowDatas = Vec::with_capacity(positions.len());
 
+            let columnFamily = meta::STORE.data.cf_handle(table.name.as_str()).unwrap();
+
             for position in positions {
-                tableDataFile.seek(SeekFrom::Start(*position)).await?;
-                if let (Some(rowData), _, _) = self.readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await? {
+                let rowBinary = self.session.getCurrentTx()?.get_cf(&columnFamily, u64_to_byte_slice!(*position))?.unwrap();
+
+                if let Some(rowData) = self.readRowBinary(table, Box::from(&rowBinary[..]), tableFilter, selectedColNames)? {
                     rowDatas.push((*position, rowData));
                 }
             }
@@ -411,35 +427,27 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         }
     }
 
-    /// 目标是普通表
-    async fn scanSatisfiedRows(&self,
+    fn scanSatisfiedRowsBinary(&self,
                                tableFilterExpr: Option<&Expr>,
-                               table: &mut Table,
+                               table: &Table,
                                select: bool,
                                selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(DataPosition, RowData)>> {
-        let tableDataFile = table.dataFile.as_mut().unwrap();
-
-        tableDataFile.seek(SeekFrom::Start(0)).await?;
+        let columnFamily = meta::STORE.data.cf_handle(table.name.as_str()).unwrap();
+        let iterator = self.session.getCurrentTx()?.iterator_cf(&columnFamily, IteratorMode::Start);
 
         let satisfiedRows =
             if tableFilterExpr.is_some() || select {
                 let mut satisfiedRows = Vec::new();
 
-                let mut dataLenBuffer = [0; 8];
-
-                let mut position: DataPosition = 0;
-
-                loop {
-                    let (rowData, reachEnd, rowDataBinaryLen) = self.readRow(tableDataFile, tableFilterExpr, selectedColumnNames, &mut dataLenBuffer).await?;
-                    if reachEnd {
-                        break;
+                for iterResult in iterator {
+                    let pair = iterResult?;
+                    //  let rowBinary = &*pair.1;
+                    match self.readRowBinary(table, pair.1, tableFilterExpr, selectedColumnNames)? {
+                        None => continue,
+                        Some(rowData) => {
+                            satisfiedRows.push((byte_slice_to_u64!(&*pair.0), rowData))
+                        }
                     }
-
-                    if rowData.is_some() {
-                        satisfiedRows.push((position, rowData.unwrap()));
-                    }
-
-                    position += rowDataBinaryLen as DataPosition;
                 }
 
                 satisfiedRows
@@ -450,64 +458,25 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         Ok(satisfiedRows)
     }
 
-    /// 调用的前提是当前文件的位置到了row的start
-    async fn readRow(&self,
-                     tableDataFile: &mut File,
+    fn readRowBinary(&self,
+                     table: &Table,
+                     rowBinary: Box<[u8]>,
                      tableFilterExpr: Option<&Expr>,
-                     selectedColumnNames: Option<&Vec<String>>,
-                     dataLenBuffer: &mut [u8; 8]) -> Result<(Option<RowData>, ReachEnd, DataLen)> {
-        // 相当的坑 有read()和read_buf() 前边看的是len后边看的是capactiy
-        // 后边的是不能用的 虽然有Vec::with_capacity() 然而随读取的越多vec本身也会扩容的 后来改为 [0; global::ROW_DATA_LEN_FIELD_LEN]
+                     selectedColumnNames: Option<&Vec<String>>) -> Result<Option<RowData>> {
+        let columnNames = table.columns.iter().map(|column| column.name.clone()).collect::<Vec<String>>();
 
-        macro_rules! expand {
-            ($dataLenBuffer: expr) => {
-                [$dataLenBuffer[0], $dataLenBuffer[1], $dataLenBuffer[2], $dataLenBuffer[3], $dataLenBuffer[4], $dataLenBuffer[5], $dataLenBuffer[6], $dataLenBuffer[7]]
-            };
-        }
-        // xmin
-        let readCount = tableDataFile.read(dataLenBuffer).await?;
-        if readCount == 0 {  // reach the end
-            return Ok((None, true, 0));
-        }
-        assert_eq!(readCount, global::TX_ID_LEN);
-        let xmin: TxId = TxId::from_be_bytes(expand!(dataLenBuffer));
+        let mut myBytesRowData = MyBytes::from(Bytes::from(rowBinary));
+        let columnValues = Vec::try_from(&mut myBytesRowData)?;
 
-        // xmax
-        let readCount = tableDataFile.read(dataLenBuffer).await?;
-        if readCount == 0 {  // reach the end
-            return Ok((None, true, 0));
-        }
-        assert_eq!(readCount, global::TX_ID_LEN);
-        let xmax: TxId = TxId::from_be_bytes(expand!(dataLenBuffer));
-
-        // next valid position
-        let readCount = tableDataFile.read(dataLenBuffer).await?;
-        if readCount == 0 {  // reach the end
-            return Ok((None, true, 0));
-        }
-        assert_eq!(readCount, global::ROW_NEXT_POSITION_LEN);
-        let nextPosition: DataPosition = DataPosition::from_be_bytes(expand!(dataLenBuffer));
-
-        // 读取content
-        let readCount = tableDataFile.read(&mut dataLenBuffer[0..global::ROW_CONTENT_LEN_FIELD_LEN]).await?;
-        if readCount == 0 {  // reach the end
-            return Ok((None, true, 0));
-        }
-        assert_eq!(readCount, global::ROW_CONTENT_LEN_FIELD_LEN);
-        let contentLen = u32::from_be_bytes([dataLenBuffer[0], dataLenBuffer[1], dataLenBuffer[2], dataLenBuffer[3]]) as usize;
-        let rowTotalLen: DataLen = (global::ROW_PREFIX_LEN + contentLen) as DataLen;
-
-        // 不在可视范围里边
-        if xmin > self.session.txId || (xmax != global::TX_ID_INVALID && self.session.txId >= xmax) {
-            return Ok((None, false, rowTotalLen));
+        if columnNames.len() != columnValues.len() {
+            throw!("column names count does not match column values");
         }
 
-        let mut dataBuffer = vec![0u8; contentLen];
-        let readCount = tableDataFile.read(&mut dataBuffer).await?;
-        assert_eq!(readCount, contentLen);
-        let jsonString = String::from_utf8(dataBuffer)?;
+        let mut rowData: RowData = HashMap::with_capacity(columnNames.len());
 
-        let mut rowData: HashMap<String, GraphValue> = serde_json::from_str(&jsonString)?;
+        for columnName_columnValue in columnNames.into_iter().zip(columnValues) {
+            rowData.insert(columnName_columnValue.0, columnName_columnValue.1);
+        }
 
         let rowData =
             if selectedColumnNames.is_some() {
@@ -532,14 +501,14 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             };
 
         if tableFilterExpr.is_none() {
-            return Ok((Some(rowData), false, rowTotalLen));
+            return Ok(Some(rowData));
         }
 
         if let GraphValue::Boolean(satisfy) = tableFilterExpr.unwrap().calc(Some(&rowData))? {
             if satisfy {
-                Ok((Some(rowData), false, rowTotalLen))
+                Ok(Some(rowData))
             } else {
-                Ok((None, false, rowTotalLen))
+                Ok(None)
             }
         } else {
             throw!("table filter should get a boolean")
@@ -547,14 +516,23 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
     }
 
     fn getTableRefMutByName(&self, tableName: &str) -> Result<RefMut<String, Table>> {
-        let table = global::TABLE_NAME_TABLE.get_mut(tableName);
+        let table = meta::TABLE_NAME_TABLE.get_mut(tableName);
+        if table.is_none() {
+            throw!(&format!("table:{} not exist", tableName));
+        }
+
+        Ok(table.unwrap())
+    }
+
+    fn getTableRefByName(&self, tableName: &str) -> Result<Ref<String, Table>> {
+        let table = meta::TABLE_NAME_TABLE.get(tableName);
         if table.is_none() {
             throw!(&format!("table:{} not exist", tableName));
         }
         Ok(table.unwrap())
     }
 
-    fn generateInsertValuesJson(&self, insert: &Insert, table: &Table) -> Result<Value> {
+    fn generateInsertValuesBinary(&self, insert: &Insert, table: &Table) -> Result<Bytes> {
         let columns = {
             let mut columns = Vec::new();
 
@@ -589,7 +567,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             throw!("column count does not match value count");
         }
 
-        let mut rowData = json!({});
+        let mut rowData = BytesMut::new();
 
         for column_columnValue in columns.iter().zip(insert.columnExprs.iter()) {
             let column = column_columnValue.0;
@@ -601,39 +579,10 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 throw!(&format!("column:{},type:{} is not compatible with value:{}", column.name, column.type0, columnValue));
             }
 
-            rowData[column.name.as_str()] = json!(columnValue);
+            columnValue.encode(&mut rowData)?;
         }
 
-        Ok(rowData)
-    }
-
-    /// 8byte tx_min + 8byte tx_max + 8byte next valid position + 4byte conetnt len
-    fn writeBytesMut(&self, rowData: &Value) -> Result<BytesMut> {
-        let jsonString = serde_json::to_string(rowData)?;
-
-        let jsonStringByte = jsonString.as_bytes();
-        let dataLen = jsonStringByte.len();
-
-        assert!(u32::MAX as usize >= jsonStringByte.len());
-
-        let mut bytesMut = BytesMut::with_capacity(global::ROW_PREFIX_LEN + jsonStringByte.len());
-
-        // tx_min
-        bytesMut.put_u64(self.session.txId);
-
-        // tx_max
-        bytesMut.put_u64(global::TX_ID_INVALID);
-
-        // next valid position
-        bytesMut.put_u64(0);
-
-        // content len
-        bytesMut.put_u32(dataLen as u32);
-
-        // conetent
-        bytesMut.put_slice(jsonStringByte);
-
-        Ok(bytesMut)
+        Ok(rowData.freeze())
     }
 }
 
@@ -650,9 +599,8 @@ mod test {
     use tokio::fs::OpenOptions;
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     use crate::graph_value::GraphValue;
-    use crate::{global, meta, parser};
+    use crate::{byte_slice_to_u64, global, meta, parser, u64_to_byte_slice};
     use crate::command_executor;
-    use crate::meta::TABLE_RECORD_FILE_NAME;
     use crate::parser::Command;
 
     #[test]
@@ -695,8 +643,6 @@ mod test {
 
         global::UNTAGGED_ENUM_JSON.set(true);
         println!("{}", serde_json::to_string(&a).unwrap());
-
-        let a: A = serde_json::from_str("{\"S\":\"1\"}").unwrap();
     }
 
     #[tokio::test]
@@ -709,5 +655,15 @@ mod test {
         file.into_std().await.write(&[9]).unwrap();
         //  file.write_u8(9).await.unwrap();
         // file.write_u64(1u64).await.unwrap();
+    }
+
+    #[test]
+    pub fn testU64Codec() {
+        let s = u64_to_byte_slice!(2147389121 as u64);
+
+        let s1 = u64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+        let aa = byte_slice_to_u64!(s);
+
+        println!("{},{}", s1, aa);
     }
 }
