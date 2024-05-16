@@ -25,10 +25,15 @@ impl Session {
     /// 如果是autoCommit 该调用是个tx 可能传递的&str包含了多个独立的sql
     pub async fn executeSql(&mut self, sql: &str) -> Result<()> {
         let commands = parser::parse(sql)?;
+
+        if commands.is_empty() {
+            return Ok(());
+        }
+
         self.executeCommands(&commands).await
     }
 
-    pub async fn executeCommands(&mut self, commands: &[Command]) -> Result<()> {
+    async fn executeCommands(&mut self, commands: &[Command]) -> Result<()> {
         self.currentTx = Some(meta::STORE.data.transaction());
 
         let commandExecutor = CommandExecutor::new(self);

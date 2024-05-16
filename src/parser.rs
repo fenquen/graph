@@ -13,6 +13,10 @@ use crate::graph_value::PointDesc;
 use crate::meta::{Column, ColumnType, Table, TableType};
 
 pub fn parse(sql: &str) -> Result<Vec<Command>> {
+    if sql.is_empty() {
+        return Ok(vec![]);
+    }
+
     let mut parser = Parser::new(sql);
 
     parser.parseElement()?;
