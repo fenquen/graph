@@ -66,6 +66,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 Command::Select(select) => self.select(select).await?,
                 Command::Link(link) => self.link(link).await?,
                 Command::Delete(delete) => self.delete(delete).await?,
+                Command::Update(update) => self.update(update)?,
                 _ => throw!(&format!("unsupported command:{:?}", command)),
             }
         }
@@ -516,7 +517,11 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             let columnFamily = meta::STORE.data.cf_handle(table.name.as_str()).unwrap();
 
             for position in positions {
-                let rowBinary = self.session.getCurrentTx()?.get_cf(&columnFamily, u64_to_byte_slice!(*position))?.unwrap();
+                let rowBinary =
+                    match self.session.getCurrentTx()?.get_cf(&columnFamily, u64_to_byte_slice!(*position))? {
+                        Some(rowBinary) => rowBinary,
+                        None => continue,
+                    };
 
                 if let Some(rowData) = self.readRowBinary(table, Box::from(&rowBinary[..]), tableFilter, selectedColNames)? {
                     rowDatas.push((*position, rowData));
