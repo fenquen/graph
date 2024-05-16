@@ -199,4 +199,6 @@ delete from user(id=1)
 
 ## 更新普通表的数据 update
 
-developing
+```sql
+update user[name ='tom0'](id=1)
+```
