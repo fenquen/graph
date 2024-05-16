@@ -4,7 +4,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, throw};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, suffix_plus_plus, throw};
 use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
@@ -22,10 +22,12 @@ use crate::session::Session;
 use crate::utils::TrickyContainer;
 
 pub type RowId = u64;
+pub type TableId = u64;
 
 lazy_static! {
     pub static ref STORE: TrickyContainer<Store> = TrickyContainer::new();
     pub static ref TABLE_NAME_TABLE: DashMap<String, Table> = DashMap::new();
+    pub static ref TABLE_ID_COUNTER: AtomicU64 = AtomicU64::default();
 }
 
 pub struct Store {
@@ -40,6 +42,8 @@ pub struct Table {
     pub type0: TableType,
     #[serde(skip_serializing, skip_deserializing)]
     pub rowIdCounter: AtomicU64,
+    // start from 0
+    pub tableId: TableId,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -152,15 +156,27 @@ pub fn init() -> Result<()> {
 
         let metaStore: OptimisticTransactionDB = OptimisticTransactionDB::open(&metaStoreOption, CONFIG.metaDir.as_str())?;
 
+        let mut latestTableId = 0u64;
+
         let iterator = metaStore.iterator(IteratorMode::Start);
         for iterResult in iterator {
             let pair = iterResult?;
+
+            let tableId = byte_slice_to_u64!(&*pair.0);
             let table: Table = serde_json::from_slice(&*pair.1)?;
+
+            if tableId != table.tableId {
+                throw!("table记录的key和table中的tableId不同");
+            }
 
             tableNames.push(table.name.clone());
 
             TABLE_NAME_TABLE.insert(table.name.to_owned(), table);
+
+            suffix_plus_plus!(latestTableId);
         }
+
+        TABLE_ID_COUNTER.store(latestTableId, Ordering::Release);
 
         metaStore
     };
@@ -176,6 +192,7 @@ pub fn init() -> Result<()> {
         std::fs::create_dir_all(CONFIG.dataDir.as_str())?;
 
         let mut dataStoreOption = Options::default();
+        // 默认日志保留的数量1000 太多
         dataStoreOption.set_keep_log_file_num(1);
         dataStoreOption.set_max_write_buffer_number(2);
         dataStoreOption.create_missing_column_families(true);
@@ -186,6 +203,7 @@ pub fn init() -> Result<()> {
         dataStore
     };
 
+    // 遍历各个cf读取last的key 读取lastest的rowId
     for ref tableName in tableNames {
         let cf = dataStore.cf_handle(tableName.as_str()).unwrap();
         let mut iterator = dataStore.raw_iterator_cf(&cf);

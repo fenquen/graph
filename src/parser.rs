@@ -412,7 +412,8 @@ impl Parser {
         Ok(commandVec)
     }
 
-    /// 当前不实现 default value
+    // todo 实现 default value
+    // todo 实现 if not exist
     // CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)
     fn parseCreate(&mut self) -> Result<Command> {
         // 不是table便是relation
@@ -1033,6 +1034,7 @@ impl Parser {
         Ok(Command::Select(selectVec))
     }
 
+    // todo 能够应对like
     /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个 <br>
     /// stopWhenParseRightComplete 用来应对(a>0+6),0+6未被括号保护,不然的话会解析成  (a>1)+6
     fn parseExpr(&mut self, stopWhenParseRightComplete: bool) -> Result<Expr> {
@@ -1628,6 +1630,7 @@ pub struct Delete {
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Update {
     pub tableName: String,
+    // todo insert的values的expr只能支持不包含column name的
     pub columnName_expr: HashMap<String, Expr>,
     pub filterExpr: Option<Expr>,
 }

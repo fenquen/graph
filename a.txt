@@ -91,3 +91,18 @@ select 的 order by
 普通select的alias
 
 create if not exist
+
+普通表
+    本身的rowId -> 内容
+    本身的rowId + 下游relation的tableId + relation的rowId -> 0byte
+    本身的rowId + 上游relation的tableId + relation的rowId -> 0byte
+relation表
+    本身的rowId -> 内容
+    本身的rowId + src的tableId + 对应table的data的rowId -> 0byte
+    本身的rowId + dest的tableId + 对应table的data的rowId -> 0byte
+
+如何应对relink
+     a 使用2个 b 变为 a 使用7个 b
+     确定了 起点rowId 终点rowId 关系种类 后 再去link相同的关系 显然对关系来说是覆盖的意思了
+如何应对 node叛变
+     a 喜欢 b  然后  a 撤销 喜欢 b

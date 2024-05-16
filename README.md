@@ -1,6 +1,6 @@
 # graph
 
-个人使用rust实现的图数据库,以学习为主要目的。目前还处在相对原始的可用状态,尚有很多未完成的功能点
+个人使用rust实现的图数据库,以学习为主要目的。目前还处在相对原始的beta状态,尚有很多未完成的功能点
 
 ## 项目动机
 
@@ -11,7 +11,29 @@
 
 使用websocket(开发中),这样可以同时支持传统后台应用和web前端
 
-## 创建普通表
+## 开发测试环境
+
+### 硬件
+
+```text
+thinkpad x1 nano 2021
+    cpu: intel core i5 1130g7
+    ram: 16GB
+```
+
+### rust版本
+
+```text
+2024-04-21后的nightly版本
+```
+
+### 操作系统
+
+```text
+ubuntu 20.04 with linux kernal 5.15
+```
+
+## 创建普通表 create table
 
 ```sql
 create table user (id integer,name string);insert into user values (1,'tom');
@@ -19,7 +41,7 @@ create table car (id integer,color string);insert into car values (34,'red');ins
 create table tyre (id integer, name string);insert into tyre values(7,'stone');
 ```
 
-## 创建关系(relation)
+## 创建关系 create relation
 
 ```sql
 create relation usage (number integer);
@@ -45,7 +67,7 @@ link car (id =34) to tyre(name ='stone') by own(number=1);
 
 ## 查询
 
-### ordinary qurry
+### 对普通表的查询 ordinary query
 
 ```sql
 select user(id=1 and 0=0)
@@ -60,7 +82,7 @@ select user(id=1 and 0=0)
 ]
 ```
 
-### relation query
+### 关系查询 relation query
 
 ```sql
 select user(id=1 and 0=0) -usage(number > 0) as usage0-> car
@@ -169,12 +191,12 @@ select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -
 ]
 ```
 
-## delete
+## 删除普通表的数据 delete
 
 ```sql
 delete from user(id=1)
 ```
 
-## update
+## 更新普通表的数据 update
 
 developing

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::CONFIG;
 use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_slice};
-use crate::meta::{Column, ColumnType, RowId, Table, TableType};
-use crate::parser::{Command, Delete, Element, Insert, Link, Select};
+use crate::meta::{Column, ColumnType, RowId, Table, TableId, TableType};
+use crate::parser::{Command, Delete, Element, Insert, Link, Select, Update};
 use anyhow::Result;
 use dashmap::mapref::one::{Ref, RefMut};
 use serde::{Deserialize, Serialize, Serializer};
@@ -57,6 +57,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                         columns: table.columns.clone(),
                         type0: table.type0.clone(),
                         rowIdCounter: AtomicU64::default(),
+                        tableId: TableId::default(),
                     };
 
                     self.createTable(table).await?;
@@ -77,6 +78,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             throw!(&format!("table/relation: {} already exist", table.name))
         }
 
+        // 如果是relation 系统内部额外添加2个PointDesc的内部字段 src dest
         if let TableType::Relation = table.type0 {
             table.columns.push(
                 Column {
@@ -93,10 +95,13 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             );
         }
 
-        // 生成column family
-        meta::STORE.data.create_cf(table.name.as_str(), &Options::default())?;
+        table.tableId = meta::TABLE_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
 
-        let key = table.name.as_bytes();
+        // 生成column family
+        self.session.createColFamily(table.name.as_str())?;
+
+        // todo 使用 u64的tableId 为key
+        let key = u64_to_byte_slice!(table.tableId);
         let json = serde_json::to_string(&table)?;
         meta::STORE.meta.put(key, json.as_bytes())?;
 
@@ -106,6 +111,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         Ok(())
     }
 
+    // todo insert时候value的排布要和创建表的时候column的顺序对应
     async fn insert(&self, insert: &Insert) -> Result<()> {
         // 对应的表是不是exist
         let table = self.getTableRefByName(&insert.tableName)?;
@@ -115,14 +121,14 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             throw!(&format!("{} is a RELATION , can not use insert into on RELATION", insert.tableName));
         }
 
-        let rowData = self.generateInsertValuesBinary(&insert, &*table)?;
+        let rowDataBinary = self.generateInsertValuesBinary(&insert, &*table)?;
 
         let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
         let key = u64_to_byte_slice!(rowId);
 
-        let value = rowData.as_ref();
+        let value = rowDataBinary.as_ref();
 
-        let columnFamily = self.session.getColFamily(table.name.as_str())?;
+        let columnFamily = self.session.getColFamily(&table.name)?;
 
         self.session.getCurrentTx()?.put_cf(&columnFamily, key, value)?;
 
@@ -385,17 +391,111 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
     /// 得到满足expr的record 然后把它的xmax变为当前的txId
     async fn delete(&self, delete: &Delete) -> Result<()> {
-        let table = self.getTableRefByName(delete.tableName.as_str())?;
+        let pairs = {
+            let table = self.getTableRefByName(delete.tableName.as_str())?;
+            self.scanSatisfiedRowsBinary(delete.filterExpr.as_ref(), table.value(), true, None)?
+        };
 
-        let pairs = self.scanSatisfiedRowsBinary(delete.filterExpr.as_ref(), table.value(), true, None)?;
-
-        let columnFamily = meta::STORE.data.cf_handle(table.name.as_str()).unwrap();
+        let columnFamily = self.session.getColFamily(&delete.tableName)?;
 
         // 遍历更改的xmax
         for (dataPosition, _) in pairs {
             // 要更改的是xmax 在xmin后边
             // 之前发现即使seek到了正确的位置,写入还是到末尾append的 原因是openOptions设置了append
             self.session.getCurrentTx()?.delete_cf(&columnFamily, u64_to_byte_slice!(dataPosition))?;
+        }
+
+        Ok(())
+    }
+
+    fn update(&self, update: &Update) -> Result<()> {
+        let table = self.getTableRefByName(update.tableName.as_str())?;
+
+        if let TableType::Relation = table.type0 {
+            throw!("can not use update on relation");
+        }
+
+        let columnName_column = {
+            let mut columnName_column = HashMap::with_capacity(table.columns.len());
+            for column in &table.columns {
+                columnName_column.insert(column.name.to_string(), column.clone());
+            }
+
+            columnName_column
+        };
+
+        let mut pairs = self.scanSatisfiedRowsBinary(update.filterExpr.as_ref(), table.value(), true, None)?;
+
+        enum A<'a> {
+            DirectValue(GraphValue),
+            NeedCalc(&'a Expr),
+        }
+
+        let mut columnName_a: HashMap<String, A> = HashMap::with_capacity(update.columnName_expr.len());
+
+        macro_rules! column_type_compatible {
+            ($columnName_column:expr, $columnName: expr,$columnValue: expr,$tableName: expr) => {
+                match $columnName_column.get($columnName) {
+                    Some(column) => {
+                        if column.type0.compatible(&$columnValue) == false {
+                            throw!(&format!("table:{} , column:{}, is not compatilbe with value:{:?}", $tableName, $columnName, $columnValue));
+                        }
+                    }
+                    None => throw!(&format!("table:{} has no column named:{}", $tableName, $columnName)),
+                }
+            };
+        }
+
+        // column expr能直接计算的先计算 不要到后边的遍历里边重复计算了
+        for (columnName, columnExpr) in &update.columnName_expr {
+            if columnExpr.needAcutalRowData() {
+                columnName_a.insert(columnName.to_string(), A::NeedCalc(columnExpr));
+            } else {
+                let columnValue = columnExpr.calc(None)?;
+
+                // update设置的值要和column type 相同
+                column_type_compatible!(columnName_column, columnName, columnValue, update.tableName);
+
+                columnName_a.insert(columnName.to_string(), A::DirectValue(columnExpr.calc(None)?));
+            }
+        }
+
+        let columnFamily = self.session.getColFamily(update.tableName.as_str())?;
+
+        // todo update的时候能不能直接从binary维度上更改row
+        for (rowId, rowData) in &mut pairs {
+            for (columnName, a) in &columnName_a {
+                match a {
+                    A::NeedCalc(expr) => {
+                        let columnValue = expr.calc(Some(rowData))?;
+
+                        // update设置的值要和column type 相同
+                        column_type_compatible!(columnName_column, columnName, columnValue, update.tableName);
+
+                        rowData.insert(columnName.to_string(), columnValue.clone());
+                    }
+                    A::DirectValue(columnValue) => {
+                        rowData.insert(columnName.to_string(), columnValue.clone());
+                    }
+                }
+            }
+
+            // todo 各个column的value都在1道使得update时候只能整体来弄太耦合了 后续设想能不能各个column保存到单独的key
+            let key = u64_to_byte_slice!(*rowId);
+
+            let destByteSlice = {
+                let mut destByteSlice = BytesMut::new();
+                // 需要以表定义里边的column顺序来序列化
+                for column in &table.columns {
+                    let columnValue = rowData.get(&column.name).unwrap();
+                    columnValue.encode(&mut destByteSlice)?;
+                }
+
+                destByteSlice.freeze()
+            };
+            let value = destByteSlice.as_ref();
+
+            self.session.getCurrentTx()?.put_cf(&columnFamily, key, value)?;
         }
 
         Ok(())
@@ -427,12 +527,13 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         }
     }
 
+    // todo 减少对table引用的持有的必要 让dashMap快速unlock
     fn scanSatisfiedRowsBinary(&self,
                                tableFilterExpr: Option<&Expr>,
                                table: &Table,
                                select: bool,
                                selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(DataPosition, RowData)>> {
-        let columnFamily = meta::STORE.data.cf_handle(table.name.as_str()).unwrap();
+        let columnFamily = self.session.getColFamily(table.name.as_str())?;
         let iterator = self.session.getCurrentTx()?.iterator_cf(&columnFamily, IteratorMode::Start);
 
         let satisfiedRows =
@@ -542,11 +643,11 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                     columns.push(column);
                 }
             } else { // 如果显式说明columnName的话需要确保都是有的
-                for columnName in &insert.columnNames {
+                for columnNameToInsert in &insert.columnNames {
                     let mut found = false;
 
                     for column in &table.columns {
-                        if columnName == &column.name {
+                        if columnNameToInsert == &column.name {
                             columns.push(column);
                             found = true;
                             break;
@@ -554,7 +655,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                     }
 
                     if found == false {
-                        throw!(&format!("column {} does not defined", columnName));
+                        throw!(&format!("column {} does not defined", columnNameToInsert));
                     }
                 }
             }
@@ -562,27 +663,39 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             columns
         };
 
+        // todo insert时候需要各column全都insert 后续要能支持 null的 GraphValue
         // 确保column数量和value数量相同
-        if columns.len() != insert.columnExprs.len() {
+        if columns.len() != insert.columnExprs.len() || table.columns.len() != insert.columnExprs.len() {
             throw!("column count does not match value count");
         }
 
-        let mut rowData = BytesMut::new();
-
-        for column_columnValue in columns.iter().zip(insert.columnExprs.iter()) {
-            let column = column_columnValue.0;
-            let columnExpr = column_columnValue.1;
-
-            // columnType和value也要对上
-            let columnValue = columnExpr.calc(None)?;
-            if column.type0.compatible(&columnValue) == false {
-                throw!(&format!("column:{},type:{} is not compatible with value:{}", column.name, column.type0, columnValue));
+        // todo 如果指明了要insert的column name的话 需要排序 符合表定义时候的column顺序 完成
+        let destByteSlice = {
+            let mut columnName_columnExpr = HashMap::with_capacity(columns.len());
+            for (column, columnExpr) in columns.iter().zip(insert.columnExprs.iter()) {
+                columnName_columnExpr.insert(column.name.to_owned(), columnExpr);
             }
 
-            columnValue.encode(&mut rowData)?;
-        }
+            let mut destByteSlice = BytesMut::new();
 
-        Ok(rowData.freeze())
+            // 要以create时候的顺序encode
+            for column in &table.columns {
+                let columnExpr = columnName_columnExpr.get(&column.name).unwrap();
+
+                // columnType和value要对上
+                let columnValue = columnExpr.calc(None)?;
+                if column.type0.compatible(&columnValue) == false {
+                    throw!(&format!("column:{},type:{} is not compatible with value:{}", column.name, column.type0, columnValue));
+                }
+
+                columnValue.encode(&mut destByteSlice)?;
+            }
+
+            destByteSlice
+        };
+
+
+        Ok(destByteSlice.freeze())
     }
 }
 

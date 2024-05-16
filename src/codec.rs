@@ -49,7 +49,7 @@ pub struct MyBytes {
 impl MyBytes {
     /// bytes尚未提供position()
     pub fn position(&self) -> usize {
-        self.len - self.bytes.remaining()-1
+        self.len - self.bytes.remaining() - 1
     }
 }
 
@@ -62,8 +62,8 @@ impl From<Bytes> for MyBytes {
     }
 }
 
-
 impl TryFrom<&mut MyBytes> for Vec<GraphValue> {
+    // 不能使用GraphError
     type Error = anyhow::Error;
 
     fn try_from(myBytes: &mut MyBytes) -> Result<Self, Self::Error> {

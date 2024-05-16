@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use crate::{command_executor, global, meta, parser, throw};
 use anyhow::Result;
-use rocksdb::{BoundColumnFamily, OptimisticTransactionDB, Transaction};
+use rocksdb::{BoundColumnFamily, OptimisticTransactionDB, Options, Transaction};
 use tokio::io::AsyncWriteExt;
 use crate::command_executor::CommandExecutor;
 use crate::global::{DataLen, TX_ID_COUNTER, TxId};
@@ -59,6 +59,10 @@ impl Session {
             Some(cf) => Ok(cf),
             None => throw!(&format!("column family:{} not exist",colFamilyName))
         }
+    }
+
+    pub fn createColFamily(&self, columnFamilyName: &str) -> Result<()> {
+        Ok(meta::STORE.data.create_cf(columnFamilyName, &Options::default())?)
     }
 }
 

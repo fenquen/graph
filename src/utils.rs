@@ -4,7 +4,7 @@ use std::{alloc, ptr};
 use std::alloc::Layout;
 use anyhow::format_err;
 
-/// 越过了rust的兜底 像原来的java那样
+/// 越过了rust的兜底 以不可变引用对外提供像原来的c/c++ java那样 <br>
 /// 使用它的时候需要知道风险
 pub struct TrickyContainer<T> {
     data: *mut T,
