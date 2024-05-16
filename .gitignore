@@ -16,3 +16,5 @@ Cargo.lock
 .idea
 data
 meta
+
+.DS_Store
