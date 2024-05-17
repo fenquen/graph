@@ -62,7 +62,7 @@ impl Session {
     pub fn getColFamily(&self, colFamilyName: &str) -> Result<Arc<BoundColumnFamily>> {
         match meta::STORE.data.cf_handle(colFamilyName) {
             Some(cf) => Ok(cf),
-            None => throw!(&format!("column family:{} not exist",colFamilyName))
+            None => throw!(&format!("column family:{} not exist", colFamilyName))
         }
     }
 
