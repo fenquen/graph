@@ -417,7 +417,7 @@ impl Parser {
     }
 
     // todo 实现 default value
-    // todo 实现 if not exist
+    // todo 实现 if not exist 完成
     // CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)
     fn parseCreate(&mut self) -> Result<Command> {
         // 不是table便是relation
@@ -428,11 +428,23 @@ impl Parser {
     fn parseCreateTable(&mut self, tableType: TableType) -> Result<Command> {
         let mut table = Table::default();
 
+        // 应对 if not exist
+        if self.getCurrentElement()?.expectTextLiteralContentIgnoreCaseBool("if") {
+            self.skipElement(1)?;
+
+            let errMessage = "you should wirte \"if not exist\" after create table";
+            self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("not", errMessage)?;
+            self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("exist", errMessage)?;
+
+            table.createIfNotExist = true;
+        }
+
         table.type0 = tableType;
 
         // 读取table name
         table.name = self.getCurrentElementAdvance()?.expectTextLiteral("table name can not be pure number")?;
 
+        // table名不能胡乱
         self.checkDbObjectName(&table.name)?;
 
         // 应该是"("
@@ -448,7 +460,7 @@ impl Parser {
         let mut readColumnState = ReadColumnState::ReadColumnName;
         let mut column = Column::default();
         loop {
-            let element = self.getCurrentElementOptionAdvance();
+            let element = self.getCurrentElementAdvanceOption();
             if element.is_none() {
                 break;
             }
@@ -609,7 +621,7 @@ impl Parser {
         // 和parseInExprs使用相同的套路,当(数量和)数量相同的时候说明收敛结束了,因为会以")"收尾
         let mut 括号数量 = 0;
         let mut 括号1数量 = 0;
-        if let Some(currentElement) = self.getCurrentElementOptionAdvance() {
+        if let Some(currentElement) = self.getCurrentElementAdvanceOption() {
             currentElement.expectTextLiteralContent(global::圆括号_STR)?;
             suffix_plus_plus!(括号数量);
         } else { // 未写link的value
@@ -627,7 +639,7 @@ impl Parser {
         let mut exprElementVec = Default::default();
         loop {
             let currentElement =
-                match self.getCurrentElementOptionAdvance() {
+                match self.getCurrentElementAdvanceOption() {
                     Some(currentElement) => currentElement,
                     None => break,
                 };
@@ -842,7 +854,7 @@ impl Parser {
                 if force {
                     self.getCurrentElementAdvance()?
                 } else {
-                    if let Some(currentElement) = self.getCurrentElementOptionAdvance() {
+                    if let Some(currentElement) = self.getCurrentElementAdvanceOption() {
                         currentElement
                     } else {
                         break;
@@ -1062,7 +1074,7 @@ impl Parser {
         let mut parseCondState = ParseCondState::ParsingLeft;
 
         loop {
-            let currentElement = match self.getCurrentElementOptionAdvance() {
+            let currentElement = match self.getCurrentElementAdvanceOption() {
                 None => break,
                 Some(currentElement) => currentElement.clone(),
             };
@@ -1318,7 +1330,7 @@ impl Parser {
     }
 
     /// 返回None的话说明当前已经是overflow了 和之前遍历char时候不同的是 当不能advance时候index是在最后的index还要向后1个的
-    fn getCurrentElementOptionAdvance(&mut self) -> Option<&Element> {
+    fn getCurrentElementAdvanceOption(&mut self) -> Option<&Element> {
         let option = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex);
         if option.is_some() {
             suffix_plus_plus!(self.currentElementIndex);
@@ -1593,6 +1605,7 @@ impl MathCalcOp {
     }
 }
 
+// todo 后续要改变当前的relation保存体系
 /// link user(id = 1) to car(color = 'red') by usage(number = 2)
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Link {

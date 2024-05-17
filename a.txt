@@ -106,3 +106,26 @@ relation表
      确定了 起点rowId 终点rowId 关系种类 后 再去link相同的关系 显然对关系来说是覆盖的意思了
 如何应对 node叛变
      a 喜欢 b  然后  a 撤销 喜欢 b
+bitset
+30->1->30
+p 00001-00007 relation 001 key 07
+user表 tableId 01
+    d00 user内容
+    p00nr02k01
+    p00nr02k31
+
+usage表 tableId 02
+    d01 usage内容
+    p01sn01k00
+    p01dn07k02
+
+    d37 usage内容
+    p37sn01k00
+    p37dn07k03
+
+model表 tableId 07
+    d02 model内容
+    p02pr02k01
+
+    d03 model内容
+    p03pr02k37

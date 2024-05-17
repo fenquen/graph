@@ -58,6 +58,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                         type0: table.type0.clone(),
                         rowIdCounter: AtomicU64::default(),
                         tableId: TableId::default(),
+                        createIfNotExist: table.createIfNotExist,
                     };
 
                     self.createTable(table).await?;
@@ -76,7 +77,11 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
     async fn createTable(&self, mut table: Table) -> Result<()> {
         if meta::TABLE_NAME_TABLE.contains_key(table.name.as_str()) {
-            throw!(&format!("table/relation: {} already exist", table.name))
+            if table.createIfNotExist == false {
+                throw!(&format!("table/relation: {} already exist", table.name))
+            }
+
+            return Ok(());
         }
 
         // 如果是relation 系统内部额外添加2个PointDesc的内部字段 src dest
@@ -101,7 +106,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         // 生成column family
         self.session.createColFamily(table.name.as_str())?;
 
-        // todo 使用 u64的tableId 为key
+        // todo 使用 u64的tableId 为key 完成
         let key = u64_to_byte_slice!(table.tableId);
         let json = serde_json::to_string(&table)?;
         meta::STORE.meta.put(key, json.as_bytes())?;
@@ -112,7 +117,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         Ok(())
     }
 
-    // todo insert时候value的排布要和创建表的时候column的顺序对应
+    // todo insert时候value的排布要和创建表的时候column的顺序对应 完成
     async fn insert(&self, insert: &Insert) -> Result<()> {
         // 对应的表是不是exist
         let table = self.getTableRefByName(&insert.tableName)?;

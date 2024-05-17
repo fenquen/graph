@@ -44,6 +44,7 @@ pub struct Table {
     pub rowIdCounter: AtomicU64,
     // start from 0
     pub tableId: TableId,
+    pub createIfNotExist: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
