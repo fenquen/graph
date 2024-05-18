@@ -11,33 +11,10 @@ use crate::graph_error::GraphError;
 use crate::meta;
 use crate::meta::Table;
 
-pub type TxId = u64;
-
-pub type ReachEnd = bool;
-pub type DataPosition = meta::RowId;
-pub type DataLen = u32;
-
 lazy_static! {
-    pub static ref TX_ID_COUNTER: AtomicU64 = AtomicU64::new(TX_ID_MIN);
     pub static ref TABLE_RECORD_FILE: ArcSwap<Option<RwLock<File>>> = ArcSwap::default();
     pub static ref WAL_FILE: ArcSwap<Option<RwLock<File>>> = ArcSwap::default();
 }
-
-pub const TX_ID_INVALID: TxId = 0;
-pub const TX_ID_MIN: TxId = 3;
-
-/// 类似pg的xmin和xmax用途的长度
-pub const TX_ID_LEN: usize = mem::size_of::<TxId>();
-
-pub const WAL_CONTENT_FIELD_LEN: usize = mem::size_of::<DataLen>();
-pub const WAL_PREFIX_LEN: usize = TX_ID_LEN + WAL_CONTENT_FIELD_LEN;
-
-/// 如果当前的rowData已是失效的话会指向实际的有效的data的position
-pub const ROW_NEXT_POSITION_LEN: usize = mem::size_of::<DataPosition>();
-/// 标识rowData长度
-pub const ROW_CONTENT_LEN_FIELD_LEN: usize = mem::size_of::<DataLen>();
-/// xmin(u64) + xmax(u64) + next position(u64) + content len(u32)
-pub const ROW_PREFIX_LEN: usize = TX_ID_LEN + TX_ID_LEN + ROW_NEXT_POSITION_LEN + ROW_CONTENT_LEN_FIELD_LEN;
 
 thread_local! {
     /// https://www.cnblogs.com/jiangbo4444/p/15932305.html <br>

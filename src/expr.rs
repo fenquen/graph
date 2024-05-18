@@ -67,7 +67,7 @@ impl Expr {
                     false
                 }
             }
-            Expr::BiDirection { leftExpr, op, rightExprVec } => {
+            Expr::BiDirection { leftExpr, op: _op, rightExprVec } => {
                 if leftExpr.needAcutalRowData() {
                     return true;
                 }

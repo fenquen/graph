@@ -42,15 +42,6 @@ pub enum Command {
     Delete(Delete),
 }
 
-impl Command {
-    pub fn isDml(&self) -> bool {
-        match self {
-            Command::Select(_) | Command::CreateTable(_) => false,
-            _ => true
-        }
-    }
-}
-
 #[derive(Default)]
 pub struct Parser {
     sql: String,
@@ -863,7 +854,7 @@ impl Parser {
 
             match state {
                 State::ReadSrcName => {
-                    select.srcName = currentElement.expectTextLiteral("expect src table name")?;
+                    select.srcTableName = currentElement.expectTextLiteral("expect src table name")?;
 
                     // 因为上边已然advance了 故而是next element
                     // let nextElement = self.getCurrentElementOption();
@@ -961,7 +952,7 @@ impl Parser {
                 }
                 State::ReadDestName => {
                     if let Element::To = currentElement {
-                        select.destName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
+                        select.destTableName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
                     } else {
                         break;
                     }
@@ -1006,7 +997,7 @@ impl Parser {
 
                         // https://qastack.cn/programming/19650265/is-there-a-faster-shorter-way-to-initialize-variables-in-a-rust-struct
                         let select0 = Select {
-                            srcName: select.destName.as_ref().unwrap().clone(),
+                            srcTableName: select.destTableName.as_ref().unwrap().clone(),
                             srcColumnNames: select.destColumnNames.clone(),
                             srcFilterExpr: select.destFilterExpr.clone(),
                             srcAlias: select.destAlias.clone(),
@@ -1622,7 +1613,7 @@ pub struct Link {
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Select {
-    pub srcName: String,
+    pub srcTableName: String,
     pub srcColumnNames: Option<Vec<String>>,
     pub srcFilterExpr: Option<Expr>,
     pub srcAlias: Option<String>,
@@ -1632,7 +1623,7 @@ pub struct Select {
     pub relationFliterExpr: Option<Expr>,
     pub relationAlias: Option<String>,
 
-    pub destName: Option<String>,
+    pub destTableName: Option<String>,
     pub destColumnNames: Option<Vec<String>>,
     pub destFilterExpr: Option<Expr>,
     pub destAlias: Option<String>,

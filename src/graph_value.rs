@@ -3,12 +3,12 @@ use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::Display;
 use crate::graph_error::GraphError;
 use crate::parser::{Element, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
-use crate::{global, throw};
+use crate::{global, meta, throw};
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::ser::SerializeMap;
 use crate::codec::{BinaryCodec, MyBytes};
-use crate::global::{Byte, DataPosition};
+use crate::global::{Byte};
 use crate::meta::DataKey;
 
 #[derive(Deserialize, Debug, Clone)]
@@ -35,7 +35,7 @@ impl BinaryCodec for GraphValue {
                 let contentLen = srcByteSlice.bytes.get_u32() as usize;
                 // let currentPos = srcByteSlice.position();
                 // 不需要绝对的position 需要相对的 上边的绝对的currentPos用不到了
-                let slice = &*srcByteSlice.bytes.slice(.. contentLen);
+                let slice = &*srcByteSlice.bytes.slice(..contentLen);
                 // 需要手动advence
                 srcByteSlice.bytes.advance(contentLen);
 

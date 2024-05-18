@@ -6,8 +6,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::CONFIG;
-use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, prefix_plus_plus,
-            key_prefix_add_row_id, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_key};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta,
+            prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_key,
+            key_prefix_add_row_id, extract_prefix_from_key_1st_byte, extract_data_key_from_pointer_key_slice};
 use crate::meta::{Column, ColumnType, DataKey, KeyTag, RowId, Table, TableId, TableType};
 use crate::parser::{Command, Delete, Element, Insert, Link, Select, Update};
 use anyhow::Result;
@@ -18,10 +19,10 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
-use rocksdb::{DBRawIterator, DBRawIteratorWithThreadMode, IteratorMode, OptimisticTransactionDB, Options, Transaction};
+use rocksdb::{AsColumnFamilyRef, DBRawIterator, DBRawIteratorWithThreadMode, IteratorMode, OptimisticTransactionDB, Options, Transaction};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::expr::Expr;
-use crate::global::{ReachEnd, DataLen, DataPosition, TX_ID_COUNTER, TxId};
+use crate::global::{Byte};
 use crate::graph_value::{GraphValue, PointDesc};
 use crate::session::Session;
 
@@ -69,7 +70,6 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 Command::Link(link) => self.link(link).await?,
                 Command::Delete(delete) => self.delete(delete).await?,
                 Command::Update(update) => self.update(update)?,
-                _ => throw!(&format!("unsupported command:{:?}", command)),
             }
         }
 
@@ -83,23 +83,6 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             }
 
             return Ok(());
-        }
-
-        // 如果是relation 系统内部额外添加2个PointDesc的内部字段 src dest
-        if let TableType::Relation = table.type0 {
-            table.columns.push(
-                Column {
-                    name: "src".to_string(),
-                    type0: ColumnType::PointDesc,
-                }
-            );
-
-            table.columns.push(
-                Column {
-                    name: "dest".to_string(),
-                    type0: ColumnType::PointDesc,
-                }
-            );
         }
 
         table.tableId = meta::TABLE_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
@@ -129,11 +112,10 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         }
 
         let rowDataBinary = self.generateInsertValuesBinary(&insert, &*table)?;
+        let value = rowDataBinary.as_ref();
 
         let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
         let key = u64_to_byte_array_reference!(key_prefix_add_row_id!(meta::KEY_PREFIX_DATA, rowId));
-
-        let value = rowDataBinary.as_ref();
 
         let columnFamily = self.session.getColFamily(&table.name)?;
 
@@ -278,7 +260,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         // 普通模式不含有relation
         if selectVec.len() == 1 && selectVec[0].relationName.is_none() {
             let select = &selectVec[0];
-            let srcTable = self.getTableRefByName(select.srcName.as_str())?;
+            let srcTable = self.getTableRefByName(select.srcTableName.as_str())?;
 
             let rows = self.scanSatisfiedRowsBinary(select.srcFilterExpr.as_ref(), srcTable.value(), true, select.srcColumnNames.as_ref())?;
             let rows: Vec<RowData> = rows.into_iter().map(|tuple| tuple.1).collect();
@@ -299,18 +281,20 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         }
 
         // 给next轮用的
-        let mut destPositionsInPrevSelect: Option<Vec<DataPosition>> = None;
+        let mut destDataKeysInPrevSelect: Option<Vec<DataKey>> = None;
 
         // 1个select对应Vec<SelectResult> 多个select对应Vec<Vec<SelectResult>>
         let mut selectResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectVec.len());
 
-        'loopSelect:
+        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+
+        'loopSelectVec:
         for select in selectVec {
             // 为什么要使用{} 不然的话有概率死锁 https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
-            let relationDatas: Vec<RowData> = {
+            let relationDatas: Vec<(DataKey, RowData)> = {
                 let relation = self.getTableRefByName(select.relationName.as_ref().unwrap())?;
                 let relationDatas = self.scanSatisfiedRowsBinary(select.relationFliterExpr.as_ref(), relation.value(), true, select.relationColumnNames.as_ref())?;
-                relationDatas.into_iter().map(|(dataKey, rowData)| rowData).collect()
+                relationDatas.into_iter().map(|(dataKey, rowData)| (dataKey, rowData)).collect()
             };
 
             let mut selectResultVecInCurrentSelect = Vec::with_capacity(relationDatas.len());
@@ -318,32 +302,59 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             // 融合了当前的select的relationDatas的全部的dest的dataKey
             let mut destKeysInCurrentSelect = vec![];
 
+            let srcColFamily = self.session.getColFamily(&select.srcTableName)?;
+            let srcTable = self.getTableRefByName(&select.srcTableName)?;
+
+            let destColFamily = self.session.getColFamily(select.destTableName.as_ref().unwrap())?;
+            let destTable = self.getTableRefByName(select.destTableName.as_ref().unwrap())?;
+
+            let relColFamily = self.session.getColFamily(select.relationName.as_ref().unwrap())?;
+            let rel = self.getTableRefByName(select.relationName.as_ref().unwrap())?;
+
             // 遍历当前的select的多个relation
             'loopRelationData:
-            for relationData in relationDatas {
-                let srcPointDesc = relationData.get(PointDesc::SRC).unwrap().asPointDesc()?;
-                // relation的src表的name不符合
-                if srcPointDesc.tableName != select.srcName || srcPointDesc.positions.is_empty() {
+            for (relationDataKey, relationData) in relationDatas {
+                let relationRowId = extract_row_id_from_key!(relationDataKey);
+
+                // 收罗该rel上的全部的src的key
+                let srcDataKeys = {
+                    pointerKeyBuffer.clear();
+                    pointerKeyBuffer.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, relationRowId));
+                    pointerKeyBuffer.put_u8(meta::KEY_TAG_SRC_TABLE_ID);
+                    pointerKeyBuffer.put_u64(srcTable.tableId);
+                    pointerKeyBuffer.put_u8(meta::KEY_TAG_KEY);
+
+                    let pointerKeys = self.getKeysByPrefix(&relColFamily, &*pointerKeyBuffer)?;
+                    pointerKeys.into_iter().map(|pointerKey| extract_data_key_from_pointer_key_slice!(&*pointerKey)).collect::<Vec<DataKey>>()
+                };
+                if srcDataKeys.is_empty() {
                     continue;
                 }
 
-                let destPointDesc = relationData.get(PointDesc::DEST).unwrap().asPointDesc()?;
-                // relation的dest表的name不符合
-                if destPointDesc.tableName != (*select.destName.as_ref().unwrap()) || destPointDesc.positions.is_empty() {
+                // 收罗该rel上的全部的dest的key
+                let destDataKeys = {
+                    pointerKeyBuffer.clear();
+                    pointerKeyBuffer.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, relationRowId));
+                    pointerKeyBuffer.put_u8(meta::KEY_TAG_DEST_TABLE_ID);
+                    pointerKeyBuffer.put_u64(destTable.tableId);
+                    pointerKeyBuffer.put_u8(meta::KEY_TAG_KEY);
+
+                    let pointerKeys = self.getKeysByPrefix(&relColFamily, &*pointerKeyBuffer)?;
+                    pointerKeys.into_iter().map(|pointerKey| extract_data_key_from_pointer_key_slice!(&*pointerKey)).collect::<Vec<DataKey>>()
+                };
+                if destDataKeys.is_empty() {
                     continue;
                 }
 
                 let srcRowDatas = {
-                    let srcTable = self.getTableRefByName(select.srcName.as_str())?;
-
                     // 上轮的全部的多个条目里边的dest的position 和 当前条目的src的position的交集
-                    match destPositionsInPrevSelect {
+                    match destDataKeysInPrevSelect {
                         Some(ref destPositionsInPrevSelect) => {
-                            let intersect =
-                                destPositionsInPrevSelect.iter().filter(|&&destPositionInPrevSelect| srcPointDesc.positions.contains(&destPositionInPrevSelect)).map(|a| *a).collect::<Vec<_>>();
+                            let intersectDataKeys =
+                                destPositionsInPrevSelect.iter().filter(|&&destDataKeyInPrevSelect| srcDataKeys.contains(&destDataKeyInPrevSelect)).map(|destDataKey| *destDataKey).collect::<Vec<_>>();
 
                             // 说明 当前的这个relation的src和上轮的dest没有重合的
-                            if intersect.is_empty() {
+                            if intersectDataKeys.is_empty() {
                                 continue 'loopRelationData;
                             }
 
@@ -353,7 +364,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                                 // 遍历上轮的各个result的dest,把intersect之外的去掉
                                 for prevSelectResult in &mut *prevSelectResultVec {
                                     // https://blog.csdn.net/u011528645/article/details/123117829
-                                    prevSelectResult.destRowDatas.retain(|pair| intersect.contains(&pair.0));
+                                    prevSelectResult.destRowDatas.retain(|(dataKey, _)| intersectDataKeys.contains(dataKey));
                                 }
 
                                 // destRowDatas是空的话那么把selectResult去掉
@@ -361,15 +372,15 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
                                 // 连线断掉
                                 if prevSelectResultVec.is_empty() {
-                                    break 'loopSelect;
+                                    break 'loopSelectVec;
                                 }
                             }
 
                             // 当前的使用intersect为源头
-                            self.getRowsByPosBinary(&intersect, &*srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref())?
+                            self.getRowDatasByDataKeys(&intersectDataKeys, &*srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref())?
                         }
                         // 只会在首轮的
-                        None => self.getRowsByPosBinary(&srcPointDesc.positions, &*srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref())?,
+                        None => self.getRowDatasByDataKeys(&srcDataKeys, &*srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref())?,
                     }
                 };
                 if srcRowDatas.is_empty() {
@@ -377,33 +388,33 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 }
 
                 let destRowDatas = {
-                    let destTable = self.getTableRefByName(select.destName.as_ref().unwrap())?;
-                    self.getRowsByPosBinary(&destPointDesc.positions, &*destTable, select.destFilterExpr.as_ref(), select.destColumnNames.as_ref())?
+                    let destTable = self.getTableRefByName(select.destTableName.as_ref().unwrap())?;
+                    self.getRowDatasByDataKeys(&destDataKeys, &*destTable, select.destFilterExpr.as_ref(), select.destColumnNames.as_ref())?
                 };
                 if destRowDatas.is_empty() {
                     continue;
                 }
 
-                for destPosition in &destPointDesc.positions {
+                for destPosition in &destDataKeys {
                     destKeysInCurrentSelect.push(*destPosition);
                 }
 
                 selectResultVecInCurrentSelect.push(
                     SelectResult {
-                        srcName: select.srcAlias.as_ref().unwrap_or_else(|| &select.srcName).to_string(),
+                        srcName: select.srcAlias.as_ref().unwrap_or_else(|| &select.srcTableName).to_string(),
                         srcRowDatas,
                         relationName: select.relationAlias.as_ref().unwrap_or_else(|| select.relationName.as_ref().unwrap()).to_string(),
                         relationData,
-                        destName: select.destAlias.as_ref().unwrap_or_else(|| select.destName.as_ref().unwrap()).to_string(),
+                        destName: select.destAlias.as_ref().unwrap_or_else(|| select.destTableName.as_ref().unwrap()).to_string(),
                         destRowDatas,
                     }
                 );
             }
 
-            destPositionsInPrevSelect = {
+            destDataKeysInPrevSelect = {
                 // 当前的relation select 的多个realtion对应dest全都是empty的
                 if destKeysInCurrentSelect.is_empty() {
-                    break 'loopSelect;
+                    break 'loopSelectVec;
                 }
 
                 // rust的这个去重有点不同只能去掉连续的重复的 故而需要先排序让重复的连续起来
@@ -421,7 +432,6 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         fn handleResult(selectResultVecVec: Vec<Vec<SelectResult>>) -> Vec<Value> {
             let mut valueVec = Vec::default();
 
-
             if selectResultVecVec.is_empty() {
                 return valueVec;
             }
@@ -430,8 +440,8 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 let mut json = json!({});
 
                 // 把tuple的position干掉
-                let srcRowDatas: Vec<&RowData> = selectResult.srcRowDatas.iter().map(|pair| &pair.1).collect();
-                let destRowDatas: Vec<&RowData> = selectResult.destRowDatas.iter().map(|pair| &pair.1).collect::<Vec<&RowData>>();
+                let srcRowDatas: Vec<&RowData> = selectResult.srcRowDatas.iter().map(|(_, rownData)| rownData).collect();
+                let destRowDatas: Vec<&RowData> = selectResult.destRowDatas.iter().map(|(_, rowData)| rowData).collect();
 
                 // 把map的src和dest干掉
                 let relationData: HashMap<&String, &GraphValue> = selectResult.relationData.iter().filter(|&pair| pair.0 != PointDesc::SRC && pair.0 != PointDesc::DEST).collect();
@@ -451,7 +461,9 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
                     for selectResult in selectResultVecVec.get(outerIndex).unwrap() {
                         json[selectResult.relationName.as_str()] = json!(selectResult.relationData);
-                        json[selectResult.destName.as_str()] = json!(selectResult.destRowDatas);
+
+                        let destRowDatas: Vec<&RowData> = selectResult.destRowDatas.iter().map(|(_, rowData)| rowData).collect();
+                        json[selectResult.destName.as_str()] = json!(destRowDatas);
                     }
                 }
 
@@ -580,33 +592,33 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
     }
 
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
-    fn getRowsByPosBinary(&self,
-                          positions: &[DataPosition],
-                          table: &Table,
-                          tableFilter: Option<&Expr>,
-                          selectedColNames: Option<&Vec<String>>) -> Result<Vec<(DataPosition, RowData)>> {
+    fn getRowDatasByDataKeys(&self,
+                             dataKeys: &[DataKey],
+                             table: &Table,
+                             tableFilter: Option<&Expr>,
+                             selectedColNames: Option<&Vec<String>>) -> Result<Vec<(DataKey, RowData)>> {
         // 要得到表的全部的data
-        if positions[0] == global::TOTAL_DATA_OF_TABLE {
-            self.scanSatisfiedRowsBinary(tableFilter, table, true, selectedColNames)
-        } else {
-            let mut rowDatas = Vec::with_capacity(positions.len());
-
-            let columnFamily = meta::STORE.data.cf_handle(table.name.as_str()).unwrap();
-
-            for position in positions {
-                let rowBinary =
-                    match self.session.getCurrentTx()?.get_cf(&columnFamily, u64_to_byte_array_reference!(*position))? {
-                        Some(rowBinary) => rowBinary,
-                        None => continue,
-                    };
-
-                if let Some(rowData) = self.readRowBinary(table, Box::from(&rowBinary[..]), tableFilter, selectedColNames)? {
-                    rowDatas.push((*position, rowData));
-                }
-            }
-
-            Ok(rowDatas)
+        if dataKeys[0] == global::TOTAL_DATA_OF_TABLE {
+            return self.scanSatisfiedRowsBinary(tableFilter, table, true, selectedColNames);
         }
+
+        let mut rowDatas = Vec::with_capacity(dataKeys.len());
+
+        let columnFamily = self.session.getColFamily(&table.name)?;
+
+        for dataKey in dataKeys {
+            let rowDataBinary =
+                match self.session.getCurrentTx()?.get_cf(&columnFamily, u64_to_byte_array_reference!(*dataKey))? {
+                    Some(rowDataBinary) => rowDataBinary,
+                    None => continue,
+                };
+
+            if let Some(rowData) = self.readRowDataBinary(table, Box::from(&rowDataBinary[..]), tableFilter, selectedColNames)? {
+                rowDatas.push((*dataKey, rowData));
+            }
+        }
+
+        Ok(rowDatas)
     }
 
     fn scanSatisfiedRowsBinary(&self,
@@ -614,7 +626,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                                table: &Table,
                                select: bool,
                                selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(DataKey, RowData)>> {
-        let columnFamily = self.session.getColFamily(table.name.as_str())?;
+        let columnFamily = self.session.getColFamily(&table.name)?;
 
         // 对数据条目而不是pointer条目遍历
         // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
@@ -626,18 +638,18 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 let mut satisfiedRows = Vec::new();
 
                 for iterResult in iterator {
-                    let pair = iterResult?;
+                    let (key, vaule) = iterResult?;
 
                     // 前4个bit的值是不是 KEY_PREFIX_DATA
-                    if ((pair.0[0] >> meta::KEY_PREFIX_BIT_LEN) & meta::KEY_PREFIX_MAX) != meta::KEY_PREFIX_DATA {
+                    if extract_prefix_from_key_1st_byte!(key[0]) != meta::KEY_PREFIX_DATA {
                         break;
                     }
 
                     //  let rowBinary = &*pair.1;
-                    match self.readRowBinary(table, pair.1, tableFilterExpr, selectedColumnNames)? {
+                    match self.readRowDataBinary(table, vaule, tableFilterExpr, selectedColumnNames)? {
                         None => continue,
                         Some(rowData) => {
-                            satisfiedRows.push((byte_slice_to_u64!(&*pair.0), rowData))
+                            satisfiedRows.push((byte_slice_to_u64!(&*key), rowData))
                         }
                     }
                 }
@@ -669,11 +681,11 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         Ok(satisfiedRows)
     }
 
-    fn readRowBinary(&self,
-                     table: &Table,
-                     rowBinary: Box<[u8]>,
-                     tableFilterExpr: Option<&Expr>,
-                     selectedColumnNames: Option<&Vec<String>>) -> Result<Option<RowData>> {
+    fn readRowDataBinary(&self,
+                         table: &Table,
+                         rowBinary: Box<[u8]>,
+                         tableFilterExpr: Option<&Expr>,
+                         selectedColumnNames: Option<&Vec<String>>) -> Result<Option<RowData>> {
         let columnNames = table.columns.iter().map(|column| column.name.clone()).collect::<Vec<String>>();
 
         let mut myBytesRowData = MyBytes::from(Bytes::from(rowBinary));
@@ -806,6 +818,26 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
 
         Ok(destByteSlice.freeze())
+    }
+
+    fn getKeysByPrefix(&self, colFamily: &impl AsColumnFamilyRef, prefix: &[u8]) -> Result<Vec<Box<[Byte]>>> {
+        let mut keys = Vec::new();
+
+        let iterator =
+            self.session.getCurrentTx()?.prefix_iterator_cf(colFamily, prefix);
+
+        for iterResult in iterator {
+            let (key, value) = iterResult?;
+
+            // 说明越过了
+            if key.starts_with(prefix) == false {
+                break;
+            }
+
+            keys.push(key);
+        }
+
+        Ok(keys)
     }
 }
 

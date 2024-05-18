@@ -5,7 +5,6 @@ use anyhow::Result;
 use rocksdb::{BoundColumnFamily, OptimisticTransactionDB, Options, Transaction};
 use tokio::io::AsyncWriteExt;
 use crate::command_executor::CommandExecutor;
-use crate::global::{DataLen, TX_ID_COUNTER, TxId};
 use crate::parser::{Command, SqlOp};
 
 pub struct Session {

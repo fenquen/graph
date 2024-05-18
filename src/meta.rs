@@ -38,18 +38,19 @@ pub struct Store {
 }
 
 pub type DataKey = u64;
+pub type KeyPrefix = Byte;
 
 // key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
 pub const DATA_KEY_BYTE_LEN: usize = 8;
 
 pub const KEY_PREFIX_BIT_LEN: usize = 4;
-pub const KEY_PREFIX_MAX: Byte = 1 << KEY_PREFIX_BIT_LEN - 1;
+pub const KEY_PREFIX_MAX: KeyPrefix = (1 << KEY_PREFIX_BIT_LEN) - 1;
 
-pub const KEY_PREFIX_DATA: Byte = 1;
-pub const KEY_PREFIX_POINTER: Byte = 0;
+pub const KEY_PREFIX_DATA: KeyPrefix = 1;
+pub const KEY_PREFIX_POINTER: KeyPrefix = 0;
 
 pub const ROW_ID_BIT_LEN: usize = 64 - KEY_PREFIX_BIT_LEN;
-pub const MAX_ROW_ID: u64 = 1 << ROW_ID_BIT_LEN - 1;
+pub const MAX_ROW_ID: u64 = (1 << ROW_ID_BIT_LEN) - 1;
 
 pub const DATA_KEY_START_BINARY: &[Byte] = {
     let dataKeyStart = (KEY_PREFIX_DATA as u64) << ROW_ID_BIT_LEN;
@@ -68,8 +69,8 @@ pub const KEY_TAG_KEY: Byte = 4;
 
 pub const POINTER_KEY_BYTE_LEN: usize = {
     mem::size_of::<u64>() + // keyPrefix 4bit + rowId 60bit
-        KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN +
-        KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN
+        KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // table/relation的key
+        KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN // 实际的data条目的key
 };
 
 #[macro_export]
@@ -82,7 +83,24 @@ macro_rules! key_prefix_add_row_id {
 #[macro_export]
 macro_rules! extract_row_id_from_key {
     ($key: expr) => {
-        ($key as u64) & meta::MAX_ROW_ID
+        (($key as u64) & meta::MAX_ROW_ID) as meta::RowId
+    };
+}
+
+#[macro_export]
+macro_rules! extract_prefix_from_key_1st_byte {
+    ($byte: expr) => {
+        ((($byte) >> meta::KEY_PREFIX_BIT_LEN) & meta::KEY_PREFIX_MAX) as meta::KeyPrefix
+    };
+}
+
+#[macro_export]
+macro_rules! extract_data_key_from_pointer_key_slice {
+    ($pointerKeySlice: expr) => {
+        {
+            let slice = &$pointerKeySlice[(meta::POINTER_KEY_BYTE_LEN - meta::DATA_KEY_BYTE_LEN)..meta::POINTER_KEY_BYTE_LEN];
+            byte_slice_to_u64!(slice) as meta::DataKey
+        }
     };
 }
 
