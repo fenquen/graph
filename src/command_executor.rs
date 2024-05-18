@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::CONFIG;
 use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, prefix_plus_plus,
-            key_prefix_add_row_id, suffix_plus_plus, throw, u64_to_byte_slice, extract_row_id_from_key};
+            key_prefix_add_row_id, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_key};
 use crate::meta::{Column, ColumnType, DataKey, KeyTag, RowId, Table, TableId, TableType};
 use crate::parser::{Command, Delete, Element, Insert, Link, Select, Update};
 use anyhow::Result;
@@ -108,7 +108,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         self.session.createColFamily(table.name.as_str())?;
 
         // todo 使用 u64的tableId 为key 完成
-        let key = u64_to_byte_slice!(table.tableId);
+        let key = u64_to_byte_array_reference!(table.tableId);
         let json = serde_json::to_string(&table)?;
         meta::STORE.meta.put(key, json.as_bytes())?;
 
@@ -131,7 +131,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         let rowDataBinary = self.generateInsertValuesBinary(&insert, &*table)?;
 
         let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
-        let key = u64_to_byte_slice!(key_prefix_add_row_id!(meta::KEY_PREFIX_DATA, rowId));
+        let key = u64_to_byte_array_reference!(key_prefix_add_row_id!(meta::KEY_PREFIX_DATA, rowId));
 
         let value = rowDataBinary.as_ref();
 
@@ -179,7 +179,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
         let relColFamily = self.session.getColFamily(&relationTable.name)?;
 
-        self.session.getCurrentTx()?.put_cf(&relColFamily, u64_to_byte_slice!(relDataKey),  rowDataBinary.as_ref())?;
+        self.session.getCurrentTx()?.put_cf(&relColFamily, u64_to_byte_array_reference!(relDataKey), rowDataBinary.as_ref())?;
 
         //--------------------------------------------------------------------
 
@@ -291,15 +291,15 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         #[derive(Debug)]
         struct SelectResult {
             srcName: String,
-            srcRowDatas: Vec<(DataPosition, RowData)>,
+            srcRowDatas: Vec<(DataKey, RowData)>,
             relationName: String,
             relationData: RowData,
             destName: String,
-            destRowDatas: Vec<(DataPosition, RowData)>,
+            destRowDatas: Vec<(DataKey, RowData)>,
         }
 
         // 给next轮用的
-        let mut destPositionsInPrevSelect: Option<Vec<DataPosition>> = Default::default();
+        let mut destPositionsInPrevSelect: Option<Vec<DataPosition>> = None;
 
         // 1个select对应Vec<SelectResult> 多个select对应Vec<Vec<SelectResult>>
         let mut selectResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectVec.len());
@@ -310,12 +310,13 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             let relationDatas: Vec<RowData> = {
                 let relation = self.getTableRefByName(select.relationName.as_ref().unwrap())?;
                 let relationDatas = self.scanSatisfiedRowsBinary(select.relationFliterExpr.as_ref(), relation.value(), true, select.relationColumnNames.as_ref())?;
-                relationDatas.into_iter().map(|tuple| tuple.1).collect()
+                relationDatas.into_iter().map(|(dataKey, rowData)| rowData).collect()
             };
 
             let mut selectResultVecInCurrentSelect = Vec::with_capacity(relationDatas.len());
 
-            let mut destPositionsInCurrentSelect = vec![];
+            // 融合了当前的select的relationDatas的全部的dest的dataKey
+            let mut destKeysInCurrentSelect = vec![];
 
             // 遍历当前的select的多个relation
             'loopRelationData:
@@ -326,8 +327,8 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                     continue;
                 }
 
-                // relation的dest表的name不符合
                 let destPointDesc = relationData.get(PointDesc::DEST).unwrap().asPointDesc()?;
+                // relation的dest表的name不符合
                 if destPointDesc.tableName != (*select.destName.as_ref().unwrap()) || destPointDesc.positions.is_empty() {
                     continue;
                 }
@@ -384,7 +385,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                 }
 
                 for destPosition in &destPointDesc.positions {
-                    destPositionsInCurrentSelect.push(*destPosition);
+                    destKeysInCurrentSelect.push(*destPosition);
                 }
 
                 selectResultVecInCurrentSelect.push(
@@ -401,15 +402,15 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
             destPositionsInPrevSelect = {
                 // 当前的relation select 的多个realtion对应dest全都是empty的
-                if destPositionsInCurrentSelect.is_empty() {
+                if destKeysInCurrentSelect.is_empty() {
                     break 'loopSelect;
                 }
 
                 // rust的这个去重有点不同只能去掉连续的重复的 故而需要先排序让重复的连续起来
-                destPositionsInCurrentSelect.sort();
-                destPositionsInCurrentSelect.dedup();
+                destKeysInCurrentSelect.sort();
+                destKeysInCurrentSelect.dedup();
 
-                Some(destPositionsInCurrentSelect)
+                Some(destKeysInCurrentSelect)
             };
 
             selectResultVecVec.push(selectResultVecInCurrentSelect);
@@ -476,10 +477,10 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         let columnFamily = self.session.getColFamily(&delete.tableName)?;
 
         // 遍历更改的xmax
-        for (dataPosition, _) in pairs {
+        for (dataKey, _) in pairs {
             // 要更改的是xmax 在xmin后边
             // 之前发现即使seek到了正确的位置,写入还是到末尾append的 原因是openOptions设置了append
-            self.session.getCurrentTx()?.delete_cf(&columnFamily, u64_to_byte_slice!(dataPosition))?;
+            self.session.getCurrentTx()?.delete_cf(&columnFamily, u64_to_byte_array_reference!(dataKey))?;
         }
 
         Ok(())
@@ -558,7 +559,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             }
 
             // todo 各个column的value都在1道使得update时候只能整体来弄太耦合了 后续设想能不能各个column保存到单独的key
-            let key = u64_to_byte_slice!(*rowId);
+            let key = u64_to_byte_array_reference!(*rowId);
 
             let destByteSlice = {
                 let mut destByteSlice = BytesMut::new();
@@ -594,7 +595,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
 
             for position in positions {
                 let rowBinary =
-                    match self.session.getCurrentTx()?.get_cf(&columnFamily, u64_to_byte_slice!(*position))? {
+                    match self.session.getCurrentTx()?.get_cf(&columnFamily, u64_to_byte_array_reference!(*position))? {
                         Some(rowBinary) => rowBinary,
                         None => continue,
                     };
@@ -618,7 +619,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
         // 对数据条目而不是pointer条目遍历
         // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
         let iterator =
-            self.session.getCurrentTx()?.prefix_iterator_cf(&columnFamily, u64_to_byte_slice!((meta::KEY_PREFIX_DATA as u64)  << meta::ROW_ID_BIT_LEN));
+            self.session.getCurrentTx()?.prefix_iterator_cf(&columnFamily, meta::DATA_KEY_START_BINARY);
 
         let satisfiedRows =
             if tableFilterExpr.is_some() || select {
@@ -653,7 +654,7 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
                     let startKeyInclude = byte_slice_to_u64!(startKeyBinInclude);
 
                     // end include
-                    rawIterator.seek_for_prev(u64_to_byte_slice!(((meta::KEY_PREFIX_DATA + 1) as u64)  << meta::ROW_ID_BIT_LEN));
+                    rawIterator.seek_for_prev(u64_to_byte_array_reference!(((meta::KEY_PREFIX_DATA + 1) as u64)  << meta::ROW_ID_BIT_LEN));
                     let endKeyBinInclude = rawIterator.key().unwrap();
                     let endKeyInclude = byte_slice_to_u64!(endKeyBinInclude);
 
@@ -821,7 +822,7 @@ mod test {
     use tokio::fs::OpenOptions;
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     use crate::graph_value::GraphValue;
-    use crate::{byte_slice_to_u64, global, meta, parser, u64_to_byte_slice};
+    use crate::{byte_slice_to_u64, global, meta, parser, u64_to_byte_array_reference};
     use crate::command_executor;
     use crate::parser::Command;
 
@@ -881,7 +882,7 @@ mod test {
 
     #[test]
     pub fn testU64Codec() {
-        let s = u64_to_byte_slice!(2147389121u64);
+        let s = u64_to_byte_array_reference!(2147389121u64);
 
         let s1 = u64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
         let aa = byte_slice_to_u64!(s);

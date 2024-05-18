@@ -5,7 +5,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, suffix_plus_plus, throw};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, suffix_plus_plus, throw, u64_to_byte_array_reference};
 use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
@@ -50,6 +50,11 @@ pub const KEY_PREFIX_POINTER: Byte = 0;
 
 pub const ROW_ID_BIT_LEN: usize = 64 - KEY_PREFIX_BIT_LEN;
 pub const MAX_ROW_ID: u64 = 1 << ROW_ID_BIT_LEN - 1;
+
+pub const DATA_KEY_START_BINARY: &[Byte] = {
+    let dataKeyStart = (KEY_PREFIX_DATA as u64) << ROW_ID_BIT_LEN;
+    u64_to_byte_array_reference!(dataKeyStart)
+};
 
 // tag 用到POINTER前缀的key上的1Byte
 pub type KeyTag = Byte;

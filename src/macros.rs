@@ -65,7 +65,7 @@ macro_rules! file_goto_end {
 }
 
 #[macro_export]
-macro_rules! u64_to_byte_slice {
+macro_rules! u64_to_byte_array_reference {
     ($u64: expr) => {
         &[
             ($u64 >> 56) as u8,
@@ -75,7 +75,7 @@ macro_rules! u64_to_byte_slice {
             ($u64 >> 24) as u8,
             ($u64 >> 16) as u8,
             ($u64 >> 8) as u8,
-            $u64 as u8 ][..]
+            $u64 as u8 ]
     };
 }
 

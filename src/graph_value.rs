@@ -9,6 +9,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::ser::SerializeMap;
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::global::{Byte, DataPosition};
+use crate::meta::DataKey;
 
 #[derive(Deserialize, Debug, Clone)]
 pub enum GraphValue {
@@ -347,7 +348,7 @@ impl GraphValue {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PointDesc {
     pub tableName: String,
-    pub positions: Vec<DataPosition>,
+    pub positions: Vec<DataKey>,
 }
 
 impl PointDesc {
