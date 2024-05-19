@@ -1,6 +1,5 @@
 use std::error::Error;
 
-
 #[macro_export]
 macro_rules! throw {
     ($a:expr) => {

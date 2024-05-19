@@ -6,7 +6,6 @@ use crate::graph_value::GraphValue;
 use crate::parser::{Element, MathCmpOp, Op, SqlOp};
 use crate::throw;
 
-// todo 需要能知道expr是不是含有需要实际rowData再能的Pending
 // 碰到"(" 下钻递归,返回后落地到上级的left right
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Expr {
@@ -57,6 +56,7 @@ impl Expr {
         }
     }
 
+    // todo 需要能知道expr是不是含有需要实际rowData再能的Pending 完成
     /// expr的计算得到成果是不是需要实际rowData的参加
     pub fn needAcutalRowData(&self) -> bool {
         match self {

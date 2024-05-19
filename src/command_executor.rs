@@ -6,7 +6,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::CONFIG;
-use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_key, key_prefix_add_row_id, extract_prefix_from_key_1st_byte, extract_data_key_from_pointer_key_slice, utils};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta,
+            prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_key,
+            key_prefix_add_row_id, extract_prefix_from_key_1st_byte, extract_data_key_from_pointer_key_slice, utils};
 use crate::meta::{Column, ColumnType, DataKey, KeyTag, RowId, Table, TableId, TableType};
 use crate::parser::{Command, Delete, Element, Insert, Link, Select, Update};
 use anyhow::Result;
@@ -18,6 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufR
 use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use rocksdb::{AsColumnFamilyRef, DBRawIterator, DBRawIteratorWithThreadMode, IteratorMode, OptimisticTransactionDB, Options, Transaction};
+use strum_macros::Display;
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::expr::Expr;
 use crate::global::{Byte};
@@ -38,6 +41,13 @@ macro_rules! JSON_ENUM_UNTAGGED {
     };
 }
 
+#[derive(Debug, Display)]
+pub enum ExecutionResult {
+    SelectResult(Vec<Value>),
+    DmlResult,
+    DdlResult,
+}
+
 pub struct CommandExecutor<'sessionLife, 'db> where 'db: 'sessionLife {
     pub session: &'sessionLife Session<'db>,
 }
@@ -51,7 +61,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
 
     pub async fn execute(&self, commands: &mut [Command]) -> Result<()> {
         for command in commands {
-            match command {
+            let executionResult = match command {
                 Command::CreateTable(table) => {
                     let table = Table {
                         name: table.name.clone(),
@@ -62,26 +72,30 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
                         createIfNotExist: table.createIfNotExist,
                     };
 
-                    self.createTable(table).await?;
+                    self.createTable(table).await?
                 }
                 Command::Insert(insertValues) => self.insert(insertValues).await?,
                 Command::Select(select) => self.select(select).await?,
                 Command::Link(link) => self.link(link).await?,
                 Command::Delete(delete) => self.delete(delete).await?,
                 Command::Update(update) => self.update(update)?,
+            };
+
+            if let ExecutionResult::SelectResult(values) = executionResult {
+                println!("{}\n", serde_json::to_string(&values)?);
             }
         }
 
         Ok(())
     }
 
-    async fn createTable(&self, mut table: Table) -> Result<()> {
+    async fn createTable(&self, mut table: Table) -> Result<ExecutionResult> {
         if meta::TABLE_NAME_TABLE.contains_key(table.name.as_str()) {
             if table.createIfNotExist == false {
                 throw!(&format!("table/relation: {} already exist", table.name))
             }
 
-            return Ok(());
+            return Ok(ExecutionResult::DdlResult);
         }
 
         table.tableId = meta::TABLE_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
@@ -97,11 +111,11 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         // map
         meta::TABLE_NAME_TABLE.insert(table.name.to_string(), table);
 
-        Ok(())
+        Ok(ExecutionResult::DdlResult)
     }
 
     // todo insert时候value的排布要和创建表的时候column的顺序对应 完成
-    async fn insert(&self, insert: &mut Insert) -> Result<()> {
+    async fn insert(&self, insert: &mut Insert) -> Result<ExecutionResult> {
         // 对应的表是不是exist
         let table = self.getTableRefByName(&insert.tableName)?;
 
@@ -120,12 +134,12 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
 
         self.session.getCurrentTx()?.put_cf(&columnFamily, key, value)?;
 
-        Ok(())
+        Ok(ExecutionResult::DmlResult)
     }
 
     /// 它本质是向relation对应的data file写入
     /// 两个元素之间的relation只看种类不看里边的属性的
-    async fn link(&self, link: &Link) -> Result<()> {
+    async fn link(&self, link: &Link) -> Result<ExecutionResult> {
         // 得到3个表的对象
         let srcTable = self.getTableRefByName(link.srcTableName.as_str())?;
         let destTable = self.getTableRefByName(link.destTableName.as_str())?;
@@ -134,13 +148,13 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         let srcSatisfiedVec = self.scanSatisfiedRowsBinary(link.srcTableFilterExpr.as_ref(), srcTable.value(), false, None)?;
         // src 空的 link 不成立
         if srcSatisfiedVec.is_empty() {
-            return Ok(());
+            return Ok(ExecutionResult::DmlResult);
         }
 
         let destSatisfiedVec = self.scanSatisfiedRowsBinary(link.destTableFilterExpr.as_ref(), destTable.value(), false, None)?;
         // dest 空的 link 不成立
         if destSatisfiedVec.is_empty() {
-            return Ok(());
+            return Ok(ExecutionResult::DmlResult);
         }
 
         // 用insetValues套路
@@ -251,21 +265,23 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             }
         }
 
-        Ok(())
+        Ok(ExecutionResult::DmlResult)
     }
 
     /// 如果不是含有relation的select 便是普通的select
-    async fn select(&self, selectVec: &[Select]) -> Result<()> {
+    async fn select(&self, selectVec: &[Select]) -> Result<ExecutionResult> {
         // 普通模式不含有relation
         if selectVec.len() == 1 && selectVec[0].relationName.is_none() {
             let select = &selectVec[0];
             let srcTable = self.getTableRefByName(select.srcTableName.as_str())?;
 
-            let rows = self.scanSatisfiedRowsBinary(select.srcFilterExpr.as_ref(), srcTable.value(), true, select.srcColumnNames.as_ref())?;
-            let rows: Vec<RowData> = rows.into_iter().map(|tuple| tuple.1).collect();
-            JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
+            let rowDatas = self.scanSatisfiedRowsBinary(select.srcFilterExpr.as_ref(), srcTable.value(), true, select.srcColumnNames.as_ref())?;
+            let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(dataKey, rowData)| rowData).collect();
 
-            return Ok(());
+            let values: Vec<Value> = JSON_ENUM_UNTAGGED!(rowDatas.into_iter().map(|rowData| serde_json::to_value(&rowData).unwrap()).collect());
+            // JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
+
+            return Ok(ExecutionResult::SelectResult(values));
         }
 
         // 对应1个realtion的query的多个条目的1个
@@ -470,13 +486,13 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         }
 
         let valueVec = JSON_ENUM_UNTAGGED!(handleResult(selectResultVecVec));
-        println!("{}", serde_json::to_string(&valueVec)?);
+        //println!("{}", serde_json::to_string(&valueVec)?);
 
-        Ok(())
+        Ok(ExecutionResult::SelectResult(valueVec))
     }
 
     /// 得到满足expr的record 然后把它的xmax变为当前的txId
-    async fn delete(&self, delete: &Delete) -> Result<()> {
+    async fn delete(&self, delete: &Delete) -> Result<ExecutionResult> {
         let pairs = {
             let table = self.getTableRefByName(delete.tableName.as_str())?;
             self.scanSatisfiedRowsBinary(delete.filterExpr.as_ref(), table.value(), true, None)?
@@ -491,10 +507,10 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             self.session.getCurrentTx()?.delete_cf(&columnFamily, u64_to_byte_array_reference!(dataKey))?;
         }
 
-        Ok(())
+        Ok(ExecutionResult::DmlResult)
     }
 
-    fn update(&self, update: &Update) -> Result<()> {
+    fn update(&self, update: &Update) -> Result<ExecutionResult> {
         let table = self.getTableRefByName(update.tableName.as_str())?;
 
         if let TableType::Relation = table.type0 {
@@ -584,7 +600,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             self.session.getCurrentTx()?.put_cf(&columnFamily, key, value)?;
         }
 
-        Ok(())
+        Ok(ExecutionResult::DmlResult)
     }
 
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
@@ -788,7 +804,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             }
         }
 
-        // todo insert时候需要各column全都insert 后续要能支持 null的 GraphValue
+        // todo insert时候需要各column全都insert 后续要能支持 null的 GraphValue 完成
         // 确保column数量和value数量相同
         if insert.columnNames.len() != insert.columnExprs.len() {
             throw!("column count does not match value count");
