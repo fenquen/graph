@@ -36,7 +36,7 @@ ubuntu 20.04 with linux kernal 5.15
 ## 创建普通表 create table
 
 ```sql
-create table user (id integer,name string);insert into user values (1,'tom');
+create table user (id integer,name string null);insert into user values (1,'tom');
 create table car (id integer,color string);insert into car values (34,'red');insert into car values (43,'red');
 create table tyre (id integer, name string);insert into tyre values(7,'stone');
 ```

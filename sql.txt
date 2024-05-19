@@ -27,4 +27,4 @@
 --select user(id=1 and 0=0)
 
 --create table if not exist user (id integer,name string null);insert into user (id) values (1)
-select user(id=1 and 0=0)
+--select user(id=1 and 0=0)
