@@ -36,9 +36,9 @@ ubuntu 20.04 with linux kernal 5.15
 ## 创建普通表 create table
 
 ```sql
-create table user (id integer,name string null);insert into user values (1,'tom');
-create table car (id integer,color string);insert into car values (34,'red');insert into car values (43,'red');
-create table tyre (id integer, name string);insert into tyre values(7,'stone');
+create table user if not exist (id integer,name string null);
+create table car if not exist (id integer,color string);
+create table tyre if not exist (id integer, name string);
 ```
 
 ## 创建关系 create relation
@@ -55,6 +55,8 @@ insert into user values (1,'tom');
 
 insert into car values (34,'red');
 insert into car values (43,'red');
+
+insert into tyre values(7,'stone');
 ```
 
 ## 使用关系(relation)连接普通表上的数据
