@@ -6,9 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::CONFIG;
-use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta,
-            prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_key,
-            key_prefix_add_row_id, extract_prefix_from_key_1st_byte, extract_data_key_from_pointer_key_slice};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_key, key_prefix_add_row_id, extract_prefix_from_key_1st_byte, extract_data_key_from_pointer_key_slice, utils};
 use crate::meta::{Column, ColumnType, DataKey, KeyTag, RowId, Table, TableId, TableType};
 use crate::parser::{Command, Delete, Element, Insert, Link, Select, Update};
 use anyhow::Result;
@@ -51,7 +49,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         }
     }
 
-    pub async fn execute(&self, commands: &[Command]) -> Result<()> {
+    pub async fn execute(&self, commands: &mut [Command]) -> Result<()> {
         for command in commands {
             match command {
                 Command::CreateTable(table) => {
@@ -103,7 +101,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
     }
 
     // todo insert时候value的排布要和创建表的时候column的顺序对应 完成
-    async fn insert(&self, insert: &Insert) -> Result<()> {
+    async fn insert(&self, insert: &mut Insert) -> Result<()> {
         // 对应的表是不是exist
         let table = self.getTableRefByName(&insert.tableName)?;
 
@@ -112,7 +110,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             throw!(&format!("{} is a RELATION , can not use insert into on RELATION", insert.tableName));
         }
 
-        let rowDataBinary = self.generateInsertValuesBinary(&insert, &*table)?;
+        let rowDataBinary = self.generateInsertValuesBinary(insert, &*table)?;
         let value = rowDataBinary.as_ref();
 
         let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
@@ -146,7 +144,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         }
 
         // 用insetValues套路
-        let insertValues = Insert {
+        let mut insertValues = Insert {
             tableName: link.relationName.clone(),
             useExplicitColumnNames: true,
             columnNames: link.relationColumnNames.clone(),
@@ -158,7 +156,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         let relRowId: RowId = relationTable.rowIdCounter.fetch_add(1, Ordering::AcqRel);
         let relDataKey = key_prefix_add_row_id!(meta::KEY_PREFIX_DATA, relRowId);
 
-        let rowDataBinary = self.generateInsertValuesBinary(&insertValues, &*relationTable)?;
+        let rowDataBinary = self.generateInsertValuesBinary(&mut insertValues, &*relationTable)?;
 
         let relColFamily = self.session.getColFamily(&relationTable.name)?;
 
@@ -753,47 +751,76 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         Ok(table.unwrap())
     }
 
-    fn generateInsertValuesBinary(&self, insert: &Insert, table: &Table) -> Result<Bytes> {
-        let columns = {
-            let mut columns = Vec::new();
+    fn generateInsertValuesBinary(&self, insert: &mut Insert, table: &Table) -> Result<Bytes> {
+        // 要是未显式说明column的话还需要读取table的column
+        if insert.useExplicitColumnNames == false {
+            for column in &table.columns {
+                insert.columnNames.push(column.name.clone());
+            }
+        } else { // 如果显式说明columnName的话需要确保都是有的
+            for columnNameToInsert in &insert.columnNames {
+                let mut found = false;
 
-            // 要是未显式说明column的话还需要读取table的column
-            if insert.useExplicitColumnNames == false {
                 for column in &table.columns {
-                    columns.push(column);
-                }
-            } else { // 如果显式说明columnName的话需要确保都是有的
-                for columnNameToInsert in &insert.columnNames {
-                    let mut found = false;
-
-                    for column in &table.columns {
-                        if columnNameToInsert == &column.name {
-                            columns.push(column);
-                            found = true;
-                            break;
-                        }
+                    if columnNameToInsert == &column.name {
+                        found = true;
+                        break;
                     }
+                }
 
-                    if found == false {
-                        throw!(&format!("column {} does not defined", columnNameToInsert));
+                if found == false {
+                    throw!(&format!("column {} does not defined", columnNameToInsert));
+                }
+            }
+
+            // 说明column未写全 需要确认absent的是不是都是nullable
+            if insert.columnNames.len() != table.columns.len() {
+                let columnNames = insert.columnNames.clone();
+                let absentColumns: Vec<&Column> = collectionMinus0(&table.columns, &columnNames, |column, columnName| { &column.name == columnName });
+                for absentColumn in absentColumns {
+                    if absentColumn.nullable {
+                        insert.columnNames.push(absentColumn.name.clone());
+                        insert.columnExprs.push(Expr::Single(Element::Null));
+                    } else {
+                        throw!(&format!("table:{}, column:{} is not nullable", table.name, absentColumn.name));
+                    }
+                }
+            }
+        }
+
+        // todo insert时候需要各column全都insert 后续要能支持 null的 GraphValue
+        // 确保column数量和value数量相同
+        if insert.columnNames.len() != insert.columnExprs.len() {
+            throw!("column count does not match value count");
+        }
+
+        /// 取差集
+        fn collectionMinus<'a, T: Clone + PartialEq>(collectionA: &'a [T], collectionB: &'a [&'a T]) -> Vec<&'a T> {
+            collectionA.iter().filter(|u| !collectionB.contains(u)).collect::<Vec<&'a T>>()
+        }
+
+        fn collectionMinus0<'a, T, T0>(collectionT: &'a [T],
+                                       collectionT0: &'a [T0],
+                                       tEqT0: impl Fn(&T, &T0) -> bool) -> Vec<&'a T> where T: Clone + PartialEq,
+                                                                                            T0: Clone + PartialEq {
+            let mut a = vec![];
+
+            for t in collectionT {
+                for t0 in collectionT0 {
+                    if tEqT0(t, t0) == false {
+                        a.push(t);
                     }
                 }
             }
 
-            columns
-        };
-
-        // todo insert时候需要各column全都insert 后续要能支持 null的 GraphValue
-        // 确保column数量和value数量相同
-        if columns.len() != insert.columnExprs.len() || table.columns.len() != insert.columnExprs.len() {
-            throw!("column count does not match value count");
+            a
         }
 
         // todo 如果指明了要insert的column name的话 需要排序 符合表定义时候的column顺序 完成
         let destByteSlice = {
-            let mut columnName_columnExpr = HashMap::with_capacity(columns.len());
-            for (column, columnExpr) in columns.iter().zip(insert.columnExprs.iter()) {
-                columnName_columnExpr.insert(column.name.to_owned(), columnExpr);
+            let mut columnName_columnExpr = HashMap::with_capacity(insert.columnNames.len());
+            for (columnName, columnExpr) in insert.columnNames.iter().zip(insert.columnExprs.iter()) {
+                columnName_columnExpr.insert(columnName, columnExpr);
             }
 
             let mut destByteSlice = BytesMut::new();

@@ -2,7 +2,6 @@ use std::cell::Cell;
 use std::mem;
 use std::sync::{Arc};
 use std::sync::atomic::AtomicU64;
-use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use tokio::fs::File;
@@ -10,11 +9,6 @@ use tokio::sync::RwLock;
 use crate::graph_error::GraphError;
 use crate::meta;
 use crate::meta::Table;
-
-lazy_static! {
-    pub static ref TABLE_RECORD_FILE: ArcSwap<Option<RwLock<File>>> = ArcSwap::default();
-    pub static ref WAL_FILE: ArcSwap<Option<RwLock<File>>> = ArcSwap::default();
-}
 
 thread_local! {
     /// https://www.cnblogs.com/jiangbo4444/p/15932305.html <br>

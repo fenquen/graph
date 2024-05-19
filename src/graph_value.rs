@@ -7,6 +7,7 @@ use crate::{global, meta, throw};
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::ser::SerializeMap;
+use serde_json::Value;
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::global::{Byte};
 use crate::meta::DataKey;
@@ -19,6 +20,7 @@ pub enum GraphValue {
     Boolean(bool),
     Integer(i64),
     Decimal(f64),
+    Null,
     PointDesc(PointDesc),
 }
 
@@ -49,6 +51,7 @@ impl BinaryCodec for GraphValue {
             GraphValue::BOOLEAN => Ok(GraphValue::Boolean(srcByteSlice.bytes.get_u8() == 0)),
             GraphValue::INTEGER => Ok(GraphValue::Integer(srcByteSlice.bytes.get_i64())),
             GraphValue::DECIMAL => Ok(GraphValue::Decimal(srcByteSlice.bytes.get_f64())),
+            GraphValue::NULL => Ok(GraphValue::Null),
             _ => throw!(&format!("unknown type tag:{}",typeTag))
         }
     }
@@ -83,6 +86,7 @@ impl BinaryCodec for GraphValue {
                 destByteSlice.put_u32(jsonString.as_bytes().len() as u32);
                 destByteSlice.put_slice(jsonString.as_bytes());
             }
+            GraphValue::Null => destByteSlice.put_u8(GraphValue::NULL),
         }
         Ok(())
     }
@@ -98,7 +102,8 @@ impl Serialize for GraphValue {
                 GraphValue::Boolean(s) => s.serialize(serializer),
                 GraphValue::Integer(s) => s.serialize(serializer),
                 GraphValue::Decimal(s) => s.serialize(serializer),
-                GraphValue::PointDesc(s) => s.serialize(serializer)
+                GraphValue::PointDesc(s) => s.serialize(serializer),
+                GraphValue::Null => serializer.serialize_none(),
             }
         } else {
             let mut serialMap = serializer.serialize_map(Some(1))?;
@@ -127,6 +132,10 @@ impl Serialize for GraphValue {
                 GraphValue::PointDesc(s) => {
                     serialMap.serialize_key("PointDesc")?;
                     serialMap.serialize_value(s)?;
+                }
+                GraphValue::Null => {
+                    serialMap.serialize_key("Null")?;
+                    serialMap.serialize_value(&Value::Null)?;
                 }
             }
 
@@ -159,19 +168,33 @@ impl TryFrom<&Element> for GraphValue {
             Element::DecimalLiteral(decimal) => Ok(GraphValue::Decimal(*decimal)),
             Element::TextLiteral(columnName) => Ok(GraphValue::Pending(columnName.clone())),
             Element::PointDesc(pointDesc) => Ok(GraphValue::PointDesc(pointDesc.clone())),
+            Element::Null => Ok(GraphValue::Null),
             _ => throw!(&format!("element:{element:?} can not be transform to GraphValue")),
         }
     }
 }
 
+pub type GraphValueType = Byte;
+
 impl GraphValue {
     // 以下codec时候的type标识
-    pub const PENDING: Byte = 0;
-    pub const STRING: Byte = 1;
-    pub const BOOLEAN: Byte = 2;
-    pub const INTEGER: Byte = 3;
-    pub const DECIMAL: Byte = 4;
-    pub const POINT_DESC: Byte = 5;
+    pub const PENDING: GraphValueType = 0;
+    pub const STRING: GraphValueType = 1;
+    pub const BOOLEAN: GraphValueType = 2;
+    pub const INTEGER: GraphValueType = 3;
+    pub const DECIMAL: GraphValueType = 4;
+    pub const POINT_DESC: GraphValueType = 5;
+    pub const NULL: GraphValueType = 6;
+
+    pub fn getDefaultValue(graphValueType: GraphValueType) -> Result<GraphValue> {
+        match graphValueType {
+            GraphValue::STRING => Ok(GraphValue::String(global::EMPTY_STR.to_owned())),
+            GraphValue::BOOLEAN => Ok(GraphValue::Boolean(false)),
+            GraphValue::INTEGER => Ok(GraphValue::Integer(0)),
+            GraphValue::DECIMAL => Ok(GraphValue::Decimal(0.0)),
+            _ => throw!(&format!("unsupported graphValueType:{}", graphValueType))
+        }
+    }
 
     pub fn boolValue(&self) -> Result<bool> {
         if let GraphValue::Boolean(bool) = self {
@@ -354,4 +377,16 @@ pub struct PointDesc {
 impl PointDesc {
     pub const SRC: &'static str = "src";
     pub const DEST: &'static str = "dest";
+}
+
+#[cfg(test)]
+mod test {
+    use crate::global;
+    use crate::graph_value::GraphValue;
+    use crate::JSON_ENUM_UNTAGGED;
+
+    #[test]
+    pub fn testNull() {
+        JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&GraphValue::Null).unwrap()));
+    }
 }

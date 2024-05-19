@@ -1,6 +1,6 @@
 use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Display, Formatter, Pointer};
+use std::fmt::{Debug, Display, Formatter, Pointer, write};
 use std::str::FromStr;
 use crate::{global, prefix_plus_plus, suffix_minus_minus, suffix_plus_plus, throw};
 use anyhow::Result;
@@ -92,7 +92,7 @@ impl Parser {
             let mut advanceCount: usize = 1;
 
             // "insert   INTO TEST VALUES ( ',',1 )"
-            let currentChar = self.currentChar();
+            let currentChar = self.getCurrentChar();
             match currentChar {
                 // 空格如果不是文本内容的话不用记录抛弃
                 global::SPACE_CHAR => {
@@ -105,7 +105,7 @@ impl Parser {
                 }
                 global::单引号_CHAR => {
                     if self.whetherIn单引号() {
-                        match self.nextChar() {
+                        match self.peekNextChar() {
                             // 说明是末尾了,下边的文本结束是相同的 select a where name = 'a'
                             None => {
                                 self.collectPendingChars(&mut currentElementVec);
@@ -170,7 +170,7 @@ impl Parser {
                     } else {
                         let operatorString: String =
                             // 应对  "!=" ">=" "<=" 两个char的 目前的不容许有空格的
-                            if let Some(nextChar) = self.nextChar() {
+                            if let Some(nextChar) = self.peekNextChar() {
                                 match nextChar {
                                     global::等号_CHAR | global::小于_CHAR | global::大于_CHAR | global::感叹_CHAR => {
                                         advanceCount = 2;
@@ -198,7 +198,7 @@ impl Parser {
                         self.pendingChars.push(currentChar);
                     } else {
                         // 应对->
-                        let element = if currentChar == global::减号_CHAR && Some(global::大于_CHAR) == self.nextChar() {
+                        let element = if currentChar == global::减号_CHAR && Some(global::大于_CHAR) == self.peekNextChar() {
                             advanceCount = 2;
                             Element::To
                         } else {
@@ -208,8 +208,21 @@ impl Parser {
 
                         // 需要了断 pendingChars
                         self.collectPendingChars(&mut currentElementVec);
-
                         currentElementVec.push(element);
+                    }
+                }
+                // 应对null
+                'n' | 'N' => {
+                    if self.whetherIn单引号() {
+                        self.pendingChars.push(currentChar);
+                    } else {
+                        if self.tryPrefecthIgnoreCase(&vec!['U', 'L', 'L']) {
+                            // 需要了断 pendingChars
+                            self.collectPendingChars(&mut currentElementVec);
+                            currentElementVec.push(Element::Null);
+                        } else {
+                            self.pendingChars.push(currentChar);
+                        }
                     }
                 }
                 _ => self.pendingChars.push(currentChar),
@@ -235,7 +248,51 @@ impl Parser {
         Ok(())
     }
 
+    /// 要确保调用前还未涉入到要测试的range
+    fn tryPrefecthIgnoreCase(&mut self, targetChars: &[char]) -> bool {
+        let currentCharIndexCopy = self.currentCharIndex;
+
+        for targetChar in targetChars {
+            // 到了末尾
+            if self.advanceChar(1) {
+                break;
+            }
+
+            let currentChar = self.getCurrentChar();
+            let current = vec![currentChar].iter().collect::<String>().to_uppercase();
+
+            let target = vec![*targetChar].iter().collect::<String>().to_uppercase();
+
+            if current != target {
+                self.currentCharIndex = currentCharIndexCopy;
+                return false;
+            }
+        }
+
+        // 看看后边是不是还有粘连的 是不是只是某个长的textLiteral的前1部分
+        match self.peekNextChar() {
+            Some(nextChar) => {
+                match nextChar {
+                    // 说明是某个长的textLiteral的前1部分
+                    'a'..='z' => {
+                        self.currentCharIndex = currentCharIndexCopy;
+                        return false;
+                    }
+                    'A'..='Z' => {
+                        self.currentCharIndex = currentCharIndexCopy;
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+
+        true
+    }
+
     /// 要是会已到末尾以外 返回true
+    /// 和下边element体系不同 用光了的话index还是指向last元素的 还是不太优秀的
     fn advanceChar(&mut self, count: usize) -> bool {
         if self.currentCharIndex + count >= self.sql.len() {
             self.currentCharIndex = self.sql.len() - 1;
@@ -248,11 +305,13 @@ impl Parser {
         false
     }
 
-    fn currentChar(&self) -> char {
+    /// 和下边element体系不同 用光了的话index还是指向last元素的 还是不太优秀的
+    fn getCurrentChar(&self) -> char {
         self.chars[self.currentCharIndex]
     }
 
-    fn previousChar(&self) -> Option<char> {
+    /// peek而已不会变化currentCharIndex
+    fn peekPrevChar(&self) -> Option<char> {
         if self.currentCharIndex == 0 {
             None
         } else {
@@ -261,7 +320,7 @@ impl Parser {
     }
 
     /// peek而已不会变化currentCharIndex
-    fn nextChar(&self) -> Option<char> {
+    fn peekNextChar(&self) -> Option<char> {
         if self.currentCharIndex + 1 >= self.sql.len() {
             None
         } else {
@@ -397,6 +456,7 @@ impl Parser {
 
             commandVec.push(command);
 
+            // 到下个的elementVec
             if prefix_plus_plus!(self.currentElementVecIndex) >= self.elementVecVec.len() {
                 break;
             }
@@ -471,6 +531,13 @@ impl Parser {
                         ReadColumnState::ReadColumnType => {
                             column.type0 = text.as_str().parse()?;
                             readColumnState = ReadColumnState::ReadComplete;
+
+                            // 应对 null
+                            // 读取下个element
+                            if let Element::Null = self.getCurrentElement()? {
+                                self.skipElement(1)?;
+                                column.nullable = true;
+                            }
                         }
                         ReadColumnState::ReadComplete => {
                             match text.as_str() {
@@ -491,10 +558,11 @@ impl Parser {
                         }
                     }
                 }
-                _ => self.throwSyntaxErrorDetail("column name,column type can not be pure number")?,
+                _ => self.throwSyntaxErrorDetail("column name, column type can not be pure number")?,
             }
         }
 
+        println!("{:?}", table);
         Ok(Command::CreateTable(table))
     }
 
@@ -555,6 +623,7 @@ impl Parser {
             }
         }
 
+        println!("{:?}", insertValues);
         Ok(Command::Insert(insertValues))
     }
 
@@ -1382,7 +1451,7 @@ impl Parser {
     fn skipElement(&mut self, delta: i32) -> Result<()> {
         let currentElementVecLen = self.elementVecVec.get(self.currentElementVecIndex).unwrap().len();
 
-        if (self.currentElementIndex as i32 + delta) as usize >= self.elementVecVec.get(self.currentElementVecIndex).unwrap().len() {
+        if (self.currentElementIndex as i32 + delta) as usize >= currentElementVecLen {
             self.currentElementIndex = currentElementVecLen;
             self.throwSyntaxError()
         } else {
@@ -1433,6 +1502,7 @@ pub enum Element {
     To,
     /// parse时候用不到的 link用到
     PointDesc(PointDesc),
+    Null,
 }
 
 impl Element {
@@ -1498,6 +1568,7 @@ impl Display for Element {
             Element::Boolean(bool) => write!(f, "Boolean({})", bool),
             Element::Op(op) => write!(f, "Op({})", op),
             Element::To => write!(f, "To"),
+            Element::Null => write!(f, "Null"),
             _ => write!(f, "unknown")
         }
     }
@@ -1652,13 +1723,14 @@ mod test {
 
     #[test]
     pub fn testParseCreateTable() {
-        parser::parse("CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)").unwrap();
+        parser::parse("CREATE    TABLE    TEST   ( COLUMN1 string null  ,  COLUMN2 DECIMAL null)").unwrap();
     }
 
     #[test]
     pub fn testParseInsert() {
         // println!("{}", "".parse::<f64>().unwrap());
-        parser::parse("insert   INTO TEST VALUES ( 0  , ')')").unwrap();
+        //  parser::parse("insert   INTO TEST VALUES ( 0  , ')')").unwrap();
+        parser::parse("insert into user values (1,null)").unwrap();
     }
 
     #[test]

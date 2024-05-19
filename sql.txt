@@ -9,7 +9,7 @@
 
 --select user(id=1 and 0=0)
 --select user(id=1 and 0=0) -usage(number > 0) as usage0-> car
-select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre
+--select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre
 
 --delete from user(id=1)
 
@@ -22,3 +22,9 @@ select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -
 --select user(id=1 and 0=0)
 
 --create table if not exist user (id integer,name string)
+
+--create table if not exist user (id integer,name string null);insert into user values (1,null)
+--select user(id=1 and 0=0)
+
+--create table if not exist user (id integer,name string null);insert into user (id) values (1)
+select user(id=1 and 0=0)

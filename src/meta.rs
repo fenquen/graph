@@ -145,6 +145,13 @@ impl FromStr for TableType {
 pub struct Column {
     pub name: String,
     pub type0: ColumnType,
+    pub nullable: bool,
+}
+
+impl PartialEq for Column {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.type0 == other.type0
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize, PartialEq)]
@@ -170,6 +177,7 @@ impl ColumnType {
             (ColumnType::Integer, GraphValue::Integer(_)) => true,
             (ColumnType::Decimal, GraphValue::Decimal(_)) => true,
             (ColumnType::PointDesc, GraphValue::PointDesc(_)) => true,
+            (_, GraphValue::Null) => true,
             _ => false
         }
     }
