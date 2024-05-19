@@ -100,7 +100,6 @@ mod test {
 
             // let iterator = tx.iterator(IteratorMode::Start);
 
-
             tx.put_cf(&db.cf_handle("cf1").unwrap(), &[1][..], &[0][..]).unwrap();
             tx.commit().unwrap();
 

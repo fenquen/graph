@@ -39,12 +39,12 @@ macro_rules! JSON_ENUM_UNTAGGED {
     };
 }
 
-pub struct CommandExecutor<'sessionLife> {
-    pub session: &'sessionLife Session,
+pub struct CommandExecutor<'sessionLife, 'db> where 'db: 'sessionLife {
+    pub session: &'sessionLife Session<'db>,
 }
 
-impl<'sessionLife> CommandExecutor<'sessionLife> {
-    pub fn new(session: &'sessionLife Session) -> Self {
+impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
+    pub fn new(session: &'sessionLife Session<'db>) -> Self {
         CommandExecutor {
             session
         }
@@ -302,14 +302,11 @@ impl<'sessionLife> CommandExecutor<'sessionLife> {
             // 融合了当前的select的relationDatas的全部的dest的dataKey
             let mut destKeysInCurrentSelect = vec![];
 
-            let srcColFamily = self.session.getColFamily(&select.srcTableName)?;
             let srcTable = self.getTableRefByName(&select.srcTableName)?;
 
-            let destColFamily = self.session.getColFamily(select.destTableName.as_ref().unwrap())?;
             let destTable = self.getTableRefByName(select.destTableName.as_ref().unwrap())?;
 
             let relColFamily = self.session.getColFamily(select.relationName.as_ref().unwrap())?;
-            let rel = self.getTableRefByName(select.relationName.as_ref().unwrap())?;
 
             // 遍历当前的select的多个relation
             'loopRelationData:

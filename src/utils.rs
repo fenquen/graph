@@ -22,7 +22,7 @@ impl<T> TrickyContainer<T> {
     pub fn set(&self, t: T) {
         unsafe {
             if *self.used {
-                let old = ptr::replace(self.data, t);
+                let _old = ptr::replace(self.data, t);
             } else {
                 ptr::write(self.data, t);
                 ptr::write::<bool>(self.used, true);

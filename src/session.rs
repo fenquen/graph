@@ -7,12 +7,12 @@ use tokio::io::AsyncWriteExt;
 use crate::command_executor::CommandExecutor;
 use crate::parser::{Command, SqlOp};
 
-pub struct Session {
+pub struct Session<'db> {
     autoCommit: bool,
-    currentTx: Option<Transaction<'static, OptimisticTransactionDB>>,
+    currentTx: Option<Transaction<'db, OptimisticTransactionDB>>,
 }
 
-impl Session {
+impl<'db> Session<'db> {
     pub fn new() -> Self {
         Default::default()
     }
@@ -51,7 +51,7 @@ impl Session {
     }
 
     #[inline]
-    pub fn getCurrentTx(&self) -> Result<&Transaction<'static, OptimisticTransactionDB>> {
+    pub fn getCurrentTx(&self) -> Result<&Transaction<'db, OptimisticTransactionDB>> {
         match self.currentTx.as_ref() {
             Some(tx) => Ok(tx),
             None => throw!("not in a transaction")
@@ -70,7 +70,7 @@ impl Session {
     }
 }
 
-impl Default for Session {
+impl Default for Session<'_> {
     fn default() -> Self {
         Session {
             autoCommit: true,
