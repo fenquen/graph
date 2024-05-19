@@ -104,6 +104,6 @@ mod test {
         println!("{}", serde_json::to_string(&a).unwrap());
 
         // https://stackoverflow.com/questions/26611664/what-is-the-r-operator-in-rust
-        let a: Object = serde_json::from_str(r#"{"name":"a","next":{"name":"b","next":null}}"#).unwrap();
+        let a: Object = serde_json::from_str("").unwrap();
     }
 }

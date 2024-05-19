@@ -5,7 +5,7 @@
 ## 项目动机
 
 日常中使用的传统关系数据库在面对对象之间的关联关系的时候显得相当的力不从心,需要通过冗余的表关联join来达到效果,显然使用图数据是不错的解决方式<br>
-市面上相应的产品也有不少,例如neo4j、nebula等,不过还是想亲自下场实现
+市面上相应的产品也有不少,例如neo4j、nebula等,不过还是想亲自动手实现
 
 ## 交互方式
 
@@ -63,15 +63,21 @@ insert into tyre values(7,'stone');
 
 ```sql
 link user(id =1) to car(color='red') by usage(number = 12);
-link user(id =1) to car(id =43) by usage(number = 17);
 link car (id =34) to tyre(name ='stone') by own(number=1);
+link user(id =1) to car(id =43) by usage(number = 17);
+```
+
+## 撤销关系(developing)
+
+```sql
+unlink car (id =34) to tyre(name ='stone') by own(number=1);
 ```
 
 ## 查询
 
 ### 对普通表的查询 ordinary query
 
-```sql
+```text
 select user(id=1 and 0=0)
 ```
 
@@ -86,7 +92,7 @@ select user(id=1 and 0=0)
 
 ### 关系查询 relation query
 
-```sql
+```text
 select user(id=1 and 0=0) -usage(number > 0) as usage0-> car
 ```
 
@@ -133,8 +139,8 @@ select user(id=1 and 0=0) -usage(number > 0) as usage0-> car
 ]
 ```
 
-```sql
-select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre
+```text
+select user[id, name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre
 ```
 
 ```json
@@ -195,12 +201,12 @@ select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -
 
 ## 删除普通表的数据 delete
 
-```sql
+```text
 delete from user(id=1)
 ```
 
 ## 更新普通表的数据 update
 
-```sql
+```text
 update user[name ='tom0'](id=1)
 ```

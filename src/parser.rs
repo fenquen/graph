@@ -623,7 +623,6 @@ impl Parser {
             }
         }
 
-        println!("{:?}", insertValues);
         Ok(Command::Insert(insertValues))
     }
 
