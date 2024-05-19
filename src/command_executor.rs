@@ -28,6 +28,7 @@ use crate::session::Session;
 
 type RowData = HashMap<String, GraphValue>;
 
+#[macro_export]
 macro_rules! JSON_ENUM_UNTAGGED {
     ($expr: expr) => {
         {
