@@ -27,8 +27,8 @@ use crate::session::Session;
 pub async fn main() -> Result<()> {
     meta::init()?;
 
-    let tableRecordFile = OpenOptions::new().read(true).open("sql.txt").await?;
-    let bufReader = BufReader::new(tableRecordFile);
+    let sqlRecord = OpenOptions::new().read(true).open("sql.txt").await?;
+    let bufReader = BufReader::new(sqlRecord);
     let mut sqls = bufReader.lines();
 
     let mut session = Session::new();
