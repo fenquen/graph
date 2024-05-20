@@ -29,6 +29,7 @@ use crate::session::Session;
 
 type RowData = HashMap<String, GraphValue>;
 
+/// 到后台的sql可能是由多个小sql构成的 单个小select的sql对应个Vec<Value>
 pub type SelectResultToFront = Vec<Vec<Value>>;
 
 #[macro_export]
@@ -280,9 +281,8 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         // 普通模式不含有relation
         if selectVec.len() == 1 && selectVec[0].relationName.is_none() {
             let select = &selectVec[0];
-            println!("{}", "aaaaaaaaaaaaaaaaaaaaaaaa");
             let srcTable = self.getTableRefByName(select.srcTableName.as_str())?;
-            println!("{}", "bbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
             let rowDatas = self.scanSatisfiedRowsBinary(select.srcFilterExpr.as_ref(), srcTable.value(), true, select.srcColumnNames.as_ref())?;
             let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(dataKey, rowData)| rowData).collect();
 
@@ -770,7 +770,6 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
     fn getTableRefByName(&self, tableName: &str) -> Result<Ref<String, Table>> {
         let table = meta::TABLE_NAME_TABLE.get(tableName);
         if table.is_none() {
-            println!("dddddddddddddddddddddddddddddddd");
             throw!(&format!("table:{} not exist", tableName));
         }
         Ok(table.unwrap())

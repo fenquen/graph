@@ -6,10 +6,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 use anyhow::{anyhow, Result};
+use futures::Sink;
 
 use futures_channel::mpsc::{unbounded, UnboundedSender};
-use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
-use log::debug;
+use futures_util::{future, pin_mut, SinkExt, stream::TryStreamExt, StreamExt};
+use futures_util::stream::SplitSink;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use strum_macros::Display;
@@ -17,6 +18,7 @@ use strum_macros::Display;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_tungstenite::WebSocketStream;
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
 use crate::session::Session;
@@ -51,78 +53,83 @@ pub trait MessageExtGraph {
 
 async fn handleConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()> {
     let callback = |req: &Request, mut response: Response| {
-        debug!("received a new ws handshake");
-        debug!("the request's path is: {}", req.uri().path());
-        debug!("the request's headers are:");
+        log::debug!("received a new ws handshake");
+        log::debug!("the request's path is: {}", req.uri().path());
+        log::debug!("the request's headers are:");
         for (ref header, _value) in req.headers() {
-            debug!("* {}: {:?}", header, _value);
+            log::debug!("* {}: {:?}", header, _value);
         }
 
         let headers = response.headers_mut();
-        headers.append("MyCustomHeader", ":)".parse().unwrap());
+        headers.append("myCustomHeader", ":)".parse().unwrap());
 
         Ok(response)
     };
 
     let wsStream = tokio_tungstenite::accept_hdr_async(tcpStream, callback).await?;
-    println!("ws connection established from: {}", remoteAddr);
+    log::info!("ws connection established from: {}", remoteAddr);
 
+    let (mut writeStream, mut readStream) = wsStream.split();
 
-    let (writeStream, mut readStream) = wsStream.split();
+    let mut session = Session::new();
 
     loop {
         let readOption = readStream.next().await;
         if let None = readOption { // eof
-            continue;
+            break;
         }
 
         let readResult = readOption.unwrap();
         if let Err(e) = readResult {
-            println!("{}", anyhow::Error::msg(e));
+            log::info!("{:?}", anyhow::Error::new(e));
             break;
         }
 
         if let Message::Text(text) = readResult.unwrap() {
-            let deserialResult = serde_json::from_str::<GraphWsRequest>(&text);
-
-            if let Err(e) = deserialResult {
+            if let Err(e) = a(&mut writeStream, &text, &mut session).await {
                 // 使用debug会同时打印message和stack
-                println!("{:?}", anyhow::Error::new(GraphError::new(&e.to_string())));
-                continue;
+                log::info!("{:?}",e);
+            }
+        }
+
+        async fn a(writeStream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+                   text: &str,
+                   session: &mut Session<'_>) -> Result<()> {
+            let deserialResult = serde_json::from_str::<GraphWsRequest>(text);
+            if let Err(e) = deserialResult {
+                return Err(anyhow::Error::new(GraphError::new(&e.to_string())));
             }
 
             let graphWsRequest = deserialResult.unwrap();
             match graphWsRequest.requestType {
                 RequestType::ExecuteSql => {
                     if let None = graphWsRequest.sql {
-                        continue;
+                        return Ok(());
                     }
 
                     let sql = graphWsRequest.sql.unwrap();
-
                     if sql.is_empty() || sql.starts_with("--") {
-                        continue;
+                        return Ok(());
                     }
 
-                    let mut session = Session::new();
+                    let selectResultToFront = session.executeSql(&sql)?;
 
-                    match session.executeSql(&sql) {
-                        Ok(selectResultToFront) => {
-                            let a = serde_json::to_string(&selectResultToFront)?;
-                        }
-                        Err(error) => println!("{:?}",error),
-                    }
+                    // 如果sql是只有单个的小sql的话,那么[[]] 可以变为 []
+                    let json = if selectResultToFront.len() == 1 {
+                        serde_json::to_string(&selectResultToFront[0])?
+                    } else {
+                        serde_json::to_string(&selectResultToFront)?
+                    };
+
+                    writeStream.send(Message::Text(json)).await?;
                 }
             }
+
+            Ok(())
         }
     }
 
-    // let readSend = readStream.try_for_each(|message| {
-    //   println!("received a message from {}: {}", remoteAddr, message.to_text()?);
-    // future::ok(())
-    //});
-
-    println!("{} disconnected", &remoteAddr);
+    log::info!("ws client:{} disconnected", &remoteAddr);
 
     Ok(())
 }

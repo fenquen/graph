@@ -33,7 +33,13 @@ impl<'db> Session<'db> {
     }
 
     fn executeCommands(&mut self, commands: &mut [Command]) -> Result<SelectResultToFront> {
-        self.currentTx = Some(meta::STORE.data.transaction());
+        if self.autoCommit {
+            self.currentTx = Some(meta::STORE.data.transaction());
+        } else {
+            if self.currentTx.is_none() {
+                throw!("manaul commit mode, but not in a transaction")
+            }
+        }
 
         let commandExecutor = CommandExecutor::new(self);
         let selectResultToFront = commandExecutor.execute(commands)?;
