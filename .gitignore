@@ -18,3 +18,4 @@ data
 meta
 
 .DS_Store
+*.log

@@ -9,7 +9,31 @@
 
 ## 交互方式
 
-使用websocket(开发中),这样可以同时支持传统后台应用和web前端
+使用websocket,可以同时支持传统后台应用和web前端直连
+
+### 请求格式
+
+websocket text messge 传递 json 
+
+```json
+{
+  "requestType": "ExecuteSql",
+  "sql": "select user"
+}
+```
+
+### 返回格式
+
+websocket text message 传递 json
+
+```json
+[
+  {
+    "id": 0,
+    "name": "denny"
+  }
+]
+```
 
 ## 开发测试环境
 
