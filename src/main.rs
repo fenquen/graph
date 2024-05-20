@@ -14,6 +14,7 @@ mod graph_value;
 mod session;
 mod codec;
 mod utils;
+mod ws;
 
 use std::string::ToString;
 use anyhow::Result;
@@ -27,19 +28,31 @@ use crate::session::Session;
 pub async fn main() -> Result<()> {
     meta::init()?;
 
-    let sqlRecord = OpenOptions::new().read(true).open("sql.txt").await?;
-    let bufReader = BufReader::new(sqlRecord);
-    let mut sqls = bufReader.lines();
-
-    let mut session = Session::new();
-
-    while let Some(sql) = sqls.next_line().await? {
-        if sql.starts_with("--") {
-            continue;
-        }
-
-        session.executeSql(sql.as_str()).await?;
-    }
+    ws::init().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use tokio::fs::OpenOptions;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use crate::session::Session;
+
+    #[tokio::test]
+    pub async fn manauallyExecuteSql() {
+        let sqlRecord = OpenOptions::new().read(true).open("sql.txt").await?;
+        let bufReader = BufReader::new(sqlRecord);
+        let mut sqls = bufReader.lines();
+
+        let mut session = Session::new();
+
+        while let Some(sql) = sqls.next_line().await? {
+            if sql.starts_with("--") {
+                continue;
+            }
+
+            session.executeSql(sql.as_str()).await?;
+        }
+    }
 }

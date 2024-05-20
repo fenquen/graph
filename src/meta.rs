@@ -61,9 +61,13 @@ pub const DATA_KEY_START_BINARY: &[Byte] = {
 pub type KeyTag = Byte;
 
 pub const KEY_TAG_BYTE_LEN: usize = 1;
+/// node 下游rel的tableId
 pub const KEY_TAG_UPSTREAM_REL_ID: Byte = 0;
+/// node 上游rel的tableId
 pub const KEY_TAG_DOWNSTREAM_REL_ID: Byte = 1;
+/// rel 的srcNode的tableId
 pub const KEY_TAG_SRC_TABLE_ID: Byte = 2;
+/// rel的destNode的tableId
 pub const KEY_TAG_DEST_TABLE_ID: Byte = 3;
 pub const KEY_TAG_KEY: Byte = 4;
 

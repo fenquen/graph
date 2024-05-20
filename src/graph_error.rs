@@ -26,4 +26,5 @@ impl GraphError {
     }
 }
 
+
 impl Error for GraphError {}

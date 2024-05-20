@@ -29,6 +29,8 @@ use crate::session::Session;
 
 type RowData = HashMap<String, GraphValue>;
 
+pub type SelectResultToFront = Vec<Vec<Value>>;
+
 #[macro_export]
 macro_rules! JSON_ENUM_UNTAGGED {
     ($expr: expr) => {
@@ -42,7 +44,7 @@ macro_rules! JSON_ENUM_UNTAGGED {
 }
 
 #[derive(Debug, Display)]
-pub enum ExecutionResult {
+pub enum CommandExecResult {
     SelectResult(Vec<Value>),
     DmlResult,
     DdlResult,
@@ -59,7 +61,10 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         }
     }
 
-    pub async fn execute(&self, commands: &mut [Command]) -> Result<()> {
+    pub fn execute(&self, commands: &mut [Command]) -> Result<SelectResultToFront> {
+        // 单个的command可能得到单个Vec<Value>
+        let mut valueVecVec = Vec::with_capacity(commands.len());
+
         for command in commands {
             let executionResult = match command {
                 Command::CreateTable(table) => {
@@ -72,30 +77,32 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
                         createIfNotExist: table.createIfNotExist,
                     };
 
-                    self.createTable(table).await?
+                    self.createTable(table)?
                 }
-                Command::Insert(insertValues) => self.insert(insertValues).await?,
-                Command::Select(select) => self.select(select).await?,
-                Command::Link(link) => self.link(link).await?,
-                Command::Delete(delete) => self.delete(delete).await?,
+                Command::Insert(insertValues) => self.insert(insertValues)?,
+                Command::Select(select) => self.select(select)?,
+                Command::Link(link) => self.link(link)?,
+                Command::Delete(delete) => self.delete(delete)?,
                 Command::Update(update) => self.update(update)?,
             };
 
-            if let ExecutionResult::SelectResult(values) = executionResult {
+            // 如何应对多个的select
+            if let CommandExecResult::SelectResult(values) = executionResult {
                 println!("{}\n", serde_json::to_string(&values)?);
+                valueVecVec.push(values);
             }
         }
 
-        Ok(())
+        Ok(valueVecVec)
     }
 
-    async fn createTable(&self, mut table: Table) -> Result<ExecutionResult> {
+    fn createTable(&self, mut table: Table) -> Result<CommandExecResult> {
         if meta::TABLE_NAME_TABLE.contains_key(table.name.as_str()) {
             if table.createIfNotExist == false {
                 throw!(&format!("table/relation: {} already exist", table.name))
             }
 
-            return Ok(ExecutionResult::DdlResult);
+            return Ok(CommandExecResult::DdlResult);
         }
 
         table.tableId = meta::TABLE_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
@@ -111,11 +118,11 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         // map
         meta::TABLE_NAME_TABLE.insert(table.name.to_string(), table);
 
-        Ok(ExecutionResult::DdlResult)
+        Ok(CommandExecResult::DdlResult)
     }
 
     // todo insert时候value的排布要和创建表的时候column的顺序对应 完成
-    async fn insert(&self, insert: &mut Insert) -> Result<ExecutionResult> {
+    fn insert(&self, insert: &mut Insert) -> Result<CommandExecResult> {
         // 对应的表是不是exist
         let table = self.getTableRefByName(&insert.tableName)?;
 
@@ -134,12 +141,12 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
 
         self.session.getCurrentTx()?.put_cf(&columnFamily, key, value)?;
 
-        Ok(ExecutionResult::DmlResult)
+        Ok(CommandExecResult::DmlResult)
     }
 
     /// 它本质是向relation对应的data file写入
     /// 两个元素之间的relation只看种类不看里边的属性的
-    async fn link(&self, link: &Link) -> Result<ExecutionResult> {
+    fn link(&self, link: &Link) -> Result<CommandExecResult> {
         // 得到3个表的对象
         let srcTable = self.getTableRefByName(link.srcTableName.as_str())?;
         let destTable = self.getTableRefByName(link.destTableName.as_str())?;
@@ -148,13 +155,13 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         let srcSatisfiedVec = self.scanSatisfiedRowsBinary(link.srcTableFilterExpr.as_ref(), srcTable.value(), false, None)?;
         // src 空的 link 不成立
         if srcSatisfiedVec.is_empty() {
-            return Ok(ExecutionResult::DmlResult);
+            return Ok(CommandExecResult::DmlResult);
         }
 
         let destSatisfiedVec = self.scanSatisfiedRowsBinary(link.destTableFilterExpr.as_ref(), destTable.value(), false, None)?;
         // dest 空的 link 不成立
         if destSatisfiedVec.is_empty() {
-            return Ok(ExecutionResult::DmlResult);
+            return Ok(CommandExecResult::DmlResult);
         }
 
         // 用insetValues套路
@@ -265,23 +272,24 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             }
         }
 
-        Ok(ExecutionResult::DmlResult)
+        Ok(CommandExecResult::DmlResult)
     }
 
     /// 如果不是含有relation的select 便是普通的select
-    async fn select(&self, selectVec: &[Select]) -> Result<ExecutionResult> {
+    fn select(&self, selectVec: &[Select]) -> Result<CommandExecResult> {
         // 普通模式不含有relation
         if selectVec.len() == 1 && selectVec[0].relationName.is_none() {
             let select = &selectVec[0];
+            println!("{}", "aaaaaaaaaaaaaaaaaaaaaaaa");
             let srcTable = self.getTableRefByName(select.srcTableName.as_str())?;
-
+            println!("{}", "bbbbbbbbbbbbbbbbbbbbbbbbbbb");
             let rowDatas = self.scanSatisfiedRowsBinary(select.srcFilterExpr.as_ref(), srcTable.value(), true, select.srcColumnNames.as_ref())?;
             let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(dataKey, rowData)| rowData).collect();
 
             let values: Vec<Value> = JSON_ENUM_UNTAGGED!(rowDatas.into_iter().map(|rowData| serde_json::to_value(&rowData).unwrap()).collect());
             // JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
 
-            return Ok(ExecutionResult::SelectResult(values));
+            return Ok(CommandExecResult::SelectResult(values));
         }
 
         // 对应1个realtion的query的多个条目的1个
@@ -488,11 +496,11 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         let valueVec = JSON_ENUM_UNTAGGED!(handleResult(selectResultVecVec));
         //println!("{}", serde_json::to_string(&valueVec)?);
 
-        Ok(ExecutionResult::SelectResult(valueVec))
+        Ok(CommandExecResult::SelectResult(valueVec))
     }
 
     /// 得到满足expr的record 然后把它的xmax变为当前的txId
-    async fn delete(&self, delete: &Delete) -> Result<ExecutionResult> {
+    fn delete(&self, delete: &Delete) -> Result<CommandExecResult> {
         let pairs = {
             let table = self.getTableRefByName(delete.tableName.as_str())?;
             self.scanSatisfiedRowsBinary(delete.filterExpr.as_ref(), table.value(), true, None)?
@@ -507,10 +515,10 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             self.session.getCurrentTx()?.delete_cf(&columnFamily, u64_to_byte_array_reference!(dataKey))?;
         }
 
-        Ok(ExecutionResult::DmlResult)
+        Ok(CommandExecResult::DmlResult)
     }
 
-    fn update(&self, update: &Update) -> Result<ExecutionResult> {
+    fn update(&self, update: &Update) -> Result<CommandExecResult> {
         let table = self.getTableRefByName(update.tableName.as_str())?;
 
         if let TableType::Relation = table.type0 {
@@ -600,7 +608,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             self.session.getCurrentTx()?.put_cf(&columnFamily, key, value)?;
         }
 
-        Ok(ExecutionResult::DmlResult)
+        Ok(CommandExecResult::DmlResult)
     }
 
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
@@ -762,6 +770,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
     fn getTableRefByName(&self, tableName: &str) -> Result<Ref<String, Table>> {
         let table = meta::TABLE_NAME_TABLE.get(tableName);
         if table.is_none() {
+            println!("dddddddddddddddddddddddddddddddd");
             throw!(&format!("table:{} not exist", tableName));
         }
         Ok(table.unwrap())

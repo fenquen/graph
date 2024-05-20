@@ -4,7 +4,7 @@ use crate::{command_executor, global, meta, parser, throw};
 use anyhow::Result;
 use rocksdb::{BoundColumnFamily, OptimisticTransactionDB, Options, Transaction};
 use tokio::io::AsyncWriteExt;
-use crate::command_executor::CommandExecutor;
+use crate::command_executor::{CommandExecutor, SelectResultToFront};
 use crate::parser::{Command, SqlOp};
 
 pub struct Session<'db> {
@@ -22,30 +22,30 @@ impl<'db> Session<'db> {
     }
 
     /// 如果是autoCommit 该调用是个tx 可能传递的&str包含了多个独立的sql
-    pub async fn executeSql(&mut self, sql: &str) -> Result<()> {
+    pub fn executeSql(&mut self, sql: &str) -> Result<SelectResultToFront> {
         let mut commands = parser::parse(sql)?;
 
         if commands.is_empty() {
-            return Ok(());
+            return Ok(vec![]);
         }
 
-        self.executeCommands(&mut commands).await
+        self.executeCommands(&mut commands)
     }
 
-    async fn executeCommands(&mut self, commands: &mut [Command]) -> Result<()> {
+    fn executeCommands(&mut self, commands: &mut [Command]) -> Result<SelectResultToFront> {
         self.currentTx = Some(meta::STORE.data.transaction());
 
         let commandExecutor = CommandExecutor::new(self);
-        commandExecutor.execute(commands).await?;
+        let selectResultToFront = commandExecutor.execute(commands)?;
 
         if self.autoCommit {
             self.currentTx.take().unwrap().commit()?;
         }
 
-        Ok(())
+        Ok(selectResultToFront)
     }
 
-    pub async fn commit(&mut self) -> Result<()> {
+    pub fn commit(&mut self) -> Result<()> {
         self.currentTx.take().unwrap().commit()?;
         Ok(())
     }
