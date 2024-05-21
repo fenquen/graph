@@ -1,10 +1,5 @@
-use std::{
-    collections::HashMap,
-    env,
-    io::Error as IoError,
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, env, fmt, io::Error as IoError, net::SocketAddr, sync::{Arc, Mutex}};
+use std::fmt::{Display, Formatter};
 use anyhow::{anyhow, Result};
 use futures::Sink;
 
@@ -13,17 +8,17 @@ use futures_util::{future, pin_mut, SinkExt, stream::TryStreamExt, StreamExt};
 use futures_util::stream::SplitSink;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use strum_macros::Display;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::WebSocketStream;
+use crate::command_executor::SelectResultToFront;
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
 use crate::session::Session;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct GraphWsRequest {
     pub requestType: RequestType,
     pub sql: Option<String>,
@@ -34,24 +29,64 @@ impl GraphWsRequest {}
 #[derive(Serialize, Deserialize)]
 // #[serde(untagged)] // 如果使用的话 对应的json变为null
 pub enum RequestType {
-    ExecuteSql
+    ExecuteSql,
+    Begin,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct GraphWsResponse {
+    success: bool,
+    errorMsg: Option<String>,
+    data: Option<SelectResultToFront>,
+}
+
+impl GraphWsResponse {
+    pub fn success() -> GraphWsResponse {
+        GraphWsResponse {
+            success: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn fail(errorMsg: &impl ToString) -> GraphWsResponse {
+        GraphWsResponse {
+            errorMsg: Some(errorMsg.to_string()),
+            ..Default::default()
+        }
+    }
+
+    pub fn successWithData(data: SelectResultToFront) -> GraphWsResponse {
+        GraphWsResponse {
+            success: true,
+            errorMsg: None,
+            data: Some(data),
+        }
+    }
+}
+
+impl Display for GraphWsResponse {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match serde_json::to_string(self) {
+            Ok(s) => write!(f, "{}", s),
+            Err(e) => {
+                log::info!("{:?}",e);
+                Err(fmt::Error)
+            }
+        }
+    }
 }
 
 pub async fn init() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:9673").await?;
 
     while let Ok((tcpStream, remoteAddr)) = listener.accept().await {
-        tokio::spawn(handleConn(tcpStream, remoteAddr));
+        tokio::spawn(processConn(tcpStream, remoteAddr));
     }
 
     Ok(())
 }
 
-pub trait MessageExtGraph {
-    fn readText(&self);
-}
-
-async fn handleConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()> {
+async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()> {
     let callback = |req: &Request, mut response: Response| {
         log::debug!("received a new ws handshake");
         log::debug!("the request's path is: {}", req.uri().path());
@@ -86,15 +121,15 @@ async fn handleConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()> 
         }
 
         if let Message::Text(text) = readResult.unwrap() {
-            if let Err(e) = a(&mut writeStream, &text, &mut session).await {
+            if let Err(e) = processGraphWsRequest(&mut writeStream, &text, &mut session).await {
                 // 使用debug会同时打印message和stack
                 log::info!("{:?}",e);
             }
         }
 
-        async fn a(writeStream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
-                   text: &str,
-                   session: &mut Session<'_>) -> Result<()> {
+        async fn processGraphWsRequest(writeStream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+                                       text: &str,
+                                       session: &mut Session<'_>) -> Result<()> {
             let deserialResult = serde_json::from_str::<GraphWsRequest>(text);
             if let Err(e) = deserialResult {
                 return Err(anyhow::Error::new(GraphError::new(&e.to_string())));
@@ -114,15 +149,9 @@ async fn handleConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()> 
 
                     let selectResultToFront = session.executeSql(&sql)?;
 
-                    // 如果sql是只有单个的小sql的话,那么[[]] 可以变为 []
-                    let json = if selectResultToFront.len() == 1 {
-                        serde_json::to_string(&selectResultToFront[0])?
-                    } else {
-                        serde_json::to_string(&selectResultToFront)?
-                    };
-
-                    writeStream.send(Message::Text(json)).await?;
+                    writeStream.send(Message::Text(GraphWsResponse::successWithData(selectResultToFront).to_string())).await?;
                 }
+                _ => {}
             }
 
             Ok(())
@@ -138,7 +167,7 @@ async fn handleConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()> 
 mod test {
     use crate::graph_error::GraphError;
     use crate::graph_value::GraphValue;
-    use crate::ws::{GraphWsRequest, RequestType};
+    use crate::ws::{GraphWsRequest, GraphWsResponse, RequestType};
     use anyhow::Result;
 
     #[test]

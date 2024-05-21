@@ -55,7 +55,7 @@ mod test {
                 continue;
             }
 
-            session.executeSql(sql.as_str()).await?;
+            session.executeSql(sql.as_str())?;
         }
     }
 }
