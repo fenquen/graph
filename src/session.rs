@@ -17,8 +17,18 @@ impl<'db> Session<'db> {
         Default::default()
     }
 
-    pub fn setAutoCommit(&mut self, autoCommit: bool) {
-        self.autoCommit = autoCommit;
+    pub fn begin(&mut self) -> Result<()> {
+        if self.autoCommit {
+            return Ok(());
+        }
+
+        if self.currentTx.is_some() {
+            throw!("manaual commit mode, you have not commit");
+        }
+
+        self.currentTx = Some(meta::STORE.data.transaction());
+
+        Ok(())
     }
 
     /// 如果是autoCommit 该调用是个tx 可能传递的&str包含了多个独立的sql
@@ -29,10 +39,6 @@ impl<'db> Session<'db> {
             return Ok(vec![]);
         }
 
-        self.executeCommands(&mut commands)
-    }
-
-    fn executeCommands(&mut self, commands: &mut [Command]) -> Result<SelectResultToFront> {
         if self.autoCommit {
             self.currentTx = Some(meta::STORE.data.transaction());
         } else {
@@ -41,8 +47,7 @@ impl<'db> Session<'db> {
             }
         }
 
-        let commandExecutor = CommandExecutor::new(self);
-        let selectResultToFront = commandExecutor.execute(commands)?;
+        let selectResultToFront = self.executeCommands(&mut commands)?;
 
         if self.autoCommit {
             self.currentTx.take().unwrap().commit()?;
@@ -51,9 +56,25 @@ impl<'db> Session<'db> {
         Ok(selectResultToFront)
     }
 
+    fn executeCommands(&mut self, commands: &mut [Command]) -> Result<SelectResultToFront> {
+        let commandExecutor = CommandExecutor::new(self);
+        commandExecutor.execute(commands)
+    }
+
     pub fn commit(&mut self) -> Result<()> {
-        self.currentTx.take().unwrap().commit()?;
+        if self.autoCommit == false {
+            if self.currentTx.is_none() {
+                throw!("manaul commit mode, but not in a transaction")
+            }
+
+            self.currentTx.take().unwrap().commit()?;
+        }
+
         Ok(())
+    }
+
+    pub fn setAutoCommit(&mut self, autoCommit: bool) {
+        self.autoCommit = autoCommit;
     }
 
     #[inline]
