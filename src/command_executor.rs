@@ -10,7 +10,7 @@ use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta,
             prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_key,
             key_prefix_add_row_id, extract_prefix_from_key_1st_byte, extract_data_key_from_pointer_key_slice, utils};
 use crate::meta::{Column, ColumnType, DataKey, KeyTag, RowId, Table, TableId, TableType};
-use crate::parser::{Command, Delete, Element, Insert, Link, Select, Update};
+use crate::parser::{Command, Delete, Element, Insert, Link, Select, Unlink, UnlinkLinkStyle, UnlinkSelfStyle, Update};
 use anyhow::Result;
 use dashmap::mapref::one::{Ref, RefMut};
 use serde::{Deserialize, Serialize, Serializer};
@@ -85,6 +85,8 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
                 Command::Link(link) => self.link(link)?,
                 Command::Delete(delete) => self.delete(delete)?,
                 Command::Update(update) => self.update(update)?,
+                Command::Unlink(unlink) => self.unlink(unlink)?,
+                _ => throw!(&format!("unsupported command {:?}", command)),
             };
 
             // 如何应对多个的select
@@ -145,6 +147,31 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         Ok(CommandExecResult::DmlResult)
     }
 
+    fn unlink(&self, unlink: &Unlink) -> Result<CommandExecResult> {
+        match unlink {
+            Unlink::LinkStyle(unlinkLinkStyle) => self.unlinkLinkStyle(unlinkLinkStyle),
+            Unlink::SelfStyle(unlinkSelfStyle) => self.unlinkSelfStyle(unlinkSelfStyle),
+        }
+    }
+
+    fn unlinkLinkStyle(&self, unlinkLinkStyle: &UnlinkLinkStyle) -> Result<CommandExecResult> {
+        // 通过rel得到src 干掉朝向rel的pointer key
+        // 通过rel得到dest 干掉指向rel的pointer key
+
+        let relation = self.getTableRefByName(&unlinkLinkStyle.relationName)?;
+
+        // 得到rel 干掉指向src和dest的pointer key
+        let relStatisfiedRowDatas = self.scanSatisfiedRowsBinary(unlinkLinkStyle.relationFilterExpr.as_ref(), relation.value(), true, None)?;
+        for (relDataKey, _) in relStatisfiedRowDatas {}
+
+
+        Ok(CommandExecResult::DmlResult)
+    }
+
+    fn unlinkSelfStyle(&self, unlinkSelfStyle: &UnlinkSelfStyle) -> Result<CommandExecResult> {
+        Ok(CommandExecResult::DmlResult)
+    }
+
     /// 它本质是向relation对应的data file写入
     /// 两个元素之间的relation只看种类不看里边的属性的
     fn link(&self, link: &Link) -> Result<CommandExecResult> {
@@ -189,25 +216,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         let srcColFamily = self.session.getColFamily(&srcTable.name)?;
         let destColFamily = self.session.getColFamily(&destTable.name)?;
 
-        let mut buffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
-
-        fn write2Buffer(buffer: &mut BytesMut,
-                        selfDatakey: DataKey,
-                        keyTag: KeyTag, tableId: TableId, dataKey: DataKey) {
-            buffer.clear();
-
-            let rowId = extract_row_id_from_key!(selfDatakey);
-            let key = key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, rowId);
-            buffer.put_u64(key);
-
-            // 写relation的tableId
-            buffer.put_u8(keyTag);
-            buffer.put_u64(tableId);
-
-            // 写realation的rowId
-            buffer.put_u8(meta::KEY_TAG_KEY);
-            buffer.put_u64(dataKey);
-        }
+        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
 
         // 对src来说
         // key + rel的tableId + rel的key
@@ -216,13 +225,13 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             // 尚未设置过滤条件 得到的是全部的
             if srcSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for srcDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    write2Buffer(&mut buffer, srcDataKey, meta::KEY_TAG_DOWNSTREAM_REL_ID, relationTable.tableId, relDataKey);
-                    self.session.getCurrentTx()?.put_cf(&srcColFamily, buffer.as_ref(), &[])?;
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, srcDataKey, meta::KEY_TAG_DOWNSTREAM_REL_ID, relationTable.tableId, relDataKey);
+                    self.session.getCurrentTx()?.put_cf(&srcColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             } else {
                 for (srcDataKey, _) in &srcSatisfiedVec {
-                    write2Buffer(&mut buffer, *srcDataKey, meta::KEY_TAG_DOWNSTREAM_REL_ID, relationTable.tableId, relDataKey);
-                    self.session.getCurrentTx()?.put_cf(&srcColFamily, buffer.as_ref(), &[])?;
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, *srcDataKey, meta::KEY_TAG_DOWNSTREAM_REL_ID, relationTable.tableId, relDataKey);
+                    self.session.getCurrentTx()?.put_cf(&srcColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             }
         }
@@ -234,25 +243,25 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             // 尚未设置过滤条件 得到的是全部的
             if srcSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for srcDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    write2Buffer(&mut buffer, relDataKey, meta::KEY_TAG_SRC_TABLE_ID, srcTable.tableId, srcDataKey);
-                    self.session.getCurrentTx()?.put_cf(&relColFamily, buffer.as_ref(), &[])?;
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, relDataKey, meta::KEY_TAG_SRC_TABLE_ID, srcTable.tableId, srcDataKey);
+                    self.session.getCurrentTx()?.put_cf(&relColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             } else {
                 for (srcDataKey, _) in &srcSatisfiedVec {
-                    write2Buffer(&mut buffer, relDataKey, meta::KEY_TAG_SRC_TABLE_ID, srcTable.tableId, *srcDataKey);
-                    self.session.getCurrentTx()?.put_cf(&relColFamily, buffer.as_ref(), &[])?;
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, relDataKey, meta::KEY_TAG_SRC_TABLE_ID, srcTable.tableId, *srcDataKey);
+                    self.session.getCurrentTx()?.put_cf(&relColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             }
 
             if destSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for destDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    write2Buffer(&mut buffer, relDataKey, meta::KEY_TAG_DEST_TABLE_ID, destTable.tableId, destDataKey);
-                    self.session.getCurrentTx()?.put_cf(&relColFamily, buffer.as_ref(), &[])?;
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, relDataKey, meta::KEY_TAG_DEST_TABLE_ID, destTable.tableId, destDataKey);
+                    self.session.getCurrentTx()?.put_cf(&relColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             } else {
                 for (destDataKey, _) in &destSatisfiedVec {
-                    write2Buffer(&mut buffer, relDataKey, meta::KEY_TAG_DEST_TABLE_ID, destTable.tableId, *destDataKey);
-                    self.session.getCurrentTx()?.put_cf(&relColFamily, buffer.as_ref(), &[])?;
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, relDataKey, meta::KEY_TAG_DEST_TABLE_ID, destTable.tableId, *destDataKey);
+                    self.session.getCurrentTx()?.put_cf(&relColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             }
         }
@@ -262,13 +271,13 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         {
             if destSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for destDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    write2Buffer(&mut buffer, destDataKey, meta::KEY_TAG_UPSTREAM_REL_ID, relationTable.tableId, relDataKey);
-                    self.session.getCurrentTx()?.put_cf(&destColFamily, buffer.as_ref(), &[])?;
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, destDataKey, meta::KEY_TAG_UPSTREAM_REL_ID, relationTable.tableId, relDataKey);
+                    self.session.getCurrentTx()?.put_cf(&destColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             } else {
                 for (destDataKey, _) in &destSatisfiedVec {
-                    write2Buffer(&mut buffer, *destDataKey, meta::KEY_TAG_UPSTREAM_REL_ID, relationTable.tableId, relDataKey);
-                    self.session.getCurrentTx()?.put_cf(&destColFamily, buffer.as_ref(), &[])?;
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, *destDataKey, meta::KEY_TAG_UPSTREAM_REL_ID, relationTable.tableId, relDataKey);
+                    self.session.getCurrentTx()?.put_cf(&destColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             }
         }
@@ -611,6 +620,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         Ok(CommandExecResult::DmlResult)
     }
 
+
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
     fn getRowDatasByDataKeys(&self,
                              dataKeys: &[DataKey],
@@ -649,7 +659,6 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         let columnFamily = self.session.getColFamily(&table.name)?;
 
         // 对数据条目而不是pointer条目遍历
-        // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
         let iterator =
             self.session.getCurrentTx()?.prefix_iterator_cf(&columnFamily, meta::DATA_KEY_START_BINARY);
 
@@ -660,6 +669,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
                 for iterResult in iterator {
                     let (key, vaule) = iterResult?;
 
+                    // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
                     // 前4个bit的值是不是 KEY_PREFIX_DATA
                     if extract_prefix_from_key_1st_byte!(key[0]) != meta::KEY_PREFIX_DATA {
                         break;
@@ -676,6 +686,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
 
                 satisfiedRows
             } else { // 说明是link 且尚未写filterExpr
+                //
                 let mut rawIterator: DBRawIteratorWithThreadMode<Transaction<OptimisticTransactionDB>> = iterator.into();
 
                 if rawIterator.valid() == false {
@@ -887,6 +898,24 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         }
 
         Ok(keys)
+    }
+
+    fn write2PointerKeyBuffer(&self, buffer: &mut BytesMut,
+                              selfDatakey: DataKey,
+                              keyTag: KeyTag, tableId: TableId, dataKey: DataKey) {
+        buffer.clear();
+
+        let rowId = extract_row_id_from_key!(selfDatakey);
+
+        buffer.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, rowId));
+
+        // 写relation的tableId
+        buffer.put_u8(keyTag);
+        buffer.put_u64(tableId);
+
+        // 写realation的rowId
+        buffer.put_u8(meta::KEY_TAG_KEY);
+        buffer.put_u64(dataKey);
     }
 }
 

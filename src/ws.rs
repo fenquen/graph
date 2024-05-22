@@ -14,6 +14,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::WebSocketStream;
 use crate::command_executor::SelectResultToFront;
+use crate::config;
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
 use crate::session::Session;
@@ -77,7 +78,7 @@ impl Display for GraphWsResponse {
 }
 
 pub async fn init() -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:9673").await?;
+    let listener = TcpListener::bind(config::CONFIG.wsAddr.as_str()).await?;
 
     while let Ok((tcpStream, remoteAddr)) = listener.accept().await {
         tokio::spawn(processConn(tcpStream, remoteAddr));
