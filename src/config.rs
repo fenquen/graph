@@ -15,6 +15,7 @@ lazy_static! {
 pub struct Config {
     pub log4RsYamlPath: String,
     pub metaDir: String,
+    pub wsAddr: String,
     pub dataDir: String,
 }
 
@@ -23,6 +24,7 @@ impl Default for Config {
         Config {
             log4RsYamlPath: "log4rs.yaml".to_string(),
             metaDir: "meta".to_string(),
+            wsAddr: "127.0.0.1:9673".to_string(),
             dataDir: "data".to_string(),
         }
     }

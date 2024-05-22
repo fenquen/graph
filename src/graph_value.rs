@@ -222,7 +222,7 @@ impl GraphValue {
     }
 
     /// 目前对不兼容的type之间的大小比较返回false
-    pub fn calcOneToOne(&self, op: Op, rightValue: &GraphValue) -> Result<GraphValue> {
+    fn calcOneToOne(&self, op: Op, rightValue: &GraphValue) -> Result<GraphValue> {
         match op {
             Op::MathCmpOp(mathCmpOp) => {
                 match mathCmpOp {
@@ -245,6 +245,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 == &(*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float == float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 == &(*integer as f64))),
+                            (GraphValue::Null, GraphValue::Null) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -355,7 +356,7 @@ impl GraphValue {
         }
     }
 
-    pub fn calcIn(&self, rightValues: &[GraphValue]) -> Result<GraphValue> {
+    fn calcIn(&self, rightValues: &[GraphValue]) -> Result<GraphValue> {
         for rightValue in rightValues {
             let calcResult = self.calcOneToOne(Op::MathCmpOp(MathCmpOp::Equal), rightValue)?;
             if calcResult.boolValue()? == false {

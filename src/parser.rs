@@ -40,6 +40,7 @@ pub enum Command {
     Update(Update),
     Select(Vec<Select>),
     Delete(Delete),
+    Unlink(Unlink),
 }
 
 #[derive(Default)]
@@ -447,12 +448,15 @@ impl Parser {
             let command = match self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str() {
                 "CREATE" => self.parseCreate()?,
                 "INSERT" => self.parseInsert()?,
-                "LINK" => self.parseLink()?,
+                "LINK" => self.parseLink(false)?,
                 "DELETE" => self.parseDelete()?,
                 "UPDATE" => self.parseUpdate()?,
                 "SELECT" => self.parseSelect()?,
+                "UNLINK" => self.parseUnlink()?,
                 _ => self.throwSyntaxError()?,
             };
+
+            println!("{:?}", command);
 
             commandVec.push(command);
 
@@ -562,7 +566,6 @@ impl Parser {
             }
         }
 
-        println!("{:?}", table);
         Ok(Command::CreateTable(table))
     }
 
@@ -627,7 +630,7 @@ impl Parser {
     }
 
     // link user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13)
-    fn parseLink(&mut self) -> Result<Command> {
+    fn parseLink(&mut self, regardLastPartAsFilter: bool) -> Result<Command> {
         let mut link = Link::default();
 
         #[derive(Clone, Copy)]
@@ -676,99 +679,219 @@ impl Parser {
 
         link.relationName = self.getCurrentElementAdvance()?.expectTextLiteral("relation name")?;
 
-        // 下边要解析 by usage (a=0,a=(1212+0))的后边的括号部分了
-        // 和parseInExprs使用相同的套路,当(数量和)数量相同的时候说明收敛结束了,因为会以")"收尾
-        let mut 括号数量 = 0;
-        let mut 括号1数量 = 0;
-        if let Some(currentElement) = self.getCurrentElementAdvanceOption() {
-            currentElement.expectTextLiteralContent(global::圆括号_STR)?;
-            suffix_plus_plus!(括号数量);
-        } else { // 未写link的value
-            return Ok(Command::Link(link));
-        }
+        if regardLastPartAsFilter {
+            let nextElement = self.getCurrentElementOption();
+            if nextElement.is_none() {
+                return Ok(Command::Link(link));
+            }
+            let nextElement = nextElement.unwrap();
 
-        #[derive(Clone, Copy)]
-        enum ParseState {
-            ParseColumnName,
-            ParseEqual,
-            ParseColumnExpr,
-        }
+            nextElement.expectTextLiteralContent(global::圆括号_STR)?;
 
-        let mut parseState = ParseState::ParseColumnName;
-        let mut exprElementVec = Default::default();
-        loop {
-            let currentElement =
-                match self.getCurrentElementAdvanceOption() {
-                    Some(currentElement) => currentElement,
-                    None => break,
-                };
+            link.relationFilterExpr = Some(self.parseExpr(false)?);
+        } else {
 
-            match (parseState, currentElement) {
-                (ParseState::ParseColumnName, Element::TextLiteral(columnName)) => {
-                    link.relationColumnNames.push(columnName.to_string());
-                    parseState = ParseState::ParseEqual;
-                }
-                (ParseState::ParseEqual, Element::Op(Op::MathCmpOp(MathCmpOp::Equal))) => {
-                    parseState = ParseState::ParseColumnExpr;
-                }
-                (ParseState::ParseColumnExpr, currentElement) => {
-                    // 说明右半部分的expr结束了
-                    if currentElement.expectTextLiteralContentBool(global::逗号_STR) {
-                        let mut parser = Parser::default();
-                        parser.elementVecVec.push(exprElementVec);
-                        link.relationColumnExprs.push(parser.parseExpr(false)?);
-                        exprElementVec = Default::default();
+            // 下边要解析 by usage (a=0,a=(1212+0))的后边的括号部分了
+            // 和parseInExprs使用相同的套路,当(数量和)数量相同的时候说明收敛结束了,因为会以")"收尾
+            let mut 括号数量 = 0;
+            let mut 括号1数量 = 0;
+            if let Some(currentElement) = self.getCurrentElementAdvanceOption() {
+                currentElement.expectTextLiteralContent(global::圆括号_STR)?;
+                suffix_plus_plus!(括号数量);
+            } else { // 未写link的value
+                return Ok(Command::Link(link));
+            }
 
-                        // 到下轮的parseColumnName
-                        parseState = ParseState::ParseColumnName;
-                        continue;
+            #[derive(Clone, Copy)]
+            enum ParseState {
+                ParseColumnName,
+                ParseEqual,
+                ParseColumnExpr,
+            }
+
+            let mut parseState = ParseState::ParseColumnName;
+            let mut exprElementVec = Default::default();
+            loop {
+                let currentElement =
+                    match self.getCurrentElementAdvanceOption() {
+                        Some(currentElement) => currentElement,
+                        None => break,
+                    };
+
+                match (parseState, currentElement) {
+                    (ParseState::ParseColumnName, Element::TextLiteral(columnName)) => {
+                        link.relationColumnNames.push(columnName.to_string());
+                        parseState = ParseState::ParseEqual;
                     }
-
-                    if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
-                        suffix_plus_plus!(括号数量);
-                    } else if currentElement.expectTextLiteralContentBool(global::圆括号1_STR) {
-                        suffix_plus_plus!(括号1数量);
-
-                        // 说明到了last的)
-                        if 括号数量 == 括号1数量 {
+                    (ParseState::ParseEqual, Element::Op(Op::MathCmpOp(MathCmpOp::Equal))) => {
+                        parseState = ParseState::ParseColumnExpr;
+                    }
+                    (ParseState::ParseColumnExpr, currentElement) => {
+                        // 说明右半部分的expr结束了
+                        if currentElement.expectTextLiteralContentBool(global::逗号_STR) {
                             let mut parser = Parser::default();
                             parser.elementVecVec.push(exprElementVec);
                             link.relationColumnExprs.push(parser.parseExpr(false)?);
                             exprElementVec = Default::default();
-                            break;
-                        }
-                    }
 
-                    exprElementVec.push(currentElement.clone());
+                            // 到下轮的parseColumnName
+                            parseState = ParseState::ParseColumnName;
+                            continue;
+                        }
+
+                        if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
+                            suffix_plus_plus!(括号数量);
+                        } else if currentElement.expectTextLiteralContentBool(global::圆括号1_STR) {
+                            suffix_plus_plus!(括号1数量);
+
+                            // 说明到了last的)
+                            if 括号数量 == 括号1数量 {
+                                let mut parser = Parser::default();
+                                parser.elementVecVec.push(exprElementVec);
+                                link.relationColumnExprs.push(parser.parseExpr(false)?);
+                                exprElementVec = Default::default();
+                                break;
+                            }
+                        }
+
+                        exprElementVec.push(currentElement.clone());
+                    }
+                    _ => self.throwSyntaxError()?,
                 }
-                _ => self.throwSyntaxError()?,
+            }
+
+            // relation的name和value数量要相同
+            if link.relationColumnNames.len() != link.relationColumnExprs.len() {
+                self.throwSyntaxErrorDetail("relation name count does not match value count")?;
             }
         }
 
-        // relation的name和value数量要相同
-        if link.relationColumnNames.len() != link.relationColumnExprs.len() {
-            self.throwSyntaxErrorDetail("relation name count does not match value count")?;
+        Ok(Command::Link(link))
+    }
+
+    /// unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13) <br>
+    /// unlink user(id >1 ) as start by usage (number = 7) ,as end by own(number =7)
+    fn parseUnlink(&mut self) -> Result<Command> {
+        // 尝试先用link的套路parse
+        if let Ok(Command::Link(link)) = self.parseLink(true) {
+            return Ok(Command::Unlink(Unlink::LinkStyle(link)));
         }
 
-        println!("{:?}", link);
+        let mut unlinkSelfStyle = UnlinkSelfStyle::default();
 
-        Ok(Command::Link(link))
+        // 说明不是link的书写模式,重置index
+        self.currentElementIndex = 0;
+
+        // 跳过打头的unlink
+        self.getCurrentElementAdvance()?;
+
+        enum State {
+            ReadEndPointName,
+            ReadEndPointFilterExpr,
+
+            ReadEndPointType,
+            ReadRelName,
+            ReadRelFilterExpr,
+        }
+
+        let mut state = State::ReadEndPointName;
+
+        // 循环1趟的小loop 单单读取 tableName table的filter
+        loop {
+            let currentElement = self.getCurrentElementAdvanceOption();
+            if let None = currentElement {
+                return Ok(Command::Unlink(Unlink::SelfStyle(unlinkSelfStyle)));
+            }
+            let currentElement = currentElement.unwrap().clone();
+
+            match state {
+                State::ReadEndPointName => {
+                    unlinkSelfStyle.tableName = currentElement.expectTextLiteral("need a node name")?;
+                    state = State::ReadEndPointFilterExpr;
+                }
+                State::ReadEndPointFilterExpr => {
+                    if currentElement.expectTextLiteralContentIgnoreCaseBool(global::圆括号_STR) {
+                        self.skipElement(-1)?;
+                        unlinkSelfStyle.tableFilterExpr = Some(self.parseExpr(false)?);
+                    }
+
+                    state = State::ReadEndPointType;
+                    break;
+                }
+                _ => panic!("impossible")
+            }
+        }
+
+
+        // 读取1个relDesc的小loop
+        loop {
+            let relDesc = {
+                let mut relDesc = RelDesc::default();
+
+                loop {
+                    let currentElement = self.getCurrentElementAdvanceOption();
+                    if let None = currentElement {
+                        return Ok(Command::Unlink(Unlink::SelfStyle(unlinkSelfStyle)));
+                    }
+                    let currentElement = currentElement.unwrap().clone();
+
+                    match state {
+                        State::ReadEndPointType => {
+                            // as start by
+                            if currentElement.expectTextLiteralContentBool("as") {
+                                let nextElement = self.getCurrentElementAdvance()?;
+                                let s = nextElement.expectTextLiteral(global::EMPTY_STR)?;
+                                relDesc.endPointType = EndPointType::from_str(s.as_str())?;
+                            }
+
+                            // 读取by
+                            self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("by", "by should before relation name")?;
+
+                            state = State::ReadRelName;
+                        }
+                        State::ReadRelName => {
+                            relDesc.relationName = currentElement.expectTextLiteral("need a relation name")?;
+                            state = State::ReadRelFilterExpr;
+                        }
+                        State::ReadRelFilterExpr => {
+                            if currentElement.expectTextLiteralContentIgnoreCaseBool(global::圆括号_STR) {
+                                self.skipElement(-1)?;
+                                relDesc.relationFliterExpr = Some(self.parseExpr(false)?);
+                            }
+
+                            if let Some(element) = self.getCurrentElementAdvanceOption() {
+                                // start a new round
+                                if global::逗号_STR == element.expectTextLiteral(global::EMPTY_STR)? {
+                                    state = State::ReadEndPointType;
+                                } else {
+                                    self.throwSyntaxErrorDetail("need comma after a relation desc")?;
+                                }
+                            }
+
+                            break;
+                        }
+                        _ => panic!("impossible"),
+                    }
+                }
+
+                relDesc
+            };
+
+            unlinkSelfStyle.relDescVec.push(relDesc);
+        }
     }
 
     /// delete from user(a=1)
     fn parseDelete(&mut self) -> Result<Command> {
         self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("from", "delete should followed by from")?;
 
-        let tableName = self.getCurrentElementAdvance()?.expectTextLiteral("expect a table after from")?;
+        let mut delete = Delete::default();
 
-        let expr = self.parseExpr(false)?;
+        delete.tableName = self.getCurrentElementAdvance()?.expectTextLiteral("expect a table after from")?;
 
-        let delete = Delete {
-            tableName,
-            filterExpr: Some(expr),
-        };
-
-        println!("{delete:?}\n");
+        if self.getCurrentElementOption().is_some() {
+            delete.filterExpr = Some(self.parseExpr(false)?);
+        }
 
         Ok(Command::Delete(delete))
     }
@@ -853,9 +976,9 @@ impl Parser {
         }
 
         // 读取表的过滤expr
-        update.filterExpr = Some(self.parseExpr(false)?);
-
-        println!("{update:?}");
+        if self.getCurrentElementOption().is_some() {
+            update.filterExpr = Some(self.parseExpr(false)?);
+        }
 
         Ok(Command::Update(update))
     }
@@ -1086,8 +1209,6 @@ impl Parser {
         }
 
         selectVec.push(select);
-
-        println!("{selectVec:?}\n");
 
         macro_rules! testDuplicate {
             ($field:expr, $hashSet:ident) => {
@@ -1679,6 +1800,8 @@ pub struct Link {
     pub relationName: String,
     pub relationColumnNames: Vec<String>,
     pub relationColumnExprs: Vec<Expr>,
+
+    pub relationFilterExpr: Option<Expr>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -1711,6 +1834,55 @@ pub struct Update {
     // todo insert的values的expr只能支持不包含column name的
     pub columnName_expr: HashMap<String, Expr>,
     pub filterExpr: Option<Expr>,
+}
+
+pub type UnlinkLinkStyle = Link;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Unlink {
+    LinkStyle(UnlinkLinkStyle),
+    SelfStyle(UnlinkSelfStyle),
+}
+
+impl Default for Unlink {
+    fn default() -> Self {
+        todo!()
+    }
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub struct UnlinkSelfStyle {
+    pub tableName: String,
+    pub tableFilterExpr: Option<Expr>,
+    pub relDescVec: Vec<RelDesc>,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+pub struct RelDesc {
+    pub endPointType: EndPointType,
+    pub relationName: String,
+    pub relationFliterExpr: Option<Expr>,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub enum EndPointType {
+    Start,
+    #[default]
+    Both,
+    End,
+}
+
+impl FromStr for EndPointType {
+    type Err = GraphError;
+
+    fn from_str(str: &str) -> std::result::Result<Self, Self::Err> {
+        match str.to_lowercase().as_str() {
+            "start" => Ok(EndPointType::Start),
+            "both" => Ok(EndPointType::Both),
+            "end" => Ok(EndPointType::End),
+            _ => throw!("unknown"),
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -1752,12 +1924,18 @@ mod test {
 
     #[test]
     pub fn testUpdate() {
-        parser::parse("update user[name='a',order=7](id=1)").unwrap();
+        parser::parse("update user[name='a',order=7]").unwrap();
     }
 
     #[test]
     pub fn testParseDelete() {
         parser::parse("delete from user(a=0)").unwrap();
+    }
+
+    #[test]
+    pub fn testUnlink() {
+        //parser::parse("unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13)").unwrap();
+        parser::parse("unlink user(id >1 ) as start by usage (number = 7) ,as end by own(number =7)").unwrap();
     }
 }
 
