@@ -1,6 +1,7 @@
 use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter, Pointer, write};
+use std::ops::RangeToInclusive;
 use std::str::FromStr;
 use crate::{global, prefix_plus_plus, suffix_minus_minus, suffix_plus_plus, throw};
 use anyhow::Result;
@@ -88,6 +89,8 @@ impl Parser {
         let mut 括号数量: usize = 0;
         let mut 括号1数量: usize = 0;
 
+        let ascInvisibleCodeRange = char::from(0u8)..=char::from(31);
+
         // 空格 逗号 单引号 括号
         loop {
             let mut advanceCount: usize = 1;
@@ -150,7 +153,7 @@ impl Parser {
                         }
                     }
                 }
-                global::分号_CHAR => { // 应对同时写了多个以;分隔的sql
+                global::分号_CHAR | global::换行_CHAR => { // 要是写了多个sql的话 以";" 和 换行分割
                     // 单纯的是文本内容
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
@@ -226,7 +229,12 @@ impl Parser {
                         }
                     }
                 }
-                _ => self.pendingChars.push(currentChar),
+                _ => {
+                    // ascii的不可见char应该抛弃 和处理空格的是不同的 空格会认为是element的分隔的 a
+                    if ascInvisibleCodeRange.contains(&currentChar) == false || self.whetherIn单引号() {
+                        self.pendingChars.push(currentChar);
+                    }
+                }
             }
 
             let reachEnd = self.advanceChar(advanceCount);
@@ -456,7 +464,7 @@ impl Parser {
                 _ => self.throwSyntaxError()?,
             };
 
-            println!("{:?}", command);
+            println!("{:?}\n", command);
 
             commandVec.push(command);
 
@@ -770,7 +778,7 @@ impl Parser {
     }
 
     /// unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13) <br>
-    /// unlink user(id >1 ) as start by usage (number = 7) ,as end by own(number =7)
+    /// unlink,select user(id >1 ) as start by usage (number = 7) ,as end by own(number =7)
     fn parseUnlink(&mut self) -> Result<Command> {
         // 尝试先用link的套路parse
         if let Ok(Command::Link(link)) = self.parseLink(true) {
@@ -1900,13 +1908,11 @@ mod test {
     #[test]
     pub fn testParseInsert() {
         // println!("{}", "".parse::<f64>().unwrap());
-        //  parser::parse("insert   INTO TEST VALUES ( 0  , ')')").unwrap();
         parser::parse("insert into user values (1,null)").unwrap();
     }
 
     #[test]
     pub fn testParseSelect() {
-        // parser::parse("select user[id,name](id=1 and 1=1) -usage(number > 9) as usage0-> car").unwrap();
         parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> wheel").unwrap();
     }
 
@@ -1936,6 +1942,21 @@ mod test {
     pub fn testUnlink() {
         //parser::parse("unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13)").unwrap();
         parser::parse("unlink user(id >1 ) as start by usage (number = 7) ,as end by own(number =7)").unwrap();
+    }
+
+    #[test]
+    pub fn testChinese() {
+        let chinese = r#"   秀 a"#;
+        let mut chars = chinese.chars();
+        println!("{}", chars.next().unwrap() == ' ');
+    }
+
+    #[test]
+    pub fn testMultiLines() {
+        let sql = "create table if not exist user (id integer,name string)
+                       insert into user values (1,'tom')";
+
+        parser::parse(sql).unwrap();
     }
 }
 

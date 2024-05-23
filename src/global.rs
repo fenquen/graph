@@ -73,3 +73,6 @@ pub const 方括号_CHAR: char = '[';
 pub const 方括号_STR: &str = "[";
 pub const 方括号1_CHAR: char = ']';
 pub const 方括号1_STR: &str = "]";
+
+pub const 回车_CHAR: char = '\r';
+pub const 换行_CHAR: char = '\n';
