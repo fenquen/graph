@@ -53,7 +53,7 @@ pub fn load() -> Config {
     let config: Config = match serde_json::from_str(&configJsonFileContent) {
         Ok(config) => config,
         Err(e) => {
-            log::info!("读取配置文件 {} 错误 {}",configFilePath, e);
+            log::info!("读取配置文件 {} 错误 {}", configFilePath, e);
             process::exit(1);
         }
     };

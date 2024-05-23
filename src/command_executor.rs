@@ -945,7 +945,6 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             destByteSlice
         };
 
-
         Ok(destByteSlice.freeze())
     }
 
@@ -1004,7 +1003,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         buffer.put_u8(keyTag);
         buffer.put_u64(tableId);
 
-        // 写realation的rowId
+        // 后边用来写dataKey
         buffer.put_u8(meta::KEY_TAG_KEY);
     }
 }

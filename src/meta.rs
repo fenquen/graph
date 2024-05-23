@@ -38,10 +38,11 @@ pub struct Store {
 }
 
 pub type DataKey = u64;
-pub type KeyPrefix = Byte;
 
 // key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
 pub const DATA_KEY_BYTE_LEN: usize = 8;
+
+pub type KeyPrefix = Byte;
 
 pub const KEY_PREFIX_BIT_LEN: usize = 4;
 pub const KEY_PREFIX_MAX: KeyPrefix = (1 << KEY_PREFIX_BIT_LEN) - 1;

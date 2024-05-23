@@ -88,6 +88,7 @@ impl BinaryCodec for GraphValue {
             }
             GraphValue::Null => destByteSlice.put_u8(GraphValue::NULL),
         }
+
         Ok(())
     }
 }
