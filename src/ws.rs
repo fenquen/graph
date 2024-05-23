@@ -80,6 +80,8 @@ impl Display for GraphWsResponse {
 pub async fn init() -> Result<()> {
     let listener = TcpListener::bind(config::CONFIG.wsAddr.as_str()).await?;
 
+    log::info!("server started, ws listen on: {}",config::CONFIG.wsAddr);
+
     while let Ok((tcpStream, remoteAddr)) = listener.accept().await {
         tokio::spawn(processConn(tcpStream, remoteAddr));
     }

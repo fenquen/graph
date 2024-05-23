@@ -35,30 +35,3 @@ pub async fn main() -> Result<()> {
 
     Ok(())
 }
-
-#[cfg(test)]
-mod test {
-    use tokio::fs::OpenOptions;
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    use crate::session::Session;
-    use anyhow::Result;
-
-    #[tokio::test]
-    pub async fn manauallyExecuteSql()->Result<()> {
-        let sqlRecord = OpenOptions::new().read(true).open("sql.txt").await?;
-        let bufReader = BufReader::new(sqlRecord);
-        let mut sqls = bufReader.lines();
-
-        let mut session = Session::new();
-
-        while let Some(sql) = sqls.next_line().await? {
-            if sql.starts_with("--") {
-                continue;
-            }
-
-            session.executeSql(sql.as_str())?;
-        }
-
-        Ok(())
-    }
-}
