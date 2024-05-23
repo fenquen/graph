@@ -62,20 +62,22 @@ pub type KeyTag = Byte;
 
 pub const KEY_TAG_BYTE_LEN: usize = 1;
 /// node 下游rel的tableId
-pub const KEY_TAG_UPSTREAM_REL_ID: Byte = 0;
+pub const KEY_TAG_UPSTREAM_REL_ID: KeyTag = 0;
 /// node 上游rel的tableId
-pub const KEY_TAG_DOWNSTREAM_REL_ID: Byte = 1;
+pub const KEY_TAG_DOWNSTREAM_REL_ID: KeyTag = 1;
 /// rel 的srcNode的tableId
-pub const KEY_TAG_SRC_TABLE_ID: Byte = 2;
+pub const KEY_TAG_SRC_TABLE_ID: KeyTag = 2;
 /// rel的destNode的tableId
-pub const KEY_TAG_DEST_TABLE_ID: Byte = 3;
-pub const KEY_TAG_KEY: Byte = 4;
+pub const KEY_TAG_DEST_TABLE_ID: KeyTag = 3;
+pub const KEY_TAG_KEY: KeyTag = 4;
 
 pub const POINTER_KEY_BYTE_LEN: usize = {
     mem::size_of::<u64>() + // keyPrefix 4bit + rowId 60bit
         KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // table/relation的key
         KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN // 实际的data条目的key
 };
+
+pub const POINTER_LENADING_PART_BYTE_LEN: usize = POINTER_KEY_BYTE_LEN - DATA_KEY_BYTE_LEN;
 
 #[macro_export]
 macro_rules! key_prefix_add_row_id {
@@ -85,7 +87,7 @@ macro_rules! key_prefix_add_row_id {
 }
 
 #[macro_export]
-macro_rules! extract_row_id_from_key {
+macro_rules! extract_row_id_from_data_key {
     ($key: expr) => {
         (($key as u64) & meta::MAX_ROW_ID) as meta::RowId
     };
@@ -308,7 +310,12 @@ pub fn init() -> Result<()> {
 
 #[cfg(test)]
 mod test {
+    use tokio::fs::OpenOptions;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::runtime::Builder;
     use crate::graph_value::GraphValue;
+    use crate::meta;
+    use crate::session::Session;
 
     #[test]
     pub fn testSerialEnum() {
@@ -329,5 +336,31 @@ mod test {
         let a = "a".to_string();
         let b = "a".to_string();
         println!("{}", a == b);
+    }
+
+    #[test]
+    pub fn manauallyExecuteSql() -> anyhow::Result<()> {
+        meta::init()?;
+
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let sqlRecord = OpenOptions::new().read(true).open("sql.txt").await?;
+            let bufReader = BufReader::new(sqlRecord);
+            let mut sqls = bufReader.lines();
+
+            let mut session = Session::new();
+
+            while let Some(sql) = sqls.next_line().await? {
+                if sql.starts_with("--") {
+                    continue;
+                }
+
+                session.executeSql(sql.as_str())?;
+            }
+
+            anyhow::Result::<()>::Ok(())
+        })?;
+
+        Ok(())
     }
 }

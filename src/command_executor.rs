@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::CONFIG;
 use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta,
-            prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_key,
+            prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_data_key,
             key_prefix_add_row_id, extract_prefix_from_key_1st_byte, extract_data_key_from_pointer_key_slice, utils};
-use crate::meta::{Column, ColumnType, DataKey, KeyTag, RowId, Table, TableId, TableType};
+use crate::meta::{Column, ColumnType, DataKey, KEY_TAG_DEST_TABLE_ID, KeyTag, RowId, Table, TableId, TableType};
 use crate::parser::{Command, Delete, Element, Insert, Link, Select, Unlink, UnlinkLinkStyle, UnlinkSelfStyle, Update};
 use anyhow::Result;
 use dashmap::mapref::one::{Ref, RefMut};
@@ -154,20 +154,89 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         }
     }
 
+    /// 应对 unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13) 和原来link基本相同
+    /// 和原来的link套路相同是它反过来的
     fn unlinkLinkStyle(&self, unlinkLinkStyle: &UnlinkLinkStyle) -> Result<CommandExecResult> {
-        // 通过rel得到src 干掉朝向rel的pointer key
-        // 通过rel得到dest 干掉指向rel的pointer key
-
         let relation = self.getTableRefByName(&unlinkLinkStyle.relationName)?;
+        let relColFamily = self.session.getColFamily(relation.name.as_str())?;
+
+        let destTable = self.getTableRefByName(&unlinkLinkStyle.destTableName)?;
+        let destColFamily = self.session.getColFamily(destTable.name.as_str())?;
+
+        let srcTable = self.getTableRefByName(&unlinkLinkStyle.srcTableName)?;
+        let srcColFamily = self.session.getColFamily(srcTable.name.as_str())?;
 
         // 得到rel 干掉指向src和dest的pointer key
         let relStatisfiedRowDatas = self.scanSatisfiedRowsBinary(unlinkLinkStyle.relationFilterExpr.as_ref(), relation.value(), true, None)?;
-        for (relDataKey, _) in relStatisfiedRowDatas {}
 
+        // KEY_PREFIX_POINTER + relDataRowId + KEY_TAG_SRC_TABLE_ID + src的tableId + KEY_TAG_KEY
+        let mut pointerKeyLeadingPartBuffer = BytesMut::with_capacity(meta::POINTER_LENADING_PART_BYTE_LEN);
+        // KEY_PREFIX_POINTER + relDataRowId + KEY_TAG_SRC_TABLE_ID + src的tableId + KEY_TAG_KEY + src dest rel的dataKey
+        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+
+        let currentTx = self.session.getCurrentTx()?;
+
+        let mut processRel = |statisfiedRelDataKey: DataKey, processSrc: bool| -> Result<()> {
+            if processSrc {
+                self.write2PointerKeyLeadingPart(&mut pointerKeyLeadingPartBuffer, statisfiedRelDataKey, meta::KEY_TAG_SRC_TABLE_ID, srcTable.tableId);
+            } else {
+                self.write2PointerKeyLeadingPart(&mut pointerKeyLeadingPartBuffer, statisfiedRelDataKey, meta::KEY_TAG_DEST_TABLE_ID, srcTable.tableId);
+            }
+
+            let pointerKeyLeadingPart = pointerKeyLeadingPartBuffer.as_ref();
+
+            let iterator = currentTx.prefix_iterator_cf(&relColFamily, pointerKeyLeadingPart);
+            for result in iterator {
+                let (pointerKey, _) = result?;
+
+                // iterator是收不动尾部的要自个来弄的
+                if pointerKey.starts_with(pointerKeyLeadingPart) == false {
+                    break;
+                }
+
+                let dataKey = extract_data_key_from_pointer_key_slice!(&*pointerKey);
+
+                // 是不是符合src上的筛选expr
+                if self.getRowDatasByDataKeys(&[dataKey], srcTable.value(), unlinkLinkStyle.srcTableFilterExpr.as_ref(), None)?.is_empty() {
+                    continue;
+                }
+
+                if processSrc {
+                    // 干掉src上的对应该rel的pointerKey
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, dataKey, meta::KEY_TAG_DOWNSTREAM_REL_ID, relation.tableId, statisfiedRelDataKey);
+                    currentTx.delete_cf(&srcColFamily, pointerKeyBuffer.as_ref())?;
+
+                    // 干掉rel上对应该src的pointerKey
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, statisfiedRelDataKey, meta::KEY_TAG_SRC_TABLE_ID, srcTable.tableId, dataKey);
+                    currentTx.delete_cf(&relColFamily, pointerKeyBuffer.as_ref())?;
+                } else {
+                    // 干掉dest上的对应该rel的pointerKey
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, dataKey, meta::KEY_TAG_UPSTREAM_REL_ID, relation.tableId, statisfiedRelDataKey);
+                    currentTx.delete_cf(&destColFamily, pointerKeyBuffer.as_ref())?;
+
+                    // 干掉rel上对应该dest的pointerKey
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, statisfiedRelDataKey, KEY_TAG_DEST_TABLE_ID, destTable.tableId, dataKey);
+                    currentTx.delete_cf(&relColFamily, pointerKeyBuffer.as_ref())?;
+                }
+            }
+
+            Ok(())
+        };
+
+        // 遍历符合要求的relRowData 得到单个上边的对应src和dest的全部dataKeys
+        for (statisfiedRelDataKey, _) in relStatisfiedRowDatas {
+            // src
+            processRel(statisfiedRelDataKey, true)?;
+
+            // dest
+            processRel(statisfiedRelDataKey, false)?;  // 遍历符合要求的relRowData 得到单个上边的对应src和dest的全部dataKeys
+        }
 
         Ok(CommandExecResult::DmlResult)
     }
 
+    /// unlink user(id >1 ) as start by usage (number = 7) ,as end by own(number =7)
+    /// 需要由start点出发
     fn unlinkSelfStyle(&self, unlinkSelfStyle: &UnlinkSelfStyle) -> Result<CommandExecResult> {
         Ok(CommandExecResult::DmlResult)
     }
@@ -343,7 +412,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             // 遍历当前的select的多个relation
             'loopRelationData:
             for (relationDataKey, relationData) in relationDatas {
-                let relationRowId = extract_row_id_from_key!(relationDataKey);
+                let relationRowId = extract_row_id_from_data_key!(relationDataKey);
 
                 // 收罗该rel上的全部的src的key
                 let srcDataKeys = {
@@ -900,12 +969,14 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         Ok(keys)
     }
 
-    fn write2PointerKeyBuffer(&self, buffer: &mut BytesMut,
+    fn write2PointerKeyBuffer(&self,
+                              buffer: &mut BytesMut,
                               selfDatakey: DataKey,
-                              keyTag: KeyTag, tableId: TableId, dataKey: DataKey) {
+                              keyTag: KeyTag, tableId: TableId,
+                              dataKey: DataKey) {
         buffer.clear();
 
-        let rowId = extract_row_id_from_key!(selfDatakey);
+        let rowId = extract_row_id_from_data_key!(selfDatakey);
 
         buffer.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, rowId));
 
@@ -916,6 +987,25 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         // 写realation的rowId
         buffer.put_u8(meta::KEY_TAG_KEY);
         buffer.put_u64(dataKey);
+    }
+
+    /// 不包含末尾的对应其它table rel 的dataKey
+    fn write2PointerKeyLeadingPart(&self,
+                                   buffer: &mut BytesMut,
+                                   selfDatakey: DataKey,
+                                   keyTag: KeyTag, tableId: TableId) {
+        buffer.clear();
+
+        let rowId = extract_row_id_from_data_key!(selfDatakey);
+
+        buffer.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, rowId));
+
+        // 写relation的tableId
+        buffer.put_u8(keyTag);
+        buffer.put_u64(tableId);
+
+        // 写realation的rowId
+        buffer.put_u8(meta::KEY_TAG_KEY);
     }
 }
 
