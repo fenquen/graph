@@ -14,7 +14,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::WebSocketStream;
 use crate::command_executor::SelectResultToFront;
-use crate::config;
+use crate::{config, parser, throw};
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
 use crate::session::Session;
@@ -32,6 +32,7 @@ impl GraphWsRequest {}
 pub enum RequestType {
     ExecuteSql,
     Begin,
+    TestParser,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -124,21 +125,24 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
         }
 
         if let Message::Text(text) = readResult.unwrap() {
-            if let Err(e) = processGraphWsRequest(&mut writeStream, &text, &mut session).await {
+            if let Err(e) = processGraphWsRequest(&mut writeStream, &text, &mut session, &remoteAddr).await {
                 // 使用debug会同时打印message和stack
-                log::info!("{:?}",e);
+                log::info!("{:?}", e);
+                writeStream.send(Message::Text(GraphWsResponse::fail(&e).to_string())).await?;
             }
         }
 
         async fn processGraphWsRequest(writeStream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
                                        text: &str,
-                                       session: &mut Session<'_>) -> Result<()> {
-            let deserialResult = serde_json::from_str::<GraphWsRequest>(text);
-            if let Err(e) = deserialResult {
+                                       session: &mut Session<'_>,
+                                       remoteAddr: &SocketAddr) -> Result<()> {
+            let graphWsRequest = serde_json::from_str::<GraphWsRequest>(text);
+            if let Err(e) = graphWsRequest {
                 return Err(anyhow::Error::new(GraphError::new(&e.to_string())));
             }
 
-            let graphWsRequest = deserialResult.unwrap();
+            let graphWsRequest = graphWsRequest.unwrap();
+
             match graphWsRequest.requestType {
                 RequestType::ExecuteSql => {
                     if let None = graphWsRequest.sql {
@@ -153,6 +157,24 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
                     let selectResultToFront = session.executeSql(&sql)?;
 
                     writeStream.send(Message::Text(GraphWsResponse::successWithData(selectResultToFront).to_string())).await?;
+                }
+                RequestType::TestParser => {
+                    if remoteAddr.ip().is_loopback() == false {
+                        throw!("test parser request can only be from localhost");
+                    }
+
+                    if let None = graphWsRequest.sql {
+                        return Ok(());
+                    }
+
+                    let sql = graphWsRequest.sql.unwrap();
+                    if sql.is_empty() || sql.starts_with("--") {
+                        return Ok(());
+                    }
+
+                    parser::parse(&sql)?;
+
+                    writeStream.send(Message::Text(GraphWsResponse::success().to_string())).await?;
                 }
                 _ => {}
             }
