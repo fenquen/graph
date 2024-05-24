@@ -39,7 +39,7 @@ pub enum Command {
     Insert(Insert),
     Link(Link),
     Update(Update),
-    Select(Vec<Select>),
+    Select(Select),
     Delete(Delete),
     Unlink(Unlink),
 }
@@ -638,6 +638,7 @@ impl Parser {
     }
 
     // link user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13)
+    // todo 能不能实现 ```link user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre```
     fn parseLink(&mut self, regardLastPartAsFilter: bool) -> Result<Command> {
         let mut link = Link::default();
 
@@ -698,7 +699,6 @@ impl Parser {
 
             link.relationFilterExpr = Some(self.parseExpr(false)?);
         } else {
-
             // 下边要解析 by usage (a=0,a=(1212+0))的后边的括号部分了
             // 和parseInExprs使用相同的套路,当(数量和)数量相同的时候说明收敛结束了,因为会以")"收尾
             let mut 括号数量 = 0;
@@ -778,7 +778,7 @@ impl Parser {
     }
 
     /// unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13) <br>
-    /// unlink,select user(id >1 ) as start by usage (number = 7) ,as end by own(number =7)
+    /// todo unlink user(id >1 ) as start in usage (number = 7) ,as end in own(number =7) 感觉不该用到unlink上,反而应该用到select上
     fn parseUnlink(&mut self) -> Result<Command> {
         // 尝试先用link的套路parse
         if let Ok(Command::Link(link)) = self.parseLink(true) {
@@ -845,15 +845,18 @@ impl Parser {
 
                     match state {
                         State::ReadEndPointType => {
-                            // as start by
+                            // as start in
                             if currentElement.expectTextLiteralContentBool("as") {
                                 let nextElement = self.getCurrentElementAdvance()?;
                                 let s = nextElement.expectTextLiteral(global::EMPTY_STR)?;
                                 relDesc.endPointType = EndPointType::from_str(s.as_str())?;
                             }
 
-                            // 读取by
-                            self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("by", "by should before relation name")?;
+                            // 读取 in
+                            match self.getCurrentElementAdvance()? {
+                                Element::Op(Op::SqlOp(SqlOp::In)) => {}
+                                _ => self.throwSyntaxErrorDetail("in should be before relation name")?,
+                            }
 
                             state = State::ReadRelName;
                         }
@@ -991,11 +994,14 @@ impl Parser {
         Ok(Command::Update(update))
     }
 
+    // todo 实现 select user(id >1 ) as user0 ,in usage (number = 7) ,end in own(number =7)
     /// ```select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre```
     fn parseSelect(&mut self) -> Result<Command> {
-        #[derive(Clone, Copy)]
+        // https://doc.rust-lang.org/reference/items/enumerations.html
+        #[repr(u8)]
+        #[derive(Clone, Copy, PartialEq, PartialOrd)]
         enum State {
-            ReadSrcName, // 必有
+            ReadSrcName = 0, // 必有
             ReadSrcColumnNames, // 可选
             ReadSrcFilterExpr, // 可选
             ReadSrcAlias, // 可选
@@ -1034,10 +1040,11 @@ impl Parser {
         }
 
         let mut state = State::ReadSrcName;
+        // getCurrentElement可不可是None
         let mut force = true;
 
         let mut selectVec = Vec::default();
-        let mut select = Select::default();
+        let mut select = SelectRel::default();
 
         loop {
             let currentElement =
@@ -1054,25 +1061,6 @@ impl Parser {
             match state {
                 State::ReadSrcName => {
                     select.srcTableName = currentElement.expectTextLiteral("expect src table name")?;
-
-                    // 因为上边已然advance了 故而是next element
-                    // let nextElement = self.getCurrentElementOption();
-                    // if nextElement.is_none() {
-                    //     return Ok(Command::Select(select));
-                    // }
-                    //
-                    // match nextElement.unwrap() {
-                    //     Element::TextLiteral(text) => {
-                    //         match text.to_uppercase().as_str() {
-                    //             global::方括号_STR => state = State::ReadSrcColumnNames,
-                    //             global::圆括号_STR => state = State::ReadSrcFilterExpr,
-                    //             "AS" => state = State::ReadSrcAlias,
-                    //             _ => self.throwSyntaxError()?,
-                    //         }
-                    //     }
-                    //     Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) => state = State::ReadRelationName,
-                    //     _ => self.throwSyntaxError()?,
-                    // }
 
                     state = State::ReadSrcColumnNames;
                     force = false;
@@ -1190,12 +1178,12 @@ impl Parser {
                     state = State::TryNextRound;
                     force = false;
                 }
-                State::TryNextRound => {
+                State::TryNextRound => { // 尝试读取下个rel打头的 -rel-> 的 minus部分
                     if let Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) = currentElement {
                         self.skipElement(-1)?;
 
                         // https://qastack.cn/programming/19650265/is-there-a-faster-shorter-way-to-initialize-variables-in-a-rust-struct
-                        let select0 = Select {
+                        let select0 = SelectRel {
                             srcTableName: select.destTableName.as_ref().unwrap().clone(),
                             srcColumnNames: select.destColumnNames.clone(),
                             srcFilterExpr: select.destFilterExpr.clone(),
@@ -1216,26 +1204,131 @@ impl Parser {
             }
         }
 
+        // 说明只是读个table而已
+        if (State::ReadSrcName..=State::ReadRelationName).contains(&state) {
+            let selectTable = SelectTable {
+                tableName: select.srcTableName,
+                selectedColNames: select.srcColumnNames,
+                tableFilterExpr: select.srcFilterExpr,
+                tableAlias: select.srcAlias,
+            };
+
+            // 还要区分
+            match state {
+                // 读取relName的是没有下文了 符合 selectTableUnderRels
+                State::ReadRelationName => {
+                    // 复用成果 因为前部分都是select 1个 表
+                    self.skipElement(-1)?;
+                    return self.parseSelectTableUnderRels(selectTable);
+                }
+                // 对应[State::ReadSrcName, State::ReadRelationName)
+                _ => return Ok(Command::Select(Select::SelectTable(selectTable))),
+            }
+        }
+
         selectVec.push(select);
 
-        macro_rules! testDuplicate {
-            ($field:expr, $hashSet:ident) => {
-                if $field.is_some() {
-                    if $hashSet.insert($field.as_ref().unwrap()) == false {
-                        self.throwSyntaxErrorDetail(&format!("duplicated alias:{}", $field.as_ref().unwrap()))?;
-                    }
-                }
-            };
-        }
         // 确保alias不能重复
-        let mut alias: HashSet<&str> = HashSet::new();
+        let mut existAlias: HashSet<String> = HashSet::new();
+
+        let mut testDuplicatedAlias = |alias: Option<&String>| {
+            if alias.is_some() {
+                if existAlias.insert(alias.unwrap().to_string()) == false {
+                    self.throwSyntaxErrorDetail(&format!("duplicated alias:{}", alias.unwrap()))?;
+                }
+            }
+
+            anyhow::Result::<(), anyhow::Error>::Ok(())
+        };
+
         for select in &selectVec {
-            testDuplicate!(select.srcAlias, alias);
-            testDuplicate!(select.relationAlias, alias);
-            testDuplicate!(select.destAlias, alias);
+            testDuplicatedAlias(select.srcAlias.as_ref())?;
+            testDuplicatedAlias(select.relationAlias.as_ref())?;
+            testDuplicatedAlias(select.destAlias.as_ref())?;
         }
 
-        Ok(Command::Select(selectVec))
+        Ok(Command::Select(Select::SelectRels(selectVec)))
+    }
+
+    /// ```select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)```
+    fn parseSelectTableUnderRels(&mut self, selectTable: SelectTable) -> Result<Command> {
+        let mut selectTableUnderRels = SelectTableUnderRels::default();
+
+        // 复用成果
+        selectTableUnderRels.selectTable = selectTable;
+
+        // 开始的时候 当前的element应该是"," 先消耗
+        self.getCurrentElementAdvance()?.expectTextLiteralContent(global::逗号_STR)?;
+
+        enum State {
+            ReadEndPointType,
+            ReadRelName,
+            ReadRelFilterExpr,
+        }
+
+        let mut state = State::ReadEndPointType;
+
+        // 读取1个relDesc的小loop
+        loop {
+            let relDesc = {
+                let mut relDesc = RelDesc::default();
+
+                loop {
+                    let currentElement = self.getCurrentElementAdvanceOption();
+                    if let None = currentElement {
+                        return Ok(Command::Select(Select::SelectTableUnderRels(selectTableUnderRels)));
+                    }
+                    let currentElement = currentElement.unwrap().clone();
+
+                    match state {
+                        State::ReadEndPointType => {
+                            let mut foundAs = false;
+                            // as start in
+                            if currentElement.expectTextLiteralContentBool("as") {
+                                let nextElement = self.getCurrentElementAdvance()?;
+                                let s = nextElement.expectTextLiteral(global::EMPTY_STR)?;
+                                relDesc.endPointType = EndPointType::from_str(s.as_str())?;
+
+                                foundAs = true;
+                            }
+
+                            // 读取 in
+                            match if foundAs { self.getCurrentElementAdvance()?.clone() } else { currentElement } {
+                                Element::Op(Op::SqlOp(SqlOp::In)) => {}
+                                _ => self.throwSyntaxErrorDetail("in should be before relation name")?,
+                            }
+
+                            state = State::ReadRelName;
+                        }
+                        State::ReadRelName => {
+                            relDesc.relationName = currentElement.expectTextLiteral("need a relation name")?;
+                            state = State::ReadRelFilterExpr;
+                        }
+                        State::ReadRelFilterExpr => {
+                            if currentElement.expectTextLiteralContentIgnoreCaseBool(global::圆括号_STR) {
+                                self.skipElement(-1)?;
+                                relDesc.relationFliterExpr = Some(self.parseExpr(false)?);
+                            }
+
+                            if let Some(element) = self.getCurrentElementAdvanceOption() {
+                                // start a new round
+                                if global::逗号_STR == element.expectTextLiteral(global::EMPTY_STR)? {
+                                    state = State::ReadEndPointType;
+                                } else {
+                                    self.throwSyntaxErrorDetail("need comma after a relation desc")?;
+                                }
+                            }
+
+                            break;
+                        }
+                    }
+                }
+
+                relDesc
+            };
+
+            selectTableUnderRels.relDescVec.push(relDesc);
+        }
     }
 
     // todo 能够应对like
@@ -1614,6 +1707,10 @@ impl Parser {
 
         Ok(())
     }
+
+    fn resetCurrentElementIndex(&mut self) {
+        self.currentElementIndex = 0;
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1812,8 +1909,17 @@ pub struct Link {
     pub relationFilterExpr: Option<Expr>,
 }
 
+// todo select的时候column也有alias
 #[derive(Default, Debug, Serialize, Deserialize)]
-pub struct Select {
+pub struct SelectTable {
+    pub tableName: String,
+    pub selectedColNames: Option<Vec<String>>,
+    pub tableFilterExpr: Option<Expr>,
+    pub tableAlias: Option<String>,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub struct SelectRel {
     pub srcTableName: String,
     pub srcColumnNames: Option<Vec<String>>,
     pub srcFilterExpr: Option<Expr>,
@@ -1828,6 +1934,19 @@ pub struct Select {
     pub destColumnNames: Option<Vec<String>>,
     pub destFilterExpr: Option<Expr>,
     pub destAlias: Option<String>,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub struct SelectTableUnderRels {
+    pub selectTable: SelectTable,
+    pub relDescVec: Vec<RelDesc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Select {
+    SelectTable(SelectTable),
+    SelectRels(Vec<SelectRel>),
+    SelectTableUnderRels(SelectTableUnderRels),
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -1852,12 +1971,6 @@ pub enum Unlink {
     SelfStyle(UnlinkSelfStyle),
 }
 
-impl Default for Unlink {
-    fn default() -> Self {
-        todo!()
-    }
-}
-
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct UnlinkSelfStyle {
     pub tableName: String,
@@ -1876,7 +1989,7 @@ pub struct RelDesc {
 pub enum EndPointType {
     Start,
     #[default]
-    Both,
+    Either,
     End,
 }
 
@@ -1886,7 +1999,7 @@ impl FromStr for EndPointType {
     fn from_str(str: &str) -> std::result::Result<Self, Self::Err> {
         match str.to_lowercase().as_str() {
             "start" => Ok(EndPointType::Start),
-            "both" => Ok(EndPointType::Both),
+            "either" => Ok(EndPointType::Either),
             "end" => Ok(EndPointType::End),
             _ => throw!("unknown"),
         }
@@ -1913,7 +2026,8 @@ mod test {
 
     #[test]
     pub fn testParseSelect() {
-        parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> wheel").unwrap();
+        // parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> wheel").unwrap();
+        parser::parse("select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)").unwrap();
     }
 
     #[test]

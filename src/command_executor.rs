@@ -9,8 +9,8 @@ use crate::config::CONFIG;
 use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta,
             prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_data_key,
             key_prefix_add_row_id, extract_prefix_from_key_1st_byte, extract_data_key_from_pointer_key_slice, utils};
-use crate::meta::{Column, ColumnType, DataKey, KEY_TAG_DEST_TABLE_ID, KeyTag, RowId, Table, TableId, TableType};
-use crate::parser::{Command, Delete, Element, Insert, Link, Select, Unlink, UnlinkLinkStyle, UnlinkSelfStyle, Update};
+use crate::meta::{Column, ColumnType, DataKey, KeyTag, RowId, Table, TableId, TableType};
+use crate::parser::{Command, Delete, Element, Insert, Link, SelectRel, Select, SelectTable, Unlink, UnlinkLinkStyle, UnlinkSelfStyle, Update};
 use anyhow::Result;
 use dashmap::mapref::one::{Ref, RefMut};
 use serde::{Deserialize, Serialize, Serializer};
@@ -215,7 +215,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
                     currentTx.delete_cf(&destColFamily, pointerKeyBuffer.as_ref())?;
 
                     // 干掉rel上对应该dest的pointerKey
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, statisfiedRelDataKey, KEY_TAG_DEST_TABLE_ID, destTable.tableId, dataKey);
+                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, statisfiedRelDataKey, meta::KEY_TAG_DEST_TABLE_ID, destTable.tableId, dataKey);
                     currentTx.delete_cf(&relColFamily, pointerKeyBuffer.as_ref())?;
                 }
             }
@@ -355,21 +355,30 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
     }
 
     /// 如果不是含有relation的select 便是普通的select
-    fn select(&self, selectVec: &[Select]) -> Result<CommandExecResult> {
-        // 普通模式不含有relation
-        if selectVec.len() == 1 && selectVec[0].relationName.is_none() {
-            let select = &selectVec[0];
-            let srcTable = self.getTableRefByName(select.srcTableName.as_str())?;
-
-            let rowDatas = self.scanSatisfiedRowsBinary(select.srcFilterExpr.as_ref(), srcTable.value(), true, select.srcColumnNames.as_ref())?;
-            let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(dataKey, rowData)| rowData).collect();
-
-            let values: Vec<Value> = JSON_ENUM_UNTAGGED!(rowDatas.into_iter().map(|rowData| serde_json::to_value(&rowData).unwrap()).collect());
-            // JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
-
-            return Ok(CommandExecResult::SelectResult(values));
+    fn select(&self, selectFamily: &Select) -> Result<CommandExecResult> {
+        match selectFamily {
+            // 普通模式不含有relation
+            Select::SelectTable(selectTable) => self.selectTable(selectTable),
+            Select::SelectRels(selectVec) => self.selectRels(selectVec),
+            _ => { panic!("undo") }
         }
+    }
 
+    /// 普通的和rdbms相同的 select
+    fn selectTable(&self, selectTable: &SelectTable) -> Result<CommandExecResult> {
+        let srcTable = self.getTableRefByName(selectTable.tableName.as_str())?;
+
+        let rowDatas = self.scanSatisfiedRowsBinary(selectTable.tableFilterExpr.as_ref(), srcTable.value(), true, selectTable.selectedColNames.as_ref())?;
+        let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(dataKey, rowData)| rowData).collect();
+
+        let values: Vec<Value> = JSON_ENUM_UNTAGGED!(rowDatas.into_iter().map(|rowData| serde_json::to_value(&rowData).unwrap()).collect());
+        // JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
+
+        Ok(CommandExecResult::SelectResult(values))
+    }
+
+    /// graph特色的 rel select
+    fn selectRels(&self, selectVec: &Vec<SelectRel>) -> Result<CommandExecResult> {
         // 对应1个realtion的query的多个条目的1个
         #[derive(Debug)]
         struct SelectResult {
@@ -634,6 +643,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             };
         }
 
+        // todo logical优化
         // column expr能直接计算的先计算 不要到后边的遍历里边重复计算了
         for (columnName, columnExpr) in &update.columnName_expr {
             if columnExpr.needAcutalRowData() {
@@ -720,6 +730,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         Ok(rowDatas)
     }
 
+    // todo 实现 index
     fn scanSatisfiedRowsBinary(&self,
                                tableFilterExpr: Option<&Expr>,
                                table: &Table,
@@ -735,6 +746,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             if tableFilterExpr.is_some() || select {
                 let mut satisfiedRows = Vec::new();
 
+                // todo scan遍历能不能concurrent
                 for iterResult in iterator {
                     let (key, vaule) = iterResult?;
 
