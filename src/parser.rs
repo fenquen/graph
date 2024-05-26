@@ -579,7 +579,7 @@ impl Parser {
 
     // insert   INTO TEST VALUES ( '0'  , ')')
     // insert into test (column1) values ('a')
-    // a
+    // todo 实现 insert into values(),()
     fn parseInsert(&mut self) -> Result<Command> {
         let currentElement = self.getCurrentElementAdvance()?;
         if currentElement.expectTextLiteralContentIgnoreCaseBool("into") == false {

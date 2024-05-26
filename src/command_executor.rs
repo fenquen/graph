@@ -1,4 +1,4 @@
-use std::cell::{Cell, UnsafeCell};
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::Path;
@@ -6,12 +6,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::CONFIG;
-use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta,
-            prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_data_key,
-            key_prefix_add_row_id, extract_prefix_from_key_1st_byte, extract_data_key_from_pointer_key_slice, utils};
-use crate::meta::{Column, ColumnType, DataKey, KeyTag, RowId, Table, TableId, TableType};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_data_key, key_prefix_add_row_id, extract_prefix_from_key_slice, extract_data_key_from_pointer_key, utils, extract_tx_id_from_mvcc_key, extract_row_id_from_key_slice};
+use crate::meta::{Column, ColumnType, DataKey, KeyPrefix, KeyTag, RowId, Table, TableId, TableType, TxId};
 use crate::parser::{Command, Delete, Element, Insert, Link, SelectRel, Select, SelectTable, Unlink, UnlinkLinkStyle, UnlinkSelfStyle, Update};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use dashmap::mapref::one::{Ref, RefMut};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Map, Value};
@@ -19,18 +17,21 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
-use rocksdb::{AsColumnFamilyRef, DBRawIterator, DBRawIteratorWithThreadMode, IteratorMode, OptimisticTransactionDB, Options, Transaction};
+use rocksdb::{AsColumnFamilyRef, DB, DBAccess, DBCommon, DBRawIterator, DBRawIteratorWithThreadMode, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options, Transaction};
 use strum_macros::Display;
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::expr::Expr;
 use crate::global::{Byte};
+use crate::graph_error::GraphError;
 use crate::graph_value::{GraphValue, PointDesc};
-use crate::session::Session;
+use crate::session::{KV, Mutation, Session};
 
 type RowData = HashMap<String, GraphValue>;
 
 /// 到后台的sql可能是由多个小sql构成的 单个小select的sql对应个Vec<Value>
 pub type SelectResultToFront = Vec<Vec<Value>>;
+
+pub const EMPTY_BINARY: Vec<Byte> = vec![];
 
 #[macro_export]
 macro_rules! JSON_ENUM_UNTAGGED {
@@ -51,12 +52,12 @@ pub enum CommandExecResult {
     DdlResult,
 }
 
-pub struct CommandExecutor<'sessionLife, 'db> where 'db: 'sessionLife {
-    pub session: &'sessionLife Session<'db>,
+pub struct CommandExecutor<'session> {
+    pub session: &'session Session,
 }
 
-impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
-    pub fn new(session: &'sessionLife Session<'db>) -> Self {
+impl<'session> CommandExecutor<'session> {
+    pub fn new(session: &'session Session) -> Self {
         CommandExecutor {
             session
         }
@@ -116,7 +117,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         // todo 使用 u64的tableId 为key 完成
         let key = u64_to_byte_array_reference!(table.tableId);
         let json = serde_json::to_string(&table)?;
-        meta::STORE.meta.put(key, json.as_bytes())?;
+        meta::STORE.metaStore.put(key, json.as_bytes())?;
 
         // map
         meta::TABLE_NAME_TABLE.insert(table.name.to_string(), table);
@@ -134,19 +135,27 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             throw!(&format!("{} is a RELATION , can not use insert into on RELATION", insert.tableName));
         }
 
-        let rowDataBinary = self.generateInsertValuesBinary(insert, &*table)?;
-        let value = rowDataBinary.as_ref();
-
         let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
-        let key = u64_to_byte_array_reference!(key_prefix_add_row_id!(meta::KEY_PREFIX_DATA, rowId));
+        let dataKey: DataKey = key_prefix_add_row_id!(meta::KEY_PREFIX_DATA, rowId);
 
-        let columnFamily = self.session.getColFamily(&table.name)?;
+        // 写 data本身的key和value
+        let data = {
+            let dataKeyBinary = u64_to_byte_array_reference!(dataKey);
+            let rowDataBinary = self.generateInsertValuesBinary(insert, &*table)?;
 
-        self.session.getCurrentTx()?.put_cf(&columnFamily, key, value)?;
+            (dataKeyBinary.to_vec(), rowDataBinary.to_vec())
+        };
+
+        // 写 xmin xmax 对应的 mvcc key
+        let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+        let (xmin, xmax) = self.generateAddXminXmax(&mut mvccKeyBuffer, dataKey)?;
+
+        self.session.wtiteAddMutation(&table.name, data, xmin, xmax);
 
         Ok(CommandExecResult::DmlResult)
     }
 
+    // todo pointer指向点和边的xmin xmax如何应对
     fn unlink(&self, unlink: &Unlink) -> Result<CommandExecResult> {
         match unlink {
             Unlink::LinkStyle(unlinkLinkStyle) => self.unlinkLinkStyle(unlinkLinkStyle),
@@ -167,34 +176,29 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         let srcColFamily = self.session.getColFamily(srcTable.name.as_str())?;
 
         // 得到rel 干掉指向src和dest的pointer key
-        let relStatisfiedRowDatas = self.scanSatisfiedRowsBinary(unlinkLinkStyle.relationFilterExpr.as_ref(), relation.value(), true, None)?;
+        let relStatisfiedRowDatas = self.scanSatisfiedRows(unlinkLinkStyle.relationFilterExpr.as_ref(), relation.value(), true, None)?;
 
         // KEY_PREFIX_POINTER + relDataRowId + KEY_TAG_SRC_TABLE_ID + src的tableId + KEY_TAG_KEY
         let mut pointerKeyLeadingPartBuffer = BytesMut::with_capacity(meta::POINTER_LENADING_PART_BYTE_LEN);
         // KEY_PREFIX_POINTER + relDataRowId + KEY_TAG_SRC_TABLE_ID + src的tableId + KEY_TAG_KEY + src dest rel的dataKey
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
 
-        let currentTx = self.session.getCurrentTx()?;
-
         let mut processRel = |statisfiedRelDataKey: DataKey, processSrc: bool| -> Result<()> {
             if processSrc {
-                self.write2PointerKeyLeadingPart(&mut pointerKeyLeadingPartBuffer, statisfiedRelDataKey, meta::KEY_TAG_SRC_TABLE_ID, srcTable.tableId);
+                pointerKeyLeadingPartBuffer.writePointerKeyLeadingPart(statisfiedRelDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.tableId);
             } else {
-                self.write2PointerKeyLeadingPart(&mut pointerKeyLeadingPartBuffer, statisfiedRelDataKey, meta::KEY_TAG_DEST_TABLE_ID, srcTable.tableId);
+                pointerKeyLeadingPartBuffer.writePointerKeyLeadingPart(statisfiedRelDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, srcTable.tableId);
             }
 
-            let pointerKeyLeadingPart = pointerKeyLeadingPartBuffer.as_ref();
-
-            let iterator = currentTx.prefix_iterator_cf(&relColFamily, pointerKeyLeadingPart);
-            for result in iterator {
+            for result in self.session.dataStore.prefix_iterator_cf(&relColFamily, pointerKeyLeadingPartBuffer.as_ref()) {
                 let (pointerKey, _) = result?;
 
                 // iterator是收不动尾部的要自个来弄的
-                if pointerKey.starts_with(pointerKeyLeadingPart) == false {
+                if pointerKey.starts_with(pointerKeyLeadingPartBuffer.as_ref()) == false {
                     break;
                 }
 
-                let dataKey = extract_data_key_from_pointer_key_slice!(&*pointerKey);
+                let dataKey = extract_data_key_from_pointer_key!(&*pointerKey);
 
                 // 是不是符合src上的筛选expr
                 if self.getRowDatasByDataKeys(&[dataKey], srcTable.value(), unlinkLinkStyle.srcTableFilterExpr.as_ref(), None)?.is_empty() {
@@ -203,19 +207,19 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
 
                 if processSrc {
                     // 干掉src上的对应该rel的pointerKey
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, dataKey, meta::KEY_TAG_DOWNSTREAM_REL_ID, relation.tableId, statisfiedRelDataKey);
+                    pointerKeyLeadingPartBuffer.writePointerKeyBuffer(dataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation.tableId, statisfiedRelDataKey);
                     currentTx.delete_cf(&srcColFamily, pointerKeyBuffer.as_ref())?;
 
                     // 干掉rel上对应该src的pointerKey
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, statisfiedRelDataKey, meta::KEY_TAG_SRC_TABLE_ID, srcTable.tableId, dataKey);
+                    pointerKeyLeadingPartBuffer.writePointerKeyBuffer(statisfiedRelDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.tableId, dataKey);
                     currentTx.delete_cf(&relColFamily, pointerKeyBuffer.as_ref())?;
                 } else {
                     // 干掉dest上的对应该rel的pointerKey
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, dataKey, meta::KEY_TAG_UPSTREAM_REL_ID, relation.tableId, statisfiedRelDataKey);
+                    pointerKeyLeadingPartBuffer.writePointerKeyBuffer(dataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation.tableId, statisfiedRelDataKey);
                     currentTx.delete_cf(&destColFamily, pointerKeyBuffer.as_ref())?;
 
                     // 干掉rel上对应该dest的pointerKey
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, statisfiedRelDataKey, meta::KEY_TAG_DEST_TABLE_ID, destTable.tableId, dataKey);
+                    pointerKeyLeadingPartBuffer.writePointerKeyBuffer(statisfiedRelDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable.tableId, dataKey);
                     currentTx.delete_cf(&relColFamily, pointerKeyBuffer.as_ref())?;
                 }
             }
@@ -249,13 +253,13 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         let destTable = self.getTableRefByName(link.destTableName.as_str())?;
 
         // 对src table和dest table调用expr筛选
-        let srcSatisfiedVec = self.scanSatisfiedRowsBinary(link.srcTableFilterExpr.as_ref(), srcTable.value(), false, None)?;
+        let srcSatisfiedVec = self.scanSatisfiedRows(link.srcTableFilterExpr.as_ref(), srcTable.value(), false, None)?;
         // src 空的 link 不成立
         if srcSatisfiedVec.is_empty() {
             return Ok(CommandExecResult::DmlResult);
         }
 
-        let destSatisfiedVec = self.scanSatisfiedRowsBinary(link.destTableFilterExpr.as_ref(), destTable.value(), false, None)?;
+        let destSatisfiedVec = self.scanSatisfiedRows(link.destTableFilterExpr.as_ref(), destTable.value(), false, None)?;
         // dest 空的 link 不成立
         if destSatisfiedVec.is_empty() {
             return Ok(CommandExecResult::DmlResult);
@@ -279,6 +283,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         let relColFamily = self.session.getColFamily(&relationTable.name)?;
 
         self.session.getCurrentTx()?.put_cf(&relColFamily, u64_to_byte_array_reference!(relDataKey), rowDataBinary.as_ref())?;
+        //  self.session.wtiteAddMutation(&relationTable.name)
 
         //--------------------------------------------------------------------
 
@@ -294,12 +299,12 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             // 尚未设置过滤条件 得到的是全部的
             if srcSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for srcDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, srcDataKey, meta::KEY_TAG_DOWNSTREAM_REL_ID, relationTable.tableId, relDataKey);
+                    pointerKeyBuffer.writePointerKeyBuffer(srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relationTable.tableId, relDataKey);
                     self.session.getCurrentTx()?.put_cf(&srcColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             } else {
                 for (srcDataKey, _) in &srcSatisfiedVec {
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, *srcDataKey, meta::KEY_TAG_DOWNSTREAM_REL_ID, relationTable.tableId, relDataKey);
+                    pointerKeyBuffer.writePointerKeyBuffer(*srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relationTable.tableId, relDataKey);
                     self.session.getCurrentTx()?.put_cf(&srcColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             }
@@ -312,24 +317,24 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             // 尚未设置过滤条件 得到的是全部的
             if srcSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for srcDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, relDataKey, meta::KEY_TAG_SRC_TABLE_ID, srcTable.tableId, srcDataKey);
+                    pointerKeyBuffer.writePointerKeyBuffer(relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.tableId, srcDataKey);
                     self.session.getCurrentTx()?.put_cf(&relColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             } else {
                 for (srcDataKey, _) in &srcSatisfiedVec {
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, relDataKey, meta::KEY_TAG_SRC_TABLE_ID, srcTable.tableId, *srcDataKey);
+                    pointerKeyBuffer.writePointerKeyBuffer(relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.tableId, *srcDataKey);
                     self.session.getCurrentTx()?.put_cf(&relColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             }
 
             if destSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for destDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, relDataKey, meta::KEY_TAG_DEST_TABLE_ID, destTable.tableId, destDataKey);
+                    pointerKeyBuffer.writePointerKeyBuffer(relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable.tableId, destDataKey);
                     self.session.getCurrentTx()?.put_cf(&relColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             } else {
                 for (destDataKey, _) in &destSatisfiedVec {
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, relDataKey, meta::KEY_TAG_DEST_TABLE_ID, destTable.tableId, *destDataKey);
+                    pointerKeyBuffer.writePointerKeyBuffer(relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable.tableId, *destDataKey);
                     self.session.getCurrentTx()?.put_cf(&relColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             }
@@ -340,12 +345,12 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         {
             if destSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for destDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, destDataKey, meta::KEY_TAG_UPSTREAM_REL_ID, relationTable.tableId, relDataKey);
+                    pointerKeyBuffer.writePointerKeyBuffer(destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relationTable.tableId, relDataKey);
                     self.session.getCurrentTx()?.put_cf(&destColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             } else {
                 for (destDataKey, _) in &destSatisfiedVec {
-                    self.write2PointerKeyBuffer(&mut pointerKeyBuffer, *destDataKey, meta::KEY_TAG_UPSTREAM_REL_ID, relationTable.tableId, relDataKey);
+                    pointerKeyBuffer.writePointerKeyBuffer(*destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relationTable.tableId, relDataKey);
                     self.session.getCurrentTx()?.put_cf(&destColFamily, pointerKeyBuffer.as_ref(), &[])?;
                 }
             }
@@ -368,8 +373,13 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
     fn selectTable(&self, selectTable: &SelectTable) -> Result<CommandExecResult> {
         let srcTable = self.getTableRefByName(selectTable.tableName.as_str())?;
 
-        let rowDatas = self.scanSatisfiedRowsBinary(selectTable.tableFilterExpr.as_ref(), srcTable.value(), true, selectTable.selectedColNames.as_ref())?;
-        let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(dataKey, rowData)| rowData).collect();
+        let rowDatas =
+            self.scanSatisfiedRows(selectTable.tableFilterExpr.as_ref(),
+                                   srcTable.value(),
+                                   true,
+                                   selectTable.selectedColNames.as_ref())?;
+
+        let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(_, rowData)| rowData).collect();
 
         let values: Vec<Value> = JSON_ENUM_UNTAGGED!(rowDatas.into_iter().map(|rowData| serde_json::to_value(&rowData).unwrap()).collect());
         // JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
@@ -403,7 +413,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             // 为什么要使用{} 不然的话有概率死锁 https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
             let relationDatas: Vec<(DataKey, RowData)> = {
                 let relation = self.getTableRefByName(select.relationName.as_ref().unwrap())?;
-                let relationDatas = self.scanSatisfiedRowsBinary(select.relationFliterExpr.as_ref(), relation.value(), true, select.relationColumnNames.as_ref())?;
+                let relationDatas = self.scanSatisfiedRows(select.relationFliterExpr.as_ref(), relation.value(), true, select.relationColumnNames.as_ref())?;
                 relationDatas.into_iter().map(|(dataKey, rowData)| (dataKey, rowData)).collect()
             };
 
@@ -427,12 +437,12 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
                 let srcDataKeys = {
                     pointerKeyBuffer.clear();
                     pointerKeyBuffer.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, relationRowId));
-                    pointerKeyBuffer.put_u8(meta::KEY_TAG_SRC_TABLE_ID);
+                    pointerKeyBuffer.put_u8(meta::POINTER_KEY_TAG_SRC_TABLE_ID);
                     pointerKeyBuffer.put_u64(srcTable.tableId);
-                    pointerKeyBuffer.put_u8(meta::KEY_TAG_KEY);
+                    pointerKeyBuffer.put_u8(meta::POINTER_KEY_TAG_KEY);
 
                     let pointerKeys = self.getKeysByPrefix(&relColFamily, &*pointerKeyBuffer)?;
-                    pointerKeys.into_iter().map(|pointerKey| extract_data_key_from_pointer_key_slice!(&*pointerKey)).collect::<Vec<DataKey>>()
+                    pointerKeys.into_iter().map(|pointerKey| extract_data_key_from_pointer_key!(&*pointerKey)).collect::<Vec<DataKey>>()
                 };
                 if srcDataKeys.is_empty() {
                     continue;
@@ -442,12 +452,12 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
                 let destDataKeys = {
                     pointerKeyBuffer.clear();
                     pointerKeyBuffer.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, relationRowId));
-                    pointerKeyBuffer.put_u8(meta::KEY_TAG_DEST_TABLE_ID);
+                    pointerKeyBuffer.put_u8(meta::POINTER_KEY_TAG_DEST_TABLE_ID);
                     pointerKeyBuffer.put_u64(destTable.tableId);
-                    pointerKeyBuffer.put_u8(meta::KEY_TAG_KEY);
+                    pointerKeyBuffer.put_u8(meta::POINTER_KEY_TAG_KEY);
 
                     let pointerKeys = self.getKeysByPrefix(&relColFamily, &*pointerKeyBuffer)?;
-                    pointerKeys.into_iter().map(|pointerKey| extract_data_key_from_pointer_key_slice!(&*pointerKey)).collect::<Vec<DataKey>>()
+                    pointerKeys.into_iter().map(|pointerKey| extract_data_key_from_pointer_key!(&*pointerKey)).collect::<Vec<DataKey>>()
                 };
                 if destDataKeys.is_empty() {
                     continue;
@@ -586,25 +596,26 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         Ok(CommandExecResult::SelectResult(valueVec))
     }
 
+    // todo rel能不能直接delete 应该先把rel上的点全都取消 rel不存在src和dest的点 然后
     /// 得到满足expr的record 然后把它的xmax变为当前的txId
     fn delete(&self, delete: &Delete) -> Result<CommandExecResult> {
         let pairs = {
             let table = self.getTableRefByName(delete.tableName.as_str())?;
-            self.scanSatisfiedRowsBinary(delete.filterExpr.as_ref(), table.value(), true, None)?
+            self.scanSatisfiedRows(delete.filterExpr.as_ref(), table.value(), true, None)?
         };
 
-        let columnFamily = self.session.getColFamily(&delete.tableName)?;
+        let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
 
-        // 遍历更改的xmax
+        // 遍历添加当前tx对应的xmax
         for (dataKey, _) in pairs {
-            // 要更改的是xmax 在xmin后边
-            // 之前发现即使seek到了正确的位置,写入还是到末尾append的 原因是openOptions设置了append
-            self.session.getCurrentTx()?.delete_cf(&columnFamily, u64_to_byte_array_reference!(dataKey))?;
+            mvccKeyBuffer.writeMvccXmax(dataKey, self.session.getTxId()?);
+            self.session.writeDeleteMutation(&delete.tableName, (mvccKeyBuffer.to_vec(), EMPTY_BINARY));
         }
 
         Ok(CommandExecResult::DmlResult)
     }
 
+    // todo 要是point还有rel的联系不能update
     fn update(&self, update: &Update) -> Result<CommandExecResult> {
         let table = self.getTableRefByName(update.tableName.as_str())?;
 
@@ -621,7 +632,7 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             columnName_column
         };
 
-        let mut pairs = self.scanSatisfiedRowsBinary(update.filterExpr.as_ref(), table.value(), true, None)?;
+        let mut pairs = self.scanSatisfiedRows(update.filterExpr.as_ref(), table.value(), true, None)?;
 
         enum A<'a> {
             DirectValue(GraphValue),
@@ -630,18 +641,18 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
 
         let mut columnName_a: HashMap<String, A> = HashMap::with_capacity(update.columnName_expr.len());
 
-        macro_rules! column_type_compatible {
-            ($columnName_column:expr, $columnName: expr,$columnValue: expr,$tableName: expr) => {
-                match $columnName_column.get($columnName) {
-                    Some(column) => {
-                        if column.type0.compatible(&$columnValue) == false {
-                            throw!(&format!("table:{} , column:{}, is not compatilbe with value:{:?}", $tableName, $columnName, $columnValue));
-                        }
+        let compatibleCheck = |columnName: &String, columnValue: &GraphValue| {
+            match columnName_column.get(columnName) {
+                Some(column) => {
+                    if column.type0.compatible(columnValue) == false {
+                        throw!(&format!("table:{} , column:{}, is not compatilbe with value:{:?}", update.tableName, columnName, columnValue));
                     }
-                    None => throw!(&format!("table:{} has no column named:{}", $tableName, $columnName)),
                 }
-            };
-        }
+                None => throw!(&format!("table:{} has no column named:{}", update.tableName, columnName)),
+            }
+
+            anyhow::Result::<(), GraphError>::Ok(())
+        };
 
         // todo logical优化
         // column expr能直接计算的先计算 不要到后边的遍历里边重复计算了
@@ -652,23 +663,21 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
                 let columnValue = columnExpr.calc(None)?;
 
                 // update设置的值要和column type 相同
-                column_type_compatible!(columnName_column, columnName, columnValue, update.tableName);
+                compatibleCheck(columnName, &columnValue)?;
 
                 columnName_a.insert(columnName.to_string(), A::DirectValue(columnExpr.calc(None)?));
             }
         }
 
-        let columnFamily = self.session.getColFamily(update.tableName.as_str())?;
-
         // todo update的时候能不能直接从binary维度上更改row
-        for (rowId, rowData) in &mut pairs {
+        for (dataKey, rowData) in &mut pairs {
             for (columnName, a) in &columnName_a {
                 match a {
                     A::NeedCalc(expr) => {
                         let columnValue = expr.calc(Some(rowData))?;
 
                         // update设置的值要和column type 相同
-                        column_type_compatible!(columnName_column, columnName, columnValue, update.tableName);
+                        compatibleCheck(columnName, &columnValue)?;
 
                         rowData.insert(columnName.to_string(), columnValue.clone());
                     }
@@ -679,9 +688,8 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
             }
 
             // todo 各个column的value都在1道使得update时候只能整体来弄太耦合了 后续设想能不能各个column保存到单独的key
-            let key = u64_to_byte_array_reference!(*rowId);
 
-            let destByteSlice = {
+            let value = {
                 let mut destByteSlice = BytesMut::new();
                 // 需要以表定义里边的column顺序来序列化
                 for column in &table.columns {
@@ -691,14 +699,27 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
 
                 destByteSlice.freeze()
             };
-            let value = destByteSlice.as_ref();
+            let value = value.as_ref();
 
-            self.session.getCurrentTx()?.put_cf(&columnFamily, key, value)?;
+            // 写老的data的xmax
+            let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+            mvccKeyBuffer.writeMvccXmax(*dataKey, self.session.getTxId()?);
+            let oldXmax = (mvccKeyBuffer.to_vec(), EMPTY_BINARY);
+
+            // 写新的data
+            let newRowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
+            let newDataKey = key_prefix_add_row_id!(meta::KEY_PREFIX_MVCC,newRowId);
+            // self.session.getCurrentTx()?.put_cf(&columnFamily, dataKeyBinary, value)?;
+            let newData = (u64_to_byte_array_reference!(newDataKey).to_vec(), value.to_vec());
+
+            // 写新的data的xmin xmax
+            let (newXmin, newXmax) = self.generateAddXminXmax(&mut mvccKeyBuffer, newDataKey)?;
+
+            self.session.writeUpdateMutation(&table.name, oldXmax, newData, newXmin, newXmax);
         }
 
         Ok(CommandExecResult::DmlResult)
     }
-
 
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
     fn getRowDatasByDataKeys(&self,
@@ -706,24 +727,32 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
                              table: &Table,
                              tableFilter: Option<&Expr>,
                              selectedColNames: Option<&Vec<String>>) -> Result<Vec<(DataKey, RowData)>> {
-        // 要得到表的全部的data
-        if dataKeys[0] == global::TOTAL_DATA_OF_TABLE {
-            return self.scanSatisfiedRowsBinary(tableFilter, table, true, selectedColNames);
-        }
-
         let mut rowDatas = Vec::with_capacity(dataKeys.len());
 
         let columnFamily = self.session.getColFamily(&table.name)?;
 
-        for dataKey in dataKeys {
+        let mut process = |dataKey: DataKey| -> Result<()> {
             let rowDataBinary =
-                match self.session.getCurrentTx()?.get_cf(&columnFamily, u64_to_byte_array_reference!(*dataKey))? {
+                match self.session.dataStore.get_cf(&columnFamily, u64_to_byte_array_reference!(dataKey))? {
                     Some(rowDataBinary) => rowDataBinary,
-                    None => continue,
+                    None => return Ok(()), // 有可能
                 };
 
-            if let Some(rowData) = self.readRowDataBinary(table, Box::from(&rowDataBinary[..]), tableFilter, selectedColNames)? {
-                rowDatas.push((*dataKey, rowData));
+            if let Some(rowData) = self.readRowDataBinary(table, rowDataBinary.as_slice(), tableFilter, selectedColNames)? {
+                rowDatas.push((dataKey, rowData));
+            }
+
+            Ok(())
+        };
+
+        // 要得到表的全部的data
+        if dataKeys[0] == global::TOTAL_DATA_OF_TABLE {
+            for dataKey in dataKeys[1]..=dataKeys[2] {
+                process(dataKey)?;
+            }
+        } else {
+            for dataKey in dataKeys {
+                process(*dataKey)?;
             }
         }
 
@@ -731,57 +760,140 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
     }
 
     // todo 实现 index
-    fn scanSatisfiedRowsBinary(&self,
-                               tableFilterExpr: Option<&Expr>,
-                               table: &Table,
-                               select: bool,
-                               selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(DataKey, RowData)>> {
+    fn scanSatisfiedRows(&self,
+                         tableFilterExpr: Option<&Expr>,
+                         table: &Table,
+                         select: bool,
+                         selectedColumnNames: Option<&Vec<String>>) -> Result<Vec<(DataKey, RowData)>> {
+        // todo 使用table id 为 column family 标识
         let columnFamily = self.session.getColFamily(&table.name)?;
 
-        // 对数据条目而不是pointer条目遍历
-        let iterator =
-            self.session.getCurrentTx()?.prefix_iterator_cf(&columnFamily, meta::DATA_KEY_START_BINARY);
+        let currentTxId = self.session.getTxId()?;
 
         let satisfiedRows =
             if tableFilterExpr.is_some() || select {
+                // 对数据条目而不是pointer条目遍历
+                let iterator =
+                    self.session.dataStore.prefix_iterator_cf(&columnFamily, meta::DATA_KEY_PATTERN);
+
                 let mut satisfiedRows = Vec::new();
+
+                // mvcc的visibility筛选
+                let mut rawIterator = self.session.dataStore.raw_iterator();
+
+                let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
 
                 // todo scan遍历能不能concurrent
                 for iterResult in iterator {
-                    let (key, vaule) = iterResult?;
+                    let (dataKeyBinary, rowDataBinary) = iterResult?;
 
                     // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
                     // 前4个bit的值是不是 KEY_PREFIX_DATA
-                    if extract_prefix_from_key_1st_byte!(key[0]) != meta::KEY_PREFIX_DATA {
+                    if extract_prefix_from_key_slice!(dataKeyBinary) != meta::KEY_PREFIX_DATA {
                         break;
                     }
 
-                    //  let rowBinary = &*pair.1;
-                    match self.readRowDataBinary(table, vaule, tableFilterExpr, selectedColumnNames)? {
-                        None => continue,
-                        Some(rowData) => {
-                            satisfiedRows.push((byte_slice_to_u64!(&*key), rowData))
+                    let mut dataKey = byte_slice_to_u64!(&*dataKeyBinary) as DataKey;
+                    let mut rowDataBinary = &*rowDataBinary;
+
+                    // mvcc的visibility筛选
+                    // xmin
+                    // 当vaccum时候会变为 TX_ID_FROZEN 别的时候不会变动 只会有1条
+                    mvccKeyBuffer.writeMvccXmin(dataKey, meta::TX_ID_FROZEN);
+                    rawIterator.seek(mvccKeyBuffer.as_ref());
+                    if rawIterator.valid() == false {
+                        panic!("impossible")
+                    }
+                    let mvccKeyXmin = rawIterator.key().unwrap();
+                    let xmin = extract_tx_id_from_mvcc_key!(mvccKeyXmin);
+
+                    // xmax
+                    mvccKeyBuffer.writeMvccXmax(dataKey, currentTxId);
+                    rawIterator.seek_for_prev(mvccKeyBuffer.as_ref());
+                    // todo 目前想不明白iterator 是 invalid 如何应对
+                    if rawIterator.valid() == false {
+                        continue;
+                    }
+                    // todo 要能确保会至少有xmax是0的 mvcc条目
+                    let mvccKeyXmax = rawIterator.key().unwrap();
+                    let xmax = extract_tx_id_from_mvcc_key!(mvccKeyXmax);
+
+                    if meta::isVisible(currentTxId, xmin, xmax) == false {
+                        continue;
+                    }
+
+                    let rowIdCurrent = extract_row_id_from_data_key!(dataKey);
+
+                    // 应对当前tx上的mutations 还要结合mutations来的
+                    // insert 对本身data筛选
+                    // update 当前的条目失效 对添加的本身的data筛选
+                    // delete 当前的条目失效
+                    let mut latestedMutation = None;
+                    let mutations = self.session.mutations.borrow();
+                    match mutations.get(&table.name) {
+                        None => {}
+                        Some(mutationsOnTable) => {
+                            for mutationOnTable in mutationsOnTable {
+                                match mutationOnTable {
+                                    Mutation::ADD { .. } => {} // add 不涉及已提交的 do nothing
+                                    Mutation::UPDATE { oldXmax, .. } => {
+                                        // todo 如何知道后边还有没有更新的涉及该rowId的update delete
+                                        // update要是涉及 用new替换当前的rowDataBinary
+                                        let rowIdUpdated = extract_row_id_from_key_slice!(oldXmax.0.as_slice());
+                                        if rowIdCurrent == rowIdUpdated {
+                                            latestedMutation = Some(mutationOnTable);
+                                        }
+                                    }
+                                    Mutation::DELETE { oldXmax } => {
+                                        // delete要是涉及了 需要continue
+                                        let rowIdUpdated = extract_row_id_from_key_slice!(oldXmax.0.as_slice());
+                                        if rowIdCurrent == rowIdUpdated {
+                                            latestedMutation = Some(mutationOnTable);
+                                        }
+                                    }
+                                }
+                            }
                         }
+                    }
+
+                    if let Some(mutation) = latestedMutation {
+                        match mutation {
+                            Mutation::ADD { .. } => panic!("impossible"),
+                            Mutation::UPDATE { newData, .. } => {
+                                let (newDataKeyBinary, newRowDataBinary) = newData;
+                                dataKey = byte_slice_to_u64!(newDataKeyBinary);
+                                rowDataBinary = newRowDataBinary.as_slice();
+                            }
+                            Mutation::DELETE { .. } => continue,
+                        }
+                    }
+
+                    //  可见性筛选过了 对rowData本身的筛选
+                    match self.readRowDataBinary(table, rowDataBinary, tableFilterExpr, selectedColumnNames)? {
+                        None => continue,
+                        Some(rowData) => satisfiedRows.push((dataKey, rowData)),
                     }
                 }
 
                 satisfiedRows
             } else { // 说明是link 且尚未写filterExpr
-                //
-                let mut rawIterator: DBRawIteratorWithThreadMode<Transaction<OptimisticTransactionDB>> = iterator.into();
+                let mut rawIterator = self.session.dataStore.raw_iterator_cf(&columnFamily);
+                rawIterator.seek(meta::DATA_KEY_PATTERN);
 
                 if rawIterator.valid() == false {
-                    vec![(global::TOTAL_DATA_OF_TABLE, HashMap::default())]
+                    vec![]
                 } else {
                     // start include
                     let startKeyBinInclude = rawIterator.key().unwrap();
                     let startKeyInclude = byte_slice_to_u64!(startKeyBinInclude);
 
                     // end include
+                    // seek_for_prev 意思是 定位到目标 要是目标没有的话 那么定位到它前个
                     rawIterator.seek_for_prev(u64_to_byte_array_reference!(((meta::KEY_PREFIX_DATA + 1) as u64)  << meta::ROW_ID_BIT_LEN));
                     let endKeyBinInclude = rawIterator.key().unwrap();
                     let endKeyInclude = byte_slice_to_u64!(endKeyBinInclude);
 
+                    // todo 可能要应对后续的肯能的rowId回收
                     vec![
                         (global::TOTAL_DATA_OF_TABLE, HashMap::default()),
                         (startKeyInclude, HashMap::default()),
@@ -795,12 +907,13 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
 
     fn readRowDataBinary(&self,
                          table: &Table,
-                         rowBinary: Box<[u8]>,
+                         rowBinary: &[u8],
                          tableFilterExpr: Option<&Expr>,
                          selectedColumnNames: Option<&Vec<String>>) -> Result<Option<RowData>> {
         let columnNames = table.columns.iter().map(|column| column.name.clone()).collect::<Vec<String>>();
 
-        let mut myBytesRowData = MyBytes::from(Bytes::from(rowBinary));
+        // todo 如何不去的copy
+        let mut myBytesRowData = MyBytes::from(Bytes::from(Vec::from(rowBinary)));
         let columnValues = Vec::try_from(&mut myBytesRowData)?;
 
         if columnNames.len() != columnValues.len() {
@@ -980,43 +1093,88 @@ impl<'sessionLife, 'db> CommandExecutor<'sessionLife, 'db> {
         Ok(keys)
     }
 
-    fn write2PointerKeyBuffer(&self,
-                              buffer: &mut BytesMut,
-                              selfDatakey: DataKey,
-                              keyTag: KeyTag, tableId: TableId,
-                              dataKey: DataKey) {
-        buffer.clear();
+    fn generateAddXminXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> Result<(KV, KV)> {
+        let xmin = {
+            mvccKeyBuffer.writeMvccKeyBuffer(dataKey, meta::MVCC_KEY_TAG_XMIN, self.session.getTxId()?)?;
+            (mvccKeyBuffer.to_vec(), EMPTY_BINARY)
+        };
 
-        let rowId = extract_row_id_from_data_key!(selfDatakey);
+        let xmax = {
+            mvccKeyBuffer.writeMvccKeyBuffer(dataKey, meta::MVCC_KEY_TAG_XMAX, meta::TX_ID_INVALID)?;
+            (mvccKeyBuffer.to_vec(), EMPTY_BINARY)
+        };
 
-        buffer.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, rowId));
+        Ok((xmin, xmax))
+    }
+}
 
-        // 写relation的tableId
-        buffer.put_u8(keyTag);
-        buffer.put_u64(tableId);
+trait BytesMutExt {
+    // todo writePointerKeyBuffer() 和 writePointerKeyLeadingPart() 有公用部分的 完成
+    /// 不包含末尾的对应其它table rel 的dataKey
+    fn writePointerKeyLeadingPart(&mut self,
+                                  dataKey: DataKey,
+                                  keyTag: KeyTag, tableId: TableId);
 
-        // 写realation的rowId
-        buffer.put_u8(meta::KEY_TAG_KEY);
-        buffer.put_u64(dataKey);
+    fn writePointerKeyBuffer(&mut self,
+                             selfDatakey: DataKey,
+                             keyTag: KeyTag, tableId: TableId,
+                             dataKey: DataKey);
+
+    fn writeMvccKeyBuffer(&mut self,
+                          dataKey: DataKey,
+                          mvccKeyTag: KeyTag,
+                          txid: TxId) -> Result<()>;
+
+    fn writeMvccXmin(&mut self, dataKey: DataKey, xmin: TxId) {
+        self.writeMvccKeyBuffer(dataKey, meta::MVCC_KEY_TAG_XMIN, xmin).unwrap();
     }
 
-    /// 不包含末尾的对应其它table rel 的dataKey
-    fn write2PointerKeyLeadingPart(&self,
-                                   buffer: &mut BytesMut,
-                                   selfDatakey: DataKey,
-                                   keyTag: KeyTag, tableId: TableId) {
-        buffer.clear();
+    fn writeMvccXmax(&mut self, dataKey: DataKey, xmax: TxId) {
+        self.writeMvccKeyBuffer(dataKey, meta::MVCC_KEY_TAG_XMAX, xmax).unwrap()
+    }
+}
 
-        let rowId = extract_row_id_from_data_key!(selfDatakey);
+impl BytesMutExt for BytesMut {
+    fn writePointerKeyLeadingPart(&mut self,
+                                  dataKey: DataKey,
+                                  keyTag: KeyTag, tableId: TableId) {
+        self.clear();
 
-        buffer.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, rowId));
+        let rowId = extract_row_id_from_data_key!(dataKey);
+        self.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, rowId));
 
         // 写relation的tableId
-        buffer.put_u8(keyTag);
-        buffer.put_u64(tableId);
+        self.put_u8(keyTag);
+        self.put_u64(tableId);
 
         // 后边用来写dataKey
-        buffer.put_u8(meta::KEY_TAG_KEY);
+        self.put_u8(meta::POINTER_KEY_TAG_KEY);
+    }
+
+    fn writePointerKeyBuffer(&mut self,
+                             selfDatakey: DataKey,
+                             keyTag: KeyTag, tableId: TableId,
+                             dataKey: DataKey) {
+        self.writePointerKeyLeadingPart(selfDatakey, keyTag, tableId);
+        self.put_u64(dataKey);
+    }
+
+    fn writeMvccKeyBuffer(&mut self,
+                          dataKey: DataKey,
+                          mvccKeyTag: KeyTag, txid: TxId) -> Result<()> {
+        self.clear();
+
+        match mvccKeyTag {
+            meta::MVCC_KEY_TAG_XMIN | meta::MVCC_KEY_TAG_XMAX => {
+                let rowId = extract_row_id_from_data_key!(dataKey);
+                self.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_MVCC, rowId));
+                self.put_u8(mvccKeyTag);
+                self.put_u64(txid);
+            }
+            _ => throw!("should be KEY_PREFIX_MVCC_XMIN, KEY_PREFIX_MVCC_XMAX"),
+        }
+
+        Ok(())
     }
 }
 

@@ -5,7 +5,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, suffix_plus_plus, throw, u64_to_byte_array_reference};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta,
+            suffix_plus_plus, throw, u64_to_byte_array_reference};
 use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
@@ -13,7 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
-use rocksdb::{BoundColumnFamily, ColumnFamilyDescriptor, DBCommon, DBRawIteratorWithThreadMode, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options};
+use rocksdb::{BoundColumnFamily, ColumnFamilyDescriptor, DB, DBCommon,
+              DBRawIteratorWithThreadMode, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options};
 use tokio::sync::RwLock;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use crate::config::CONFIG;
@@ -23,62 +25,104 @@ use crate::parser::Command;
 use crate::session::Session;
 use crate::utils::TrickyContainer;
 
-pub type RowId = u64;
 pub type TableId = u64;
 
 lazy_static! {
     pub static ref STORE: TrickyContainer<Store> = TrickyContainer::new();
     pub static ref TABLE_NAME_TABLE: DashMap<String, Table> = DashMap::new();
     pub static ref TABLE_ID_COUNTER: AtomicU64 = AtomicU64::default();
+    pub static ref TX_ID_COUNTER: AtomicU64 = AtomicU64::new(TX_ID_MIN);
 }
 
 pub struct Store {
-    pub meta: OptimisticTransactionDB,
-    pub data: OptimisticTransactionDB,
+    pub metaStore: DB,
+    pub dataStore: DB,
 }
-
-pub type DataKey = u64;
-
-// key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
-pub const DATA_KEY_BYTE_LEN: usize = 8;
 
 pub type KeyPrefix = Byte;
 
 pub const KEY_PREFIX_BIT_LEN: usize = 4;
 pub const KEY_PREFIX_MAX: KeyPrefix = (1 << KEY_PREFIX_BIT_LEN) - 1;
-
 pub const KEY_PREFIX_DATA: KeyPrefix = 1;
 pub const KEY_PREFIX_POINTER: KeyPrefix = 0;
+pub const KEY_PREFIX_MVCC: KeyPrefix = 2;
+
+pub type RowId = u64;
 
 pub const ROW_ID_BIT_LEN: usize = 64 - KEY_PREFIX_BIT_LEN;
 pub const MAX_ROW_ID: u64 = (1 << ROW_ID_BIT_LEN) - 1;
 
-pub const DATA_KEY_START_BINARY: &[Byte] = {
-    let dataKeyStart = (KEY_PREFIX_DATA as u64) << ROW_ID_BIT_LEN;
-    u64_to_byte_array_reference!(dataKeyStart)
+pub type DataKey = u64;
+
+// key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
+pub const DATA_KEY_BYTE_LEN: usize = mem::size_of::<DataKey>();
+pub const DATA_KEY_PATTERN: &[Byte] = {
+    u64_to_byte_array_reference!((KEY_PREFIX_DATA as u64) << ROW_ID_BIT_LEN)
 };
 
 // tag 用到POINTER前缀的key上的1Byte
 pub type KeyTag = Byte;
 
 pub const KEY_TAG_BYTE_LEN: usize = 1;
+
 /// node 下游rel的tableId
-pub const KEY_TAG_UPSTREAM_REL_ID: KeyTag = 0;
+pub const POINTER_KEY_TAG_UPSTREAM_REL_ID: KeyTag = 0;
 /// node 上游rel的tableId
-pub const KEY_TAG_DOWNSTREAM_REL_ID: KeyTag = 1;
+pub const POINTER_KEY_TAG_DOWNSTREAM_REL_ID: KeyTag = 1;
 /// rel 的srcNode的tableId
-pub const KEY_TAG_SRC_TABLE_ID: KeyTag = 2;
+pub const POINTER_KEY_TAG_SRC_TABLE_ID: KeyTag = 2;
 /// rel的destNode的tableId
-pub const KEY_TAG_DEST_TABLE_ID: KeyTag = 3;
-pub const KEY_TAG_KEY: KeyTag = 4;
+pub const POINTER_KEY_TAG_DEST_TABLE_ID: KeyTag = 3;
+pub const POINTER_KEY_TAG_KEY: KeyTag = 4;
 
 pub const POINTER_KEY_BYTE_LEN: usize = {
-    mem::size_of::<u64>() + // keyPrefix 4bit + rowId 60bit
+    DATA_KEY_BYTE_LEN + // keyPrefix 4bit + rowId 60bit
         KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // table/relation的key
         KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN // 实际的data条目的key
 };
 
 pub const POINTER_LENADING_PART_BYTE_LEN: usize = POINTER_KEY_BYTE_LEN - DATA_KEY_BYTE_LEN;
+
+pub type TxId = u64;
+
+// 写到dataKey
+// add put 添加新的
+// update  删掉old 添加作废的old 添加新的 -> 修改old 添加新的
+// delete 删掉old 添加作废的old -> 修改old
+
+// 写到 mvcc key
+// add 写dataKey 写mvcc_xmin 写mvcc_xmax
+// update 删掉
+pub const TX_ID_BYTE_LEN: usize = mem::size_of::<TxId>();
+pub const TX_ID_INVALID: TxId = 0;
+pub const TX_ID_FROZEN: TxId = 2;
+pub const TX_ID_MIN: TxId = 3;
+pub const TX_ID_MAX: TxId = TxId::MAX;
+
+pub const TX_CONCURRENCY_MAX: usize = 100000;
+
+pub const MVCC_KEY_TAG_XMIN: KeyTag = 0;
+pub const MVCC_KEY_TAG_XMAX: KeyTag = 1;
+
+pub const MVCC_KEY_BYTE_LEN: usize = {
+    DATA_KEY_BYTE_LEN + KEY_TAG_BYTE_LEN + TX_ID_BYTE_LEN
+};
+
+pub fn isVisible(currentTxId: TxId, xmin: TxId, xmax: TxId) -> bool {
+    // invisible
+    if currentTxId >= xmax {
+        if (xmax == TX_ID_INVALID) == false {
+            return false;
+        }
+    }
+
+    // invisible
+    if xmin > currentTxId {
+        return false;
+    }
+
+    true
+}
 
 #[macro_export]
 macro_rules! key_prefix_add_row_id {
@@ -95,18 +139,38 @@ macro_rules! extract_row_id_from_data_key {
 }
 
 #[macro_export]
-macro_rules! extract_prefix_from_key_1st_byte {
-    ($byte: expr) => {
-        ((($byte) >> meta::KEY_PREFIX_BIT_LEN) & meta::KEY_PREFIX_MAX) as meta::KeyPrefix
+macro_rules! extract_row_id_from_key_slice {
+    ($slice: expr) => {
+        {
+           let leadingU64 = byte_slice_to_u64!($slice);
+           ((leadingU64) & meta::MAX_ROW_ID) as meta::RowId
+        }
     };
 }
 
 #[macro_export]
-macro_rules! extract_data_key_from_pointer_key_slice {
-    ($pointerKeySlice: expr) => {
+macro_rules! extract_prefix_from_key_slice {
+    ($slice: expr) => {
+        ((($slice[0]) >> meta::KEY_PREFIX_BIT_LEN) & meta::KEY_PREFIX_MAX) as meta::KeyPrefix
+    };
+}
+
+#[macro_export]
+macro_rules! extract_data_key_from_pointer_key {
+    ($pointerKey: expr) => {
         {
-            let slice = &$pointerKeySlice[(meta::POINTER_KEY_BYTE_LEN - meta::DATA_KEY_BYTE_LEN)..meta::POINTER_KEY_BYTE_LEN];
+            let slice = &$pointerKey[(meta::POINTER_KEY_BYTE_LEN - meta::DATA_KEY_BYTE_LEN)..meta::POINTER_KEY_BYTE_LEN];
             byte_slice_to_u64!(slice) as meta::DataKey
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! extract_tx_id_from_mvcc_key {
+    ($mvccKey: expr) => {
+        {
+            let txIdSlice = &$mvccKey[(meta::MVCC_KEY_BYTE_LEN - meta::DATA_KEY_BYTE_LEN)..meta::MVCC_KEY_BYTE_LEN];
+            byte_slice_to_u64!(txIdSlice) as meta::TxId
         }
     };
 }
@@ -239,8 +303,10 @@ pub fn init() -> Result<()> {
         metaStoreOption.set_max_write_buffer_number(2);
         metaStoreOption.create_if_missing(true);
 
-        let metaStore: OptimisticTransactionDB = OptimisticTransactionDB::open(&metaStoreOption, CONFIG.metaDir.as_str())?;
+        let metaStore = DB::open(&metaStoreOption, CONFIG.metaDir.as_str())?;
+        //let metaStore: OptimisticTransactionDB = OptimisticTransactionDB::open(&metaStoreOption, CONFIG.metaDir.as_str())?;
 
+        // todo tableId的计数不对
         let mut latestTableId = 0u64;
 
         let iterator = metaStore.iterator(IteratorMode::Start);
@@ -266,7 +332,7 @@ pub fn init() -> Result<()> {
         metaStore
     };
 
-    let dataStore: OptimisticTransactionDB = {
+    let dataStore: DB = {
         let columnFamilyDescVec: Vec<ColumnFamilyDescriptor> =
             tableNames.iter().map(|tableName| {
                 let mut columnFamilyOption = Options::default();
@@ -283,7 +349,8 @@ pub fn init() -> Result<()> {
         dataStoreOption.create_missing_column_families(true);
         dataStoreOption.create_if_missing(true);
 
-        let dataStore: OptimisticTransactionDB = OptimisticTransactionDB::open_cf_descriptors(&dataStoreOption, CONFIG.dataDir.as_str(), columnFamilyDescVec)?;
+        let dataStore = DB::open_cf_descriptors(&dataStoreOption, CONFIG.dataDir.as_str(), columnFamilyDescVec)?;
+        //let dataStore: OptimisticTransactionDB = OptimisticTransactionDB::open_cf_descriptors(&dataStoreOption, CONFIG.dataDir.as_str(), columnFamilyDescVec)?;
 
         dataStore
     };
@@ -291,10 +358,10 @@ pub fn init() -> Result<()> {
     // 遍历各个cf读取last的key 读取lastest的rowId
     for ref tableName in tableNames {
         let cf = dataStore.cf_handle(tableName.as_str()).unwrap();
-        let mut iterator = dataStore.raw_iterator_cf(&cf);
+        let mut rawIterator = dataStore.raw_iterator_cf(&cf);
         // 到last条目而不是末尾 不用去调用prev()
-        iterator.seek_to_last();
-        if let Some(key) = iterator.key() {
+        rawIterator.seek_to_last();
+        if let Some(key) = rawIterator.key() {
             let lastRowId = byte_slice_to_u64!(key);
             // println!("{tableName}, {}", lastRowId);
             TABLE_NAME_TABLE.get_mut(tableName.as_str()).unwrap().rowIdCounter.store(lastRowId + 1, Ordering::Release);
@@ -302,8 +369,8 @@ pub fn init() -> Result<()> {
     }
 
     STORE.set(Store {
-        meta: metaStore,
-        data: dataStore,
+        metaStore,
+        dataStore,
     });
 
     Ok(())
@@ -311,9 +378,13 @@ pub fn init() -> Result<()> {
 
 #[cfg(test)]
 mod test {
+    use std::thread;
+    use std::time::Duration;
+    use rocksdb::{DB, OptimisticTransactionDB, Options, TransactionDB, WriteBatchWithTransaction};
     use tokio::fs::OpenOptions;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::runtime::Builder;
+    use crate::config::CONFIG;
     use crate::graph_value::GraphValue;
     use crate::meta;
     use crate::session::Session;
@@ -363,5 +434,39 @@ mod test {
         })?;
 
         Ok(())
+    }
+
+    #[test]
+    pub fn testRocksDB() {
+        let transactionDB: TransactionDB = TransactionDB::open_default("test").unwrap();
+
+        let tx0 = transactionDB.transaction();
+        tx0.put(&[0], &[1]).unwrap();
+
+        let tx1 = transactionDB.transaction();
+        tx1.put(&[0], &[2]).unwrap();
+
+        tx0.commit().unwrap();
+
+        // 两个tx产生了交集 key conflict 报错resource busy
+        tx1.commit().unwrap();
+    }
+
+    #[test]
+    pub fn testWriteBatch() {
+        let mut options = Options::default();
+        options.create_if_missing(true);
+
+        let db = DB::open_default("test").unwrap();
+
+        let mut writeBatchWithTx0 = WriteBatchWithTransaction::<false>::default();
+        writeBatchWithTx0.put(&[0], &[1]);
+
+        let mut writeBatchWithTx1 = WriteBatchWithTransaction::<false>::default();
+        writeBatchWithTx1.put(&[0], &[1]);
+
+        db.write(writeBatchWithTx0).unwrap();
+
+        db.write(writeBatchWithTx1).unwrap();
     }
 }

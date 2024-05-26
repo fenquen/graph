@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, fmt, io::Error as IoError, net::SocketAddr, sync::{Arc, Mutex}};
+use std::{collections::HashMap, env, fmt, io::Error as IoError, net::SocketAddr, sync::{Arc, Mutex}, thread};
 use std::fmt::{Display, Formatter};
 use anyhow::{anyhow, Result};
 use futures::Sink;
@@ -134,7 +134,7 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
 
         async fn processGraphWsRequest(writeStream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
                                        text: &str,
-                                       session: &mut Session<'_>,
+                                       session: &mut Session,
                                        remoteAddr: &SocketAddr) -> Result<()> {
             let graphWsRequest = serde_json::from_str::<GraphWsRequest>(text);
             if let Err(e) = graphWsRequest {
