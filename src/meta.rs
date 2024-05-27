@@ -73,15 +73,21 @@ pub const POINTER_KEY_TAG_DOWNSTREAM_REL_ID: KeyTag = 1;
 pub const POINTER_KEY_TAG_SRC_TABLE_ID: KeyTag = 2;
 /// rel的destNode的tableId
 pub const POINTER_KEY_TAG_DEST_TABLE_ID: KeyTag = 3;
-pub const POINTER_KEY_TAG_KEY: KeyTag = 4;
+/// 后边实际的table/rel上的dataKey
+pub const POINTER_KEY_TAG_DATA_KEY: KeyTag = 4;
+// pub const POINTER_KEY_TAG_XMIN: KeyTag = 5;
+// pub const POINTER_KEY_TAG_XMAX: KeyTag = 7;
 
+// todo  pointerKey如何应对mvcc
 pub const POINTER_KEY_BYTE_LEN: usize = {
     DATA_KEY_BYTE_LEN + // keyPrefix 4bit + rowId 60bit
         KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // table/relation的key
-        KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN // 实际的data条目的key
+        KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // 实际的data条目的key
+        KEY_TAG_BYTE_LEN + TX_ID_BYTE_LEN // xmin和xmax 对应的tx
 };
 
-pub const POINTER_LENADING_PART_BYTE_LEN: usize = POINTER_KEY_BYTE_LEN - DATA_KEY_BYTE_LEN;
+/// pointerKey的对端的dataKey前边的byte数量
+pub const POINTER_PRIOR_DATA_KEY_PART_BYTE_LEN: usize = POINTER_KEY_BYTE_LEN - TX_ID_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN;
 
 pub type TxId = u64;
 
@@ -101,6 +107,7 @@ pub const TX_ID_MAX: TxId = TxId::MAX;
 
 pub const TX_CONCURRENCY_MAX: usize = 100000;
 
+// KEY_PREFIX_MVCC + rowId + MVCC_KEY_TAG_XMIN + txId
 pub const MVCC_KEY_TAG_XMIN: KeyTag = 0;
 pub const MVCC_KEY_TAG_XMAX: KeyTag = 1;
 
@@ -159,18 +166,30 @@ macro_rules! extract_prefix_from_key_slice {
 macro_rules! extract_data_key_from_pointer_key {
     ($pointerKey: expr) => {
         {
-            let slice = &$pointerKey[(meta::POINTER_KEY_BYTE_LEN - meta::DATA_KEY_BYTE_LEN)..meta::POINTER_KEY_BYTE_LEN];
+            let slice = &$pointerKey[meta::POINTER_PRIOR_DATA_KEY_PART_BYTE_LEN..(meta::POINTER_PRIOR_DATA_KEY_PART_BYTE_LEN + meta::DATA_KEY_BYTE_LEN)];
             byte_slice_to_u64!(slice) as meta::DataKey
         }
     };
 }
 
+/// txId 是在 mvccKey 末尾
 #[macro_export]
 macro_rules! extract_tx_id_from_mvcc_key {
     ($mvccKey: expr) => {
         {
-            let txIdSlice = &$mvccKey[(meta::MVCC_KEY_BYTE_LEN - meta::DATA_KEY_BYTE_LEN)..meta::MVCC_KEY_BYTE_LEN];
+            let txIdSlice = &$mvccKey[(meta::MVCC_KEY_BYTE_LEN - meta::TX_ID_BYTE_LEN)..meta::MVCC_KEY_BYTE_LEN];
             byte_slice_to_u64!(txIdSlice) as meta::TxId
+        }
+    };
+}
+
+/// txId 是在 pointerkey 末尾
+#[macro_export]
+macro_rules! extract_tx_id_from_pointer_key {
+    ($pointerKey: expr) => {
+        {
+            let slice = &$pointerKey[(meta::POINTER_KEY_BYTE_LEN - meta::TX_ID_BYTE_LEN)..meta::POINTER_KEY_BYTE_LEN];
+            byte_slice_to_u64!(slice) as meta::TxId
         }
     };
 }

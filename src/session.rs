@@ -1,7 +1,11 @@
 use std::borrow::Borrow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, Hash, RandomState};
+use std::marker::PhantomPinned;
+use std::pin::Pin;
+use std::ptr::NonNull;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -21,7 +25,7 @@ pub struct Session {
     autoCommit: bool,
     // currentTx: Option<Transaction<'db, OptimisticTransactionDB>>,
     txId: Option<TxId>,
-    pub mutations: RefCell<HashMap<String, Vec<Mutation>>>,
+    pub txMutation: RefCell<TxMutation>,
     pub dataStore: &'static DB,
 }
 
@@ -76,7 +80,7 @@ impl Session {
         }
 
         self.txId = None;
-        self.mutations.borrow_mut().clear();
+        self.txMutation.borrow_mut().clear();
 
         Ok(())
     }
@@ -103,40 +107,85 @@ impl Session {
         Ok(meta::STORE.dataStore.create_cf(columnFamilyName, &Options::default())?)
     }
 
-    pub fn wtiteAddMutation(&self,
-                            tableName: &String,
-                            data: KV, xmin: KV, xmax: KV) {
-        let addMutation = Mutation::ADD {
+    pub fn writeAddDataMutation(&self,
+                                tableName: &String,
+                                data: KV, xmin: KV, xmax: KV) {
+        let addMutation = Mutation::AddData {
             data,
             xmin,
             xmax,
         };
 
-        self.writeMutation(tableName, addMutation);
+        self.writeMutation(tableName, true, addMutation);
     }
 
-    pub fn writeUpdateMutation(&self,
-                               tableName: &String,
-                               oldXmax: KV,
-                               newData: KV, newXmin: KV, newXmax: KV) {
-        let updateMutation = Mutation::UPDATE {
+    pub fn writeAddPointerMutation(&self,
+                                   tableName: &String,
+                                   xmin: KV, xmax: KV) {
+        let addMutation = Mutation::AddPointer {
+            xmin,
+            xmax,
+        };
+
+        self.writeMutation(tableName, false, addMutation);
+    }
+
+
+    pub fn writeUpdateDataMutation(&self,
+                                   tableName: &String,
+                                   oldXmax: KV,
+                                   newData: KV, newXmin: KV, newXmax: KV) {
+        let updateMutation = Mutation::UpdateData {
             oldXmax,
             newData,
             newXmin,
             newXmax,
         };
 
-        self.writeMutation(tableName, updateMutation);
+        self.writeMutation(tableName, true, updateMutation);
     }
 
-    pub fn writeDeleteMutation(&self, tableName: &String, oldXmax: KV) {
-        self.writeMutation(tableName, Mutation::DELETE { oldXmax })
+    pub fn writeDeleteDataMutation(&self, tableName: &String, oldXmax: KV) {
+        self.writeMutation(tableName, true, Mutation::DeleteData { oldXmax })
     }
 
-    fn writeMutation(&self, tableName: &String, mutation: Mutation) {
-        let mut mutations = self.mutations.borrow_mut();
-        let tableMutations = mutations.getMutWithDefault(tableName);
-        tableMutations.push(mutation);
+    pub fn writeDeletePointerMutation(&self, tableName: &String, oldXmax: KV) {
+        self.writeMutation(tableName, false, Mutation::DeletePointer { oldXmax })
+    }
+
+    fn writeMutation(&self, tableName: &String, ifData: bool, mutation: Mutation) {
+        let mutation = Arc::new(mutation);
+
+        let mut txMutation = self.txMutation.borrow_mut();
+        txMutation.totalMutations.push(mutation.clone());
+
+        let tableMutation = txMutation.tableName_tableMutation.getMutWithDefault(tableName);
+        tableMutation.totalMutations.push(mutation.clone());
+
+        match (ifData, &*mutation) {
+            (true, Mutation::AddData { .. }) => tableMutation.addDataMutations.push(mutation.clone()),
+            (true, Mutation::UpdateData { newData, newXmin, newXmax, oldXmax }) => {
+                // updateData 裂变为 delete 和 update
+                let deleteDataMutation =
+                    Arc::new(Mutation::DeleteData {
+                        oldXmax: oldXmax.clone()
+                    });
+                tableMutation.modifyOldDataMutations.push(deleteDataMutation);
+
+                let addDataMutation =
+                    Arc::new(Mutation::AddData {
+                        data: newData.clone(),
+                        xmin: newXmin.clone(),
+                        xmax: newXmax.clone(),
+                    });
+                tableMutation.addDataMutations.push(addDataMutation);
+            }
+            (true, Mutation::DeleteData { .. }) => tableMutation.modifyOldDataMutations.push(mutation.clone()),
+            (false, Mutation::AddPointer { .. }) => tableMutation.addPointerMutations.push(mutation.clone()),
+            (false, Mutation::DeletePointer { .. }) => tableMutation.modifyOldPointerMutations.push(mutation.clone()),
+            _ => {}
+        }
+
         //match mutation {
         //  Mutation::ADD { .. } => tableMutation.addMutations.push(mutation),
         //Mutation::UPDATE { .. } => tableMutation.updateMutations.push(mutation),
@@ -150,7 +199,7 @@ impl Default for Session {
         Session {
             autoCommit: true,
             dataStore: &meta::STORE.dataStore,
-            mutations: Default::default(),
+            txMutation: Default::default(),
             txId: None,
         }
     }
@@ -178,27 +227,51 @@ impl<K: Eq + Hash, V, S: BuildHasher> HashMapExt<K, V, S> for HashMap<K, V, S> {
 pub type KV = (Vec<Byte>, Vec<Byte>);
 
 pub enum Mutation {
-    ADD {
+    AddData {
         data: KV,
         xmin: KV,
         xmax: KV,
     },
-    UPDATE {
+    AddPointer {
+        xmin: KV,
+        xmax: KV,
+    },
+    UpdateData {
         oldXmax: KV,
         newData: KV,
         newXmin: KV,
         newXmax: KV,
     },
-    DELETE {
+    DeleteData {
+        oldXmax: KV
+    },
+    DeletePointer {
         oldXmax: KV
     },
 }
 
 #[derive(Default)]
+pub struct TxMutation {
+    /// 原样
+    pub totalMutations: Vec<Arc<Mutation>>,
+    pub tableName_tableMutation: HashMap<String, TableMutation>,
+}
+
+impl TxMutation {
+    pub fn clear(&mut self) {
+        self.totalMutations.clear();
+        self.tableName_tableMutation.clear();
+    }
+}
+
+#[derive(Default)]
 pub struct TableMutation {
-    addMutations: Vec<Mutation>,
-    updateMutations: Vec<Mutation>,
-    deleteMutations: Vec<Mutation>,
+    /// 原样
+    pub totalMutations: Vec<Arc<Mutation>>,
+    pub addDataMutations: Vec<Arc<Mutation>>,
+    pub modifyOldDataMutations: Vec<Arc<Mutation>>,
+    pub addPointerMutations: Vec<Arc<Mutation>>,
+    pub modifyOldPointerMutations: Vec<Arc<Mutation>>,
 }
 
 #[cfg(test)]
