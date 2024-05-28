@@ -43,8 +43,8 @@ pub type KeyPrefix = Byte;
 
 pub const KEY_PREFIX_BIT_LEN: usize = 4;
 pub const KEY_PREFIX_MAX: KeyPrefix = (1 << KEY_PREFIX_BIT_LEN) - 1;
-pub const KEY_PREFIX_DATA: KeyPrefix = 1;
-pub const KEY_PREFIX_POINTER: KeyPrefix = 0;
+pub const KEY_PREFIX_DATA: KeyPrefix = 0;
+pub const KEY_PREFIX_POINTER: KeyPrefix = 1;
 pub const KEY_PREFIX_MVCC: KeyPrefix = 2;
 
 pub type RowId = u64;
@@ -56,9 +56,15 @@ pub type DataKey = u64;
 
 // key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
 pub const DATA_KEY_BYTE_LEN: usize = mem::size_of::<DataKey>();
-pub const DATA_KEY_PATTERN: &[Byte] = {
-    u64_to_byte_array_reference!((KEY_PREFIX_DATA as u64) << ROW_ID_BIT_LEN)
-};
+pub const DATA_KEY_PATTERN: &[Byte] = u64_to_byte_array_reference!((KEY_PREFIX_DATA as u64) << ROW_ID_BIT_LEN);
+pub const POINTER_KEY_PATTERN: &[Byte] = u64_to_byte_array_reference!((KEY_PREFIX_POINTER as u64) << ROW_ID_BIT_LEN);
+pub const MVCC_KEY_PATTERN: &[Byte] = u64_to_byte_array_reference!((KEY_PREFIX_MVCC as u64) << ROW_ID_BIT_LEN);
+
+lazy_static! {
+    pub static ref DATA_KEY_PATTERN_VEC: Vec<Byte> = DATA_KEY_PATTERN.to_vec();
+    pub static ref POINTER_KEY_PATTERN_VEC :Vec<Byte> = POINTER_KEY_PATTERN.to_vec();
+    pub static ref MVCC_KEY_PATTERN_VEC: Vec<Byte> = MVCC_KEY_PATTERN.to_vec();
+}
 
 // tag 用到POINTER前缀的key上的1Byte
 pub type KeyTag = Byte;
@@ -87,7 +93,8 @@ pub const POINTER_KEY_BYTE_LEN: usize = {
 };
 
 /// pointerKey的对端的dataKey前边的byte数量
-pub const POINTER_PRIOR_DATA_KEY_PART_BYTE_LEN: usize = POINTER_KEY_BYTE_LEN - TX_ID_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN;
+pub const POINTER_DATA_KEY_OFFSET: usize = POINTER_KEY_BYTE_LEN - TX_ID_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN;
+pub const POINTER_KEY_MVCC_KEY_TAG_OFFSET: usize = POINTER_KEY_BYTE_LEN - TX_ID_BYTE_LEN - KEY_TAG_BYTE_LEN;
 
 pub type TxId = u64;
 
@@ -166,7 +173,7 @@ macro_rules! extract_prefix_from_key_slice {
 macro_rules! extract_data_key_from_pointer_key {
     ($pointerKey: expr) => {
         {
-            let slice = &$pointerKey[meta::POINTER_PRIOR_DATA_KEY_PART_BYTE_LEN..(meta::POINTER_PRIOR_DATA_KEY_PART_BYTE_LEN + meta::DATA_KEY_BYTE_LEN)];
+            let slice = &$pointerKey[meta::POINTER_DATA_KEY_OFFSET..(meta::POINTER_DATA_KEY_OFFSET + meta::DATA_KEY_BYTE_LEN)];
             byte_slice_to_u64!(slice) as meta::DataKey
         }
     };

@@ -14,7 +14,7 @@ use std::time::Duration;
 use crate::{command_executor, global, meta, parser, throw};
 use anyhow::Result;
 use log::log;
-use rocksdb::{BoundColumnFamily, DB, OptimisticTransactionDB, Options, Transaction};
+use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode, MultiThreaded, OptimisticTransactionDB, Options, SnapshotWithThreadMode, Transaction, WriteBatchWithTransaction};
 use tokio::io::AsyncWriteExt;
 use crate::command_executor::{CommandExecutor, SelectResultToFront};
 use crate::global::Byte;
@@ -25,8 +25,9 @@ pub struct Session {
     autoCommit: bool,
     // currentTx: Option<Transaction<'db, OptimisticTransactionDB>>,
     txId: Option<TxId>,
-    pub txMutation: RefCell<TxMutation>,
-    pub dataStore: &'static DB,
+    dataStore: &'static DB,
+    pub tableName_mutationsOnTable: RefCell<HashMap<String, BTreeMap<Vec<Byte>, Vec<Byte>>>>,
+    snapshot: Option<SnapshotWithThreadMode<'static, DBWithThreadMode<MultiThreaded>>>,
 }
 
 impl Session {
@@ -40,6 +41,9 @@ impl Session {
         }
 
         self.txId = Some(meta::TX_ID_COUNTER.fetch_add(1, Ordering::AcqRel));
+        self.snapshot = Some(self.dataStore.snapshot());
+
+        self.tableName_mutationsOnTable.borrow_mut().clear();
 
         Ok(())
     }
@@ -79,8 +83,19 @@ impl Session {
             throw!("not in a transaction")
         }
 
+        let mut batch = WriteBatchWithTransaction::<false>::default();
+
+        for (tableName, mutations) in self.tableName_mutationsOnTable.borrow().iter() {
+            let colFamily = self.getColFamily(tableName)?;
+            for (key, value) in mutations {
+                batch.put_cf(&colFamily, key, value);
+            }
+        }
+
+        self.dataStore.write(batch)?;
+
         self.txId = None;
-        self.txMutation.borrow_mut().clear();
+        self.snapshot = None;
 
         Ok(())
     }
@@ -103,6 +118,13 @@ impl Session {
         }
     }
 
+    pub fn getSnapshot(&self) -> Result<&SnapshotWithThreadMode<DBWithThreadMode<MultiThreaded>>> {
+        match self.snapshot {
+            Some(ref snapshot) => Ok(snapshot),
+            None => throw!("not in a transaction")
+        }
+    }
+
     pub fn createColFamily(&self, columnFamilyName: &str) -> Result<()> {
         Ok(meta::STORE.dataStore.create_cf(columnFamilyName, &Options::default())?)
     }
@@ -116,7 +138,7 @@ impl Session {
             xmax,
         };
 
-        self.writeMutation(tableName, true, addMutation);
+        self.writeMutation(tableName, addMutation);
     }
 
     pub fn writeAddPointerMutation(&self,
@@ -127,7 +149,7 @@ impl Session {
             xmax,
         };
 
-        self.writeMutation(tableName, false, addMutation);
+        self.writeMutation(tableName, addMutation);
     }
 
 
@@ -142,55 +164,44 @@ impl Session {
             newXmax,
         };
 
-        self.writeMutation(tableName, true, updateMutation);
+        self.writeMutation(tableName, updateMutation);
     }
 
     pub fn writeDeleteDataMutation(&self, tableName: &String, oldXmax: KV) {
-        self.writeMutation(tableName, true, Mutation::DeleteData { oldXmax })
+        self.writeMutation(tableName, Mutation::DeleteData { oldXmax })
     }
 
     pub fn writeDeletePointerMutation(&self, tableName: &String, oldXmax: KV) {
-        self.writeMutation(tableName, false, Mutation::DeletePointer { oldXmax })
+        self.writeMutation(tableName, Mutation::DeletePointer { oldXmax })
     }
 
-    fn writeMutation(&self, tableName: &String, ifData: bool, mutation: Mutation) {
-        let mutation = Arc::new(mutation);
+    fn writeMutation(&self, tableName: &String, mutation: Mutation) {
+        let mut tableName_mutationsOnTable = self.tableName_mutationsOnTable.borrow_mut();
+        let mutationsOnTable = tableName_mutationsOnTable.getMutWithDefault(tableName);
 
-        let mut txMutation = self.txMutation.borrow_mut();
-        txMutation.totalMutations.push(mutation.clone());
-
-        let tableMutation = txMutation.tableName_tableMutation.getMutWithDefault(tableName);
-        tableMutation.totalMutations.push(mutation.clone());
-
-        match (ifData, &*mutation) {
-            (true, Mutation::AddData { .. }) => tableMutation.addDataMutations.push(mutation.clone()),
-            (true, Mutation::UpdateData { newData, newXmin, newXmax, oldXmax }) => {
-                // updateData 裂变为 delete 和 update
-                let deleteDataMutation =
-                    Arc::new(Mutation::DeleteData {
-                        oldXmax: oldXmax.clone()
-                    });
-                tableMutation.modifyOldDataMutations.push(deleteDataMutation);
-
-                let addDataMutation =
-                    Arc::new(Mutation::AddData {
-                        data: newData.clone(),
-                        xmin: newXmin.clone(),
-                        xmax: newXmax.clone(),
-                    });
-                tableMutation.addDataMutations.push(addDataMutation);
+        match mutation {
+            Mutation::AddData { data, xmin, xmax } => {
+                mutationsOnTable.insert(data.0, data.1);
+                mutationsOnTable.insert(xmin.0, xmin.1);
+                mutationsOnTable.insert(xmax.0, xmax.1);
             }
-            (true, Mutation::DeleteData { .. }) => tableMutation.modifyOldDataMutations.push(mutation.clone()),
-            (false, Mutation::AddPointer { .. }) => tableMutation.addPointerMutations.push(mutation.clone()),
-            (false, Mutation::DeletePointer { .. }) => tableMutation.modifyOldPointerMutations.push(mutation.clone()),
-            _ => {}
-        }
-
-        //match mutation {
-        //  Mutation::ADD { .. } => tableMutation.addMutations.push(mutation),
-        //Mutation::UPDATE { .. } => tableMutation.updateMutations.push(mutation),
-        //Mutation::DELETE { .. } => tableMutation.deleteMutations.push(mutation),
-        //}
+            Mutation::UpdateData { oldXmax, newData, newXmin, newXmax } => {
+                mutationsOnTable.insert(oldXmax.0, oldXmax.1);
+                mutationsOnTable.insert(newData.0, newData.1);
+                mutationsOnTable.insert(newXmin.0, newXmin.1);
+                mutationsOnTable.insert(newXmax.0, newXmax.1);
+            }
+            Mutation::DeleteData { oldXmax } => {
+                mutationsOnTable.insert(oldXmax.0, oldXmax.1);
+            }
+            Mutation::DeletePointer { oldXmax } => {
+                mutationsOnTable.insert(oldXmax.0, oldXmax.1);
+            }
+            Mutation::AddPointer { xmin, xmax } => {
+                mutationsOnTable.insert(xmin.0, xmin.1);
+                mutationsOnTable.insert(xmax.0, xmax.1);
+            }
+        };
     }
 }
 
@@ -199,8 +210,9 @@ impl Default for Session {
         Session {
             autoCommit: true,
             dataStore: &meta::STORE.dataStore,
-            txMutation: Default::default(),
             txId: None,
+            tableName_mutationsOnTable: Default::default(),
+            snapshot: None,
         }
     }
 }

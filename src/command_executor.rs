@@ -1,13 +1,16 @@
 use std::cell::{Cell, RefCell, UnsafeCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::SeekFrom;
+use std::ops::{Bound, Index, Range, RangeFrom, RangeInclusive};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::CONFIG;
-use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, prefix_plus_plus, suffix_plus_plus, throw, u64_to_byte_array_reference, extract_row_id_from_data_key, key_prefix_add_row_id, extract_prefix_from_key_slice, extract_data_key_from_pointer_key, utils, extract_tx_id_from_mvcc_key, extract_row_id_from_key_slice, extract_tx_id_from_pointer_key};
-use crate::meta::{Column, ColumnType, DataKey, KeyPrefix, KeyTag, RowId, Table, TableId, TableType, TxId};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, prefix_plus_plus, suffix_plus_plus,
+            throw, u64_to_byte_array_reference, extract_row_id_from_data_key,
+            key_prefix_add_row_id, extract_prefix_from_key_slice, extract_data_key_from_pointer_key, utils, extract_tx_id_from_mvcc_key, extract_row_id_from_key_slice, extract_tx_id_from_pointer_key};
+use crate::meta::{Column, ColumnType, DataKey, KeyPrefix, KeyTag, RowId, Table, TableId, TableType, TX_ID_INVALID, TxId};
 use crate::parser::{Command, Delete, Element, Insert, Link, SelectRel, Select, SelectTable, Unlink, UnlinkLinkStyle, UnlinkSelfStyle, Update};
 use anyhow::{anyhow, Result};
 use dashmap::mapref::one::{Ref, RefMut};
@@ -17,8 +20,9 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
-use rocksdb::{AsColumnFamilyRef, DB, DBAccess, DBCommon, DBRawIterator, DBRawIteratorWithThreadMode, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options, Transaction};
+use rocksdb::{AsColumnFamilyRef, DB, DBAccess, DBCommon, DBRawIterator, DBRawIteratorWithThreadMode, DBWithThreadMode, Direction, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options, Transaction};
 use strum_macros::Display;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::Data;
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::expr::Expr;
 use crate::global::{Byte};
@@ -177,7 +181,7 @@ impl<'session> CommandExecutor<'session> {
         let relStatisfiedRowDatas = self.scanSatisfiedRows(unlinkLinkStyle.relationFilterExpr.as_ref(), relation.value(), true, None)?;
 
         // KEY_PREFIX_POINTER + relDataRowId + KEY_TAG_SRC_TABLE_ID + src的tableId + KEY_TAG_KEY
-        let mut pointerKeyLeadingPartBuffer = BytesMut::with_capacity(meta::POINTER_PRIOR_DATA_KEY_PART_BYTE_LEN);
+        let mut pointerKeyLeadingPartBuffer = BytesMut::with_capacity(meta::POINTER_DATA_KEY_OFFSET);
         // KEY_PREFIX_POINTER + relDataRowId + KEY_TAG_SRC_TABLE_ID + src的tableId + KEY_TAG_KEY + src dest rel的dataKey
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
 
@@ -188,7 +192,7 @@ impl<'session> CommandExecutor<'session> {
                 pointerKeyLeadingPartBuffer.writePointerKeyLeadingPart(statisfiedRelDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, srcTable.tableId);
             }
 
-            for result in self.session.dataStore.prefix_iterator_cf(&relColFamily, pointerKeyLeadingPartBuffer.as_ref()) {
+            for result in self.session.getSnapshot()?.iterator_cf(&relColFamily, IteratorMode::From(pointerKeyLeadingPartBuffer.as_ref(), Direction::Forward)) {
                 let (relPointerKey, _) = result?;
 
                 // iterator是收不动尾部的要自个来弄的
@@ -404,9 +408,7 @@ impl<'session> CommandExecutor<'session> {
         // 1个select对应Vec<SelectResult> 多个select对应Vec<Vec<SelectResult>>
         let mut selectResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectVec.len());
 
-        let mut pointerKeyLeadingPartBuffer = BytesMut::with_capacity(meta::POINTER_PRIOR_DATA_KEY_PART_BYTE_LEN);
-        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
-
+        let mut pointerKeyPrefixBuffer = BytesMut::with_capacity(meta::POINTER_DATA_KEY_OFFSET);
 
         'loopSelectVec:
         for select in selectVec {
@@ -423,42 +425,60 @@ impl<'session> CommandExecutor<'session> {
             let mut destKeysInCurrentSelect = vec![];
 
             let srcTable = self.getTableRefByName(&select.srcTableName)?;
-            let srcColFamily = self.session.getColFamily(select.srcTableName.as_str())?;
-            let mut rawIteratorSrc = self.session.dataStore.raw_iterator_cf(&srcColFamily);
+            // let srcColFamily = self.session.getColFamily(select.srcTableName.as_str())?;
+            // let mut rawIteratorSrc = self.session.dataStore.raw_iterator_cf(&srcColFamily);
 
             let destTable = self.getTableRefByName(select.destTableName.as_ref().unwrap())?;
-            let destColFamily = self.session.getColFamily(select.destTableName.as_ref().unwrap())?;
-            let mut rawIteratorDest = self.session.dataStore.raw_iterator_cf(&destColFamily);
+            // let destColFamily = self.session.getColFamily(select.destTableName.as_ref().unwrap())?;
+            // let mut rawIteratorDest = self.session.dataStore.raw_iterator_cf(&destColFamily);
 
             let relColFamily = self.session.getColFamily(select.relationName.as_ref().unwrap())?;
+            let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.borrow();
+            let mutationsRawOnTableCurrentTx = tableName_mutationsOnTable.get(select.relationName.as_ref().unwrap());
 
             // 遍历当前的select的多个relation
             'loopRelationData:
             for (relationDataKey, relationData) in relationDatas {
-                let mut gatherDataKeys =
-                    |keyTag: KeyTag, targetTable: &Table, src: bool| {
-                        pointerKeyLeadingPartBuffer.writePointerKeyLeadingPart(relationDataKey, keyTag, targetTable.tableId);
-
-                        let pointerKeys = self.getKeysByPrefix(&relColFamily, &*pointerKeyLeadingPartBuffer)?;
-
-                        let rawIterator = if src {
-                            &mut rawIteratorSrc
-                        } else {
-                            &mut rawIteratorDest
-                        };
+                let mut gatherTargetDataKeys =
+                    |keyTag: KeyTag, targetTable: &Table| {
+                        pointerKeyPrefixBuffer.writePointerKeyLeadingPart(relationDataKey, keyTag, targetTable.tableId);
 
                         // todo selectRels时候如何应对pointerKey的mvcc
+                        let mut pointerKeys =
+                            self.getKeysByPrefix(select.relationName.as_ref().unwrap(),
+                                                 &relColFamily,
+                                                 &*pointerKeyPrefixBuffer,
+                                                 Some(CommandExecutor::checkCommittedPointerVisibilityWithoutCurrentTxMutations),
+                                                 Some(CommandExecutor::checkCommittedPointerVisibilityWithCurrentTxMutations))?;
 
-                        let srcDataKeys = pointerKeys.into_iter().map(|pointerKey| extract_data_key_from_pointer_key!(&*pointerKey)).collect::<Vec<DataKey>>();
 
-                        if srcDataKeys.is_empty() {}
+                        // todo 应对当前tx上 add的 当前rel 当前targetTable pointer
+                        if let Some(mutationsRawOnTableCurrentTx) = mutationsRawOnTableCurrentTx {
+                            let addedPointerUnderRelTargetTableCurrentTxRange =
+                                mutationsRawOnTableCurrentTx.range::<Vec<Byte>, RangeFrom<&Vec<Byte>>>(&pointerKeyPrefixBuffer.to_vec()..);
 
-                        anyhow::Result::<Vec<DataKey>>::Ok(srcDataKeys)
+                            for (addedPointerUnderRelTargetTableCurrentTxRange, _) in addedPointerUnderRelTargetTableCurrentTxRange {
+                                // 因为右边的是未限制的 需要手动
+                                if addedPointerUnderRelTargetTableCurrentTxRange.starts_with(pointerKeyPrefixBuffer.as_ref()) == false {
+                                    break;
+                                }
+
+                                if self.checkUncommittedPointerVisibility(&mutationsRawOnTableCurrentTx, &mut pointerKeyPrefixBuffer, addedPointerUnderRelTargetTableCurrentTxRange)? {
+                                    pointerKeys.push(addedPointerUnderRelTargetTableCurrentTxRange.clone().into_boxed_slice());
+                                }
+                            }
+                        }
+
+                        let targetDataKeys = pointerKeys.into_iter().map(|pointerKey| extract_data_key_from_pointer_key!(&*pointerKey)).collect::<Vec<DataKey>>();
+
+                        // todo 不知道要不要dedup
+
+                        anyhow::Result::<Vec<DataKey>>::Ok(targetDataKeys)
                     };
 
                 // 收罗该rel上的全部的src的dataKey
                 let srcDataKeys = {
-                    let srcDataKeys = gatherDataKeys(meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.value(), true)?;
+                    let srcDataKeys = gatherTargetDataKeys(meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.value())?;
                     if srcDataKeys.is_empty() {
                         continue;
                     }
@@ -467,7 +487,7 @@ impl<'session> CommandExecutor<'session> {
 
                 // 收罗该rel上的全部的dest的dataKey
                 let destDataKeys = {
-                    let destDataKeys = gatherDataKeys(meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable.value(), false)?;
+                    let destDataKeys = gatherTargetDataKeys(meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable.value())?;
                     if destDataKeys.is_empty() {
                         continue;
                     }
@@ -741,19 +761,28 @@ impl<'session> CommandExecutor<'session> {
 
         let columnFamily = self.session.getColFamily(&table.name)?;
 
-        let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
-        let mut rawIterator = self.session.dataStore.raw_iterator();
+        let mut mvccKeyBuffer = &mut BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+        let mut rawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
+
+        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.borrow();
+        let mutationsRawCurrentTx = tableName_mutationsOnTable.get(&table.name);
 
         let mut process =
             |dataKey: DataKey| -> Result<()> {
                 // todo getRowDatasByDataKeys() 也要mvcc筛选 完成
                 // mvcc的visibility筛选
-                if self.dataVisibility(&mut mvccKeyBuffer, &mut rawIterator, dataKey)? == false {
+                if self.checkCommittedDataVisibilityWithoutCurrentTxMutations(&mut mvccKeyBuffer, &mut rawIterator, dataKey)? == false {
                     return Ok(());
                 }
 
+                if let Some(mutationsRawCurrentTx) = mutationsRawCurrentTx {
+                    if self.checkCommittedDataVisibilityWithCurrentTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
+                        return Ok(());
+                    }
+                }
+
                 let rowDataBinary =
-                    match self.session.dataStore.get_cf(&columnFamily, u64_to_byte_array_reference!(dataKey))? {
+                    match self.session.getSnapshot()?.get_cf(&columnFamily, u64_to_byte_array_reference!(dataKey))? {
                         Some(rowDataBinary) => rowDataBinary,
                         None => return Ok(()), // 有可能
                     };
@@ -788,23 +817,23 @@ impl<'session> CommandExecutor<'session> {
         // todo 使用table id 为 column family 标识
         let columnFamily = self.session.getColFamily(&table.name)?;
 
-        let txMutation = self.session.txMutation.borrow();
+        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.borrow();
+        let mutationsRawOnTableCurrentTx = tableName_mutationsOnTable.get(&table.name);
+
+        let currentTxId = self.session.getTxId()?;
+
+        let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
 
         let mut satisfiedRows =
             if tableFilter.is_some() || select {
-                // 对数据条目而不是pointer条目遍历
-                let iterator =
-                    self.session.dataStore.prefix_iterator_cf(&columnFamily, meta::DATA_KEY_PATTERN);
-
                 let mut satisfiedRows = Vec::new();
 
                 // mvcc的visibility筛选
-                let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
-                let mut rawIterator = self.session.dataStore.raw_iterator_cf(&columnFamily);
+                let mut rawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
 
                 // todo scan遍历能不能concurrent
-                'a:
-                for iterResult in iterator {
+                // 对data条目而不是pointer条目遍历
+                for iterResult in self.session.getSnapshot()?.iterator_cf(&columnFamily, IteratorMode::From(meta::DATA_KEY_PATTERN, Direction::Forward)) {
                     let (dataKeyBinary, rowDataBinary) = iterResult?;
 
                     // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
@@ -817,57 +846,28 @@ impl<'session> CommandExecutor<'session> {
                     let rowDataBinary = &*rowDataBinary;
 
                     // mvcc的visibility筛选
-                    if self.dataVisibility(&mut mvccKeyBuffer, &mut rawIterator, dataKey)? == false {
+                    if self.checkCommittedDataVisibilityWithoutCurrentTxMutations(&mut mvccKeyBuffer, &mut rawIterator, dataKey)? == false {
                         continue;
                     }
 
-                    let rowIdCurrent = extract_row_id_from_data_key!(dataKey);
-
-                    // 应对当前tx上的mutations 还要结合mutations来的
-                    // insert 对本身data筛选
-                    // update 当前的条目失效 对添加的本身的data筛选
-                    // delete 当前的条目失效
-                    // let mut latestedMutation = None;
-                    match txMutation.tableName_tableMutation.get(&table.name) {
-                        Some(tableMutation) => {
-                            for modifyOldDataMutation in &tableMutation.modifyOldDataMutations {
-                                match &**modifyOldDataMutation {
-                                    Mutation::DeleteData { oldXmax } => {
-                                        // delete要是涉及了 需要continue
-                                        let rowIdDeleted = extract_row_id_from_key_slice!(oldXmax.0.as_slice());
-                                        if rowIdCurrent == rowIdDeleted {
-                                            continue 'a;
-                                        }
-                                    }
-                                    _ => panic!("impossible")
-                                }
-                            }
+                    // 以上是全都在已落地的维度内的visibility check 还要结合当前事务上的尚未提交的mutations
+                    // 先要结合mutations 看已落地的是不是应该干掉
+                    // 然后看mutations 有没有想要的
+                    if let Some(mutationsRawCurrentTx) = mutationsRawOnTableCurrentTx {
+                        if self.checkCommittedDataVisibilityWithCurrentTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
+                            continue;
                         }
-                        None => {}
                     }
 
-                    // if let Some(ref mutation) = latestedMutation {
-                    //     match &**mutation {
-                    //         Mutation::UpdateData { newData, .. } => {
-                    //             let (newDataKeyBinary, newRowDataBinary) = newData;
-                    //             dataKey = byte_slice_to_u64!(newDataKeyBinary);
-                    //             rowDataBinary = newRowDataBinary.as_slice();
-                    //         }
-                    //         Mutation::DeleteData { .. } => continue,
-                    //         _ => panic!("impossible")
-                    //     }
-                    // }
-
-                    // 可见性筛选过了 对rowData本身的筛选
-                    match self.readRowDataBinary(table, rowDataBinary, tableFilter, selectedColumnNames)? {
-                        None => continue,
-                        Some(rowData) => satisfiedRows.push((dataKey, rowData)),
+                    // mvcc筛选过了 对rowData本身的筛选
+                    if let Some(rowData) = self.readRowDataBinary(table, rowDataBinary, tableFilter, selectedColumnNames)? {
+                        satisfiedRows.push((dataKey, rowData));
                     }
                 }
 
                 satisfiedRows
             } else { // 说明是link 且尚未写filterExpr
-                let mut rawIterator = self.session.dataStore.raw_iterator_cf(&columnFamily);
+                let mut rawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
                 rawIterator.seek(meta::DATA_KEY_PATTERN);
 
                 if rawIterator.valid() == false {
@@ -892,17 +892,19 @@ impl<'session> CommandExecutor<'session> {
                 }
             };
 
-        // todo 对mutation的addData部分也要scan 完成
-        if let Some(tableMutation) = txMutation.tableName_tableMutation.get(&table.name) {
-            for addDataMutation in &tableMutation.addDataMutations {
-                match &**addDataMutation {
-                    Mutation::AddData { data, .. } => {
-                        let (dataKeyBinary, rowDataBinary) = data;
-                        if let Some(rowData) = self.readRowDataBinary(table, rowDataBinary, tableFilter, selectedColumnNames)? {
-                            satisfiedRows.push((byte_slice_to_u64!(dataKeyBinary), rowData));
-                        }
-                    }
-                    _ => panic!("impossible")
+        // todo 要是当前tx有add的话 也要收录
+        if let Some(mutationsRawOnTableCurrentTx) = mutationsRawOnTableCurrentTx {
+            let addedDataCurrentTxRange = mutationsRawOnTableCurrentTx.range::<Vec<Byte>, Range<&Vec<Byte>>>(&*meta::DATA_KEY_PATTERN_VEC..&*meta::POINTER_KEY_PATTERN_VEC);
+
+            for (addedDataKeyBinaryCurrentTx, addRowDataBinaryCurrentTx) in addedDataCurrentTxRange {
+                let addedDataKeyCurrentTx: DataKey = byte_slice_to_u64!(addedDataKeyBinaryCurrentTx);
+
+                if self.checkUncommittedDataVisibility(mutationsRawOnTableCurrentTx, &mut mvccKeyBuffer, addedDataKeyCurrentTx)? == false {
+                    continue;
+                }
+
+                if let Some(rowData) = self.readRowDataBinary(table, addRowDataBinaryCurrentTx, tableFilter, selectedColumnNames)? {
+                    satisfiedRows.push((addedDataKeyCurrentTx, rowData));
                 }
             }
         }
@@ -910,17 +912,20 @@ impl<'session> CommandExecutor<'session> {
         Ok(satisfiedRows)
     }
 
+    //-------------------------------------------------------------------------------------------
+
     // 对data对应的mvccKey的visibility筛选
-    fn dataVisibility<D>(&self,
-                         mvccKeyBuffer: &mut BytesMut,
-                         rawIterator: &mut DBRawIteratorWithThreadMode<D>,
-                         dataKey: DataKey) -> Result<bool> where D: DBAccess {
+    fn checkCommittedDataVisibilityWithoutCurrentTxMutations(&self,
+                                                             mvccKeyBuffer: &mut BytesMut,
+                                                             rawIterator: &mut DBRawIteratorWithThreadMode<DBWithThreadMode<MultiThreaded>>,
+                                                             dataKey: DataKey) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // xmin
         // 当vaccum时候会变为 TX_ID_FROZEN 别的时候不会变动 只会有1条
         mvccKeyBuffer.writeDataMvccXmin(dataKey, meta::TX_ID_FROZEN);
         rawIterator.seek(mvccKeyBuffer.as_ref());
+        // rawIterator生成的时候可以通过read option设置 bound
         if rawIterator.valid() == false {
             panic!("impossible")
         }
@@ -941,33 +946,111 @@ impl<'session> CommandExecutor<'session> {
         Ok(meta::isVisible(currentTxId, xmin, xmax))
     }
 
-    fn pointerVisibility<D>(&self,
-                            pointerKeyBuffer: &mut BytesMut,
-                            rawIterator: &mut DBRawIteratorWithThreadMode<D>,
-                            selfDataKey: DataKey,
-                            pointerKeyTag: KeyTag, targetTableId: TableId, targetDataKey: DataKey) -> Result<bool> where D: DBAccess {
+    fn checkCommittedDataVisibilityWithCurrentTxMutations(&self,
+                                                          mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                          mvccKeyBuffer: &mut BytesMut,
+                                                          dataKey: DataKey) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
-        // xmin
-        pointerKeyBuffer.writePointerKeyMvccXmin(selfDataKey, pointerKeyTag, targetTableId, targetDataKey, meta::TX_ID_FROZEN);
-        rawIterator.seek(pointerKeyBuffer.as_ref());
-        let pointerKeyXmin = rawIterator.key().unwrap();
-        let xmin = extract_tx_id_from_pointer_key!(pointerKeyXmin);
+        // 要看落地的有没有被当前的tx上的干掉  只要读取相应的xmax的mvccKey
+        // mutationsRawCurrentTx的txId只会是currentTxId
+        mvccKeyBuffer.writeDataMvccXmax(dataKey, currentTxId);
 
-        // xmax
-        pointerKeyBuffer.writePointerKeyMvccXmax(selfDataKey, pointerKeyTag, targetTableId, targetDataKey, currentTxId);
-        rawIterator.seek_for_prev(pointerKeyBuffer.as_ref());
-        let pointerKeyXmax = rawIterator.key().unwrap();
-        let xmax = extract_tx_id_from_pointer_key!(pointerKeyXmax);
-
-        Ok(meta::isVisible(currentTxId, xmin, xmax))
+        Ok(mutationsRawCurrentTx.get(mvccKeyBuffer.as_ref()).is_none())
     }
 
-    fn pointerVisibility0(&self, pointerKey: impl AsRef<[Byte]>) {
-        let pointerKey = pointerKey.as_ref();
+    fn checkUncommittedDataVisibility(&self,
+                                      mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                      mvccKeyBuffer: &mut BytesMut,
+                                      addedDataKeyCurrentTx: DataKey) -> Result<bool> {
+        let currentTxId = self.session.getTxId()?;
 
+        // 检验当前tx上新add的话 只要检验相应的xmax便可以了 就算有xmax那对应的txId也只会是currentTx
+        mvccKeyBuffer.writeDataMvccXmax(addedDataKeyCurrentTx, currentTxId);
+
+        // 说明这个当前tx上insert的data 后来又被当前tx的干掉了
+        Ok(mutationsRawCurrentTx.get(mvccKeyBuffer.as_ref()).is_none())
     }
 
+    /// 因为mvcc信息直接是在pointerKey上的 去看它的末尾的xmax
+    fn checkCommittedPointerVisibilityWithoutCurrentTxMutations(&self,
+                                                                pointerKeyBuffer: &mut BytesMut,
+                                                                rawIterator: &mut DBRawIteratorWithThreadMode<DBWithThreadMode<MultiThreaded>>,
+                                                                committedPointerKey: &[Byte]) -> Result<bool> {
+        let currentTxId = self.session.getTxId()?;
+
+        const RANGE: Range<usize> = (meta::POINTER_KEY_BYTE_LEN - meta::KEY_TAG_BYTE_LEN - meta::TX_ID_BYTE_LEN)..meta::POINTER_KEY_BYTE_LEN;
+
+        let pointerKeyTail = committedPointerKey.index(RANGE);
+
+        match *pointerKeyTail.first().unwrap() {
+            meta::MVCC_KEY_TAG_XMIN => Ok(false),
+            meta::MVCC_KEY_TAG_XMAX => {
+                let xmax = byte_slice_to_u64!(&pointerKeyTail[1..]) as TxId;
+
+                if currentTxId >= xmax {
+                    if (xmax == TX_ID_INVALID) == false {
+                        return Ok(false);
+                    }
+                }
+
+                // xmax 满足 [0,currentTxId)
+                // 到了这边说明该pointerKey本身单独是没有问题的 不过还需要联系后边是不是会干掉
+                // 要是后边还有 xmax  是（0,currentTxId]的 如何应对let xmax = extract_tx_id_from_mvcc_key!(latest);
+                let pointerKey = committedPointerKey[..(meta::POINTER_KEY_BYTE_LEN - meta::KEY_TAG_BYTE_LEN - meta::TX_ID_BYTE_LEN)].to_vec();
+
+                // 生成xmax是currentTxId 的pointerKey
+                pointerKeyBuffer.clear();
+                pointerKeyBuffer.put_slice(&pointerKey);
+                pointerKeyBuffer.put_u8(meta::MVCC_KEY_TAG_XMIN);
+                pointerKeyBuffer.put_u64(meta::TX_ID_FROZEN);
+                rawIterator.seek(pointerKeyBuffer.as_ref());
+                let xmin = extract_tx_id_from_mvcc_key!(rawIterator.key().unwrap());
+
+                pointerKeyBuffer.clear();
+                pointerKeyBuffer.put_slice(&pointerKey);
+                pointerKeyBuffer.put_u8(meta::MVCC_KEY_TAG_XMIN);
+                pointerKeyBuffer.put_u64(currentTxId);
+                rawIterator.seek(pointerKeyBuffer.as_ref());
+                let xmax = extract_tx_id_from_mvcc_key!(rawIterator.key().unwrap());
+
+                Ok(meta::isVisible(currentTxId, xmin, xmax))
+            }
+            _ => panic!("impossible")
+        }
+    }
+
+    fn checkCommittedPointerVisibilityWithCurrentTxMutations(&self,
+                                                             mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                             pointerKeyBuffer: &mut BytesMut,
+                                                             committedPointerKey: &[Byte]) -> Result<bool> {
+        let currentTxId = self.session.getTxId()?;
+
+        // 要是当前的tx干掉的话会有这样的xmax
+        pointerKeyBuffer.clear();
+        pointerKeyBuffer.put_slice(&committedPointerKey[meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET..]);
+        pointerKeyBuffer.put_u8(meta::MVCC_KEY_TAG_XMAX);
+        pointerKeyBuffer.put_u64(currentTxId);
+
+        Ok(mutationsRawCurrentTx.get(pointerKeyBuffer.as_ref()).is_none())
+    }
+
+    fn checkUncommittedPointerVisibility(&self,
+                                         mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                         pointerKeyBuffer: &mut BytesMut,
+                                         addedPointerKeyCurrentTx: &[Byte]) -> Result<bool> {
+        let currentTxId = self.session.getTxId()?;
+
+        // 要是当前的tx干掉的话会有这样的xmax
+        pointerKeyBuffer.clear();
+        pointerKeyBuffer.put_slice(&addedPointerKeyCurrentTx[meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET..]);
+        pointerKeyBuffer.put_u8(meta::MVCC_KEY_TAG_XMAX);
+        pointerKeyBuffer.put_u64(currentTxId);
+
+        Ok(mutationsRawCurrentTx.get(pointerKeyBuffer.as_ref()).is_none())
+    }
+
+    // ----------------------------------------------------------------------------------------
     fn readRowDataBinary(&self,
                          table: &Table,
                          rowBinary: &[u8],
@@ -1136,18 +1219,46 @@ impl<'session> CommandExecutor<'session> {
         Ok(destByteSlice.freeze())
     }
 
-    fn getKeysByPrefix(&self, colFamily: &impl AsColumnFamilyRef, prefix: &[Byte]) -> Result<Vec<Box<[Byte]>>> {
+    fn getKeysByPrefix(&self,
+                       tableName: &str,
+                       colFamily: &impl AsColumnFamilyRef,
+                       prefix: &[Byte],
+                       filterWithoutMutation: Option<fn(&CommandExecutor<'session>,
+                                                        pointerKeyBuffer: &mut BytesMut,
+                                                        rawIterator: &mut DBRawIteratorWithThreadMode<DBWithThreadMode<MultiThreaded>>,
+                                                        pointerKey: &[Byte]) -> Result<bool>>,
+                       filterWithMutation: Option<fn(&CommandExecutor<'session>,
+                                                     mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                     pointerKeyBuffer: &mut BytesMut,
+                                                     pointerKey: &[Byte]) -> Result<bool>>) -> Result<Vec<Box<[Byte]>>> {
         let mut keys = Vec::new();
 
-        let iterator =
-            self.session.dataStore.prefix_iterator_cf(colFamily, prefix);
+        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+        let mut rawIterator = self.session.getSnapshot()?.raw_iterator_cf(colFamily);
 
-        for iterResult in iterator {
+        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.borrow();
+        let mutationsRawCurrentTx = tableName_mutationsOnTable.get(tableName);
+
+        for iterResult in self.session.getSnapshot()?.iterator_cf(colFamily, IteratorMode::From(prefix, Direction::Forward)) {
             let (key, _) = iterResult?;
 
             // 说明越过了
             if key.starts_with(prefix) == false {
                 break;
+            }
+
+            if let Some(filterWithoutMutation) = filterWithoutMutation.as_ref() {
+                if filterWithoutMutation(self, &mut pointerKeyBuffer, &mut rawIterator, key.as_ref())? == false {
+                    continue;
+                }
+            }
+
+            if let Some(filterWithMutation) = filterWithMutation.as_ref() {
+                if let Some(mutationsRawCurrentTx) = mutationsRawCurrentTx {
+                    if filterWithMutation(self, mutationsRawCurrentTx, &mut pointerKeyBuffer, key.as_ref())? == false {
+                        continue;
+                    }
+                }
             }
 
             keys.push(key);
