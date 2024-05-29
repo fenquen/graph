@@ -23,16 +23,28 @@ use crate::session::Session;
 pub struct GraphWsRequest {
     pub requestType: RequestType,
     pub sql: Option<String>,
+    pub autoCommit: bool,
 }
 
-impl GraphWsRequest {}
+impl Default for GraphWsRequest {
+    fn default() -> Self {
+        GraphWsRequest {
+            requestType: RequestType::None,
+            sql: None,
+            autoCommit: true,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 // #[serde(untagged)] // 如果使用的话 对应的json变为null
 pub enum RequestType {
     ExecuteSql,
-    Begin,
+    Commit,
+    Rollback,
     TestParser,
+    None,
+    SetAutoCommit,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -113,18 +125,18 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
     let mut session = Session::new();
 
     loop {
-        let readOption = readStream.next().await;
-        if let None = readOption { // eof
+        let receivedMessage = readStream.next().await;
+        if let None = receivedMessage { // eof
             break;
         }
 
-        let readResult = readOption.unwrap();
-        if let Err(e) = readResult {
+        let receivedMessage = receivedMessage.unwrap();
+        if let Err(e) = receivedMessage {
             log::info!("{:?}", anyhow::Error::new(e));
             break;
         }
 
-        if let Message::Text(text) = readResult.unwrap() {
+        if let Message::Text(text) = receivedMessage.unwrap() {
             if let Err(e) = processGraphWsRequest(&mut writeStream, &text, &mut session, &remoteAddr).await {
                 // 使用debug会同时打印message和stack
                 log::info!("{:?}", e);
@@ -143,6 +155,8 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
 
             let graphWsRequest = graphWsRequest.unwrap();
 
+            let mut selectResultToFront = None;
+
             match graphWsRequest.requestType {
                 RequestType::ExecuteSql => {
                     if let None = graphWsRequest.sql {
@@ -154,9 +168,7 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
                         return Ok(());
                     }
 
-                    let selectResultToFront = session.executeSql(&sql)?;
-
-                    writeStream.send(Message::Text(GraphWsResponse::successWithData(selectResultToFront).to_string())).await?;
+                    selectResultToFront.replace(session.executeSql(&sql)?);
                 }
                 RequestType::TestParser => {
                     if remoteAddr.ip().is_loopback() == false {
@@ -173,10 +185,16 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
                     }
 
                     parser::parse(&sql)?;
-
-                    writeStream.send(Message::Text(GraphWsResponse::success().to_string())).await?;
                 }
+                RequestType::SetAutoCommit => session.setAutoCommit(graphWsRequest.autoCommit),
+                RequestType::Commit => session.commit()?,
+                RequestType::Rollback => session.rollback()?,
                 _ => {}
+            }
+
+            match selectResultToFront {
+                Some(s) => writeStream.send(Message::Text(GraphWsResponse::successWithData(s).to_string())).await?,
+                None => writeStream.send(Message::Text(GraphWsResponse::success().to_string())).await?,
             }
 
             Ok(())
@@ -200,6 +218,7 @@ mod test {
         println!("{}", serde_json::to_string(&GraphWsRequest {
             requestType: RequestType::ExecuteSql,
             sql: Some("aaaa".to_string()),
+            autoCommit: true,
         }).unwrap());
     }
 }

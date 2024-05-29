@@ -87,14 +87,14 @@ pub const POINTER_KEY_TAG_DATA_KEY: KeyTag = 4;
 // todo  pointerKey如何应对mvcc
 pub const POINTER_KEY_BYTE_LEN: usize = {
     DATA_KEY_BYTE_LEN + // keyPrefix 4bit + rowId 60bit
-        KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // table/relation的key
+        KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // table/relation的id
         KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // 实际的data条目的key
         KEY_TAG_BYTE_LEN + TX_ID_BYTE_LEN // xmin和xmax 对应的tx
 };
 
 /// pointerKey的对端的dataKey前边的byte数量
-pub const POINTER_DATA_KEY_OFFSET: usize = POINTER_KEY_BYTE_LEN - TX_ID_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN;
-pub const POINTER_KEY_MVCC_KEY_TAG_OFFSET: usize = POINTER_KEY_BYTE_LEN - TX_ID_BYTE_LEN - KEY_TAG_BYTE_LEN;
+pub const POINTER_KEY_DATA_KEY_OFFSET: usize = POINTER_KEY_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN - TX_ID_BYTE_LEN;
+pub const POINTER_KEY_MVCC_KEY_TAG_OFFSET: usize = POINTER_KEY_DATA_KEY_OFFSET + DATA_KEY_BYTE_LEN;
 
 pub type TxId = u64;
 
@@ -173,7 +173,7 @@ macro_rules! extract_prefix_from_key_slice {
 macro_rules! extract_data_key_from_pointer_key {
     ($pointerKey: expr) => {
         {
-            let slice = &$pointerKey[meta::POINTER_DATA_KEY_OFFSET..(meta::POINTER_DATA_KEY_OFFSET + meta::DATA_KEY_BYTE_LEN)];
+            let slice = &$pointerKey[meta::POINTER_KEY_DATA_KEY_OFFSET..(meta::POINTER_KEY_DATA_KEY_OFFSET + meta::DATA_KEY_BYTE_LEN)];
             byte_slice_to_u64!(slice) as meta::DataKey
         }
     };
@@ -330,17 +330,16 @@ pub fn init() -> Result<()> {
         metaStoreOption.create_if_missing(true);
 
         let metaStore = DB::open(&metaStoreOption, CONFIG.metaDir.as_str())?;
-        //let metaStore: OptimisticTransactionDB = OptimisticTransactionDB::open(&metaStoreOption, CONFIG.metaDir.as_str())?;
 
-        // todo tableId的计数不对
+        // todo tableId的计数不对 要以当前max的table id  完成
         let mut latestTableId = 0u64;
 
         let iterator = metaStore.iterator(IteratorMode::Start);
         for iterResult in iterator {
-            let pair = iterResult?;
+            let (key, value) = iterResult?;
 
-            let tableId = byte_slice_to_u64!(&*pair.0);
-            let table: Table = serde_json::from_slice(&*pair.1)?;
+            let tableId = byte_slice_to_u64!(&*key);
+            let table: Table = serde_json::from_slice(&*value)?;
 
             if tableId != table.tableId {
                 throw!("table记录的key和table中的tableId不同");
@@ -350,10 +349,11 @@ pub fn init() -> Result<()> {
 
             TABLE_NAME_TABLE.insert(table.name.to_owned(), table);
 
-            suffix_plus_plus!(latestTableId);
+            // key是以binary由大到小排序的 也便是table id由大到小排序
+            latestTableId = tableId;
         }
 
-        TABLE_ID_COUNTER.store(latestTableId, Ordering::Release);
+        TABLE_ID_COUNTER.store(latestTableId + 1, Ordering::Release);
 
         metaStore
     };
@@ -375,21 +375,19 @@ pub fn init() -> Result<()> {
         dataStoreOption.create_missing_column_families(true);
         dataStoreOption.create_if_missing(true);
 
-        let dataStore = DB::open_cf_descriptors(&dataStoreOption, CONFIG.dataDir.as_str(), columnFamilyDescVec)?;
-        //let dataStore: OptimisticTransactionDB = OptimisticTransactionDB::open_cf_descriptors(&dataStoreOption, CONFIG.dataDir.as_str(), columnFamilyDescVec)?;
-
-        dataStore
+        DB::open_cf_descriptors(&dataStoreOption, CONFIG.dataDir.as_str(), columnFamilyDescVec)?
     };
 
     // 遍历各个cf读取last的key 读取lastest的rowId
     for ref tableName in tableNames {
         let cf = dataStore.cf_handle(tableName.as_str()).unwrap();
         let mut rawIterator = dataStore.raw_iterator_cf(&cf);
+
         // 到last条目而不是末尾 不用去调用prev()
         rawIterator.seek_to_last();
+
         if let Some(key) = rawIterator.key() {
             let lastRowId = byte_slice_to_u64!(key);
-            // println!("{tableName}, {}", lastRowId);
             TABLE_NAME_TABLE.get_mut(tableName.as_str()).unwrap().rowIdCounter.store(lastRowId + 1, Ordering::Release);
         }
     }

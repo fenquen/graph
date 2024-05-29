@@ -14,7 +14,8 @@ use std::time::Duration;
 use crate::{command_executor, global, meta, parser, throw};
 use anyhow::Result;
 use log::log;
-use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode, MultiThreaded, OptimisticTransactionDB, Options, SnapshotWithThreadMode, Transaction, WriteBatchWithTransaction};
+use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
+              MultiThreaded, OptimisticTransactionDB, Options, SnapshotWithThreadMode, Transaction, WriteBatchWithTransaction};
 use tokio::io::AsyncWriteExt;
 use crate::command_executor::{CommandExecutor, SelectResultToFront};
 use crate::global::Byte;
@@ -35,19 +36,6 @@ impl Session {
         Default::default()
     }
 
-    pub fn begin(&mut self) -> Result<()> {
-        if self.txId.is_some() {
-            throw!("you have not commit a previous tx");
-        }
-
-        self.txId = Some(meta::TX_ID_COUNTER.fetch_add(1, Ordering::AcqRel));
-        self.snapshot = Some(self.dataStore.snapshot());
-
-        self.tableName_mutationsOnTable.borrow_mut().clear();
-
-        Ok(())
-    }
-
     /// 如果是autoCommit 该调用是个tx 可能传递的&str包含了多个独立的sql
     pub fn executeSql(&mut self, sql: &str) -> Result<SelectResultToFront> {
         let mut commands = parser::parse(sql)?;
@@ -56,12 +44,9 @@ impl Session {
             return Ok(vec![]);
         }
 
-        if self.autoCommit {
-            self.begin()?;
-        } else {
-            if self.txId.is_none() {
-                throw!("manaul commit mode, but not in a transaction")
-            }
+        // 不要求是不是auto commit的 要不在tx那么生成1个tx
+        if self.notInTx() {
+            self.generateTx();
         }
 
         let selectResultToFront = self.executeCommands(&mut commands)?;
@@ -79,9 +64,7 @@ impl Session {
     }
 
     pub fn commit(&mut self) -> Result<()> {
-        if self.txId.is_none() {
-            throw!("not in a transaction")
-        }
+        self.needInTx()?;
 
         let mut batch = WriteBatchWithTransaction::<false>::default();
 
@@ -94,10 +77,48 @@ impl Session {
 
         self.dataStore.write(batch)?;
 
-        self.txId = None;
-        self.snapshot = None;
+        self.clean();
 
         Ok(())
+    }
+
+    pub fn rollback(&mut self) -> Result<()> {
+        self.needInTx()?;
+        self.clean();
+        Ok(())
+    }
+
+    fn clean(&mut self) {
+        self.txId = None;
+        self.snapshot = None;
+        self.tableName_mutationsOnTable.borrow_mut().clear();
+    }
+
+    fn notInTx(&self) -> bool {
+        self.txId.is_none() || self.snapshot.is_none()
+    }
+
+    fn generateTx(&mut self) {
+        // todo TX_ID_COUNTER 需要持久化和还原
+        self.txId = Some(meta::TX_ID_COUNTER.fetch_add(1, Ordering::AcqRel));
+        self.snapshot = Some(self.dataStore.snapshot());
+        self.tableName_mutationsOnTable.borrow_mut().clear();
+    }
+
+    fn needInTx(&self) -> Result<()> {
+        if self.notInTx() {
+            throw!("not in a transaction")
+        } else {
+            Ok(())
+        }
+    }
+
+    fn needNotInTx(&self) -> Result<()> {
+        if self.notInTx() == false {
+            throw!("you have not commit a previous tx")
+        } else {
+            Ok(())
+        }
     }
 
     pub fn setAutoCommit(&mut self, autoCommit: bool) {

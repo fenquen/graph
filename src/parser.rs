@@ -1958,7 +1958,7 @@ pub struct Delete {
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Update {
     pub tableName: String,
-    // todo insert的values的expr只能支持不包含column name的
+    // todo insert的values的expr要能支持含column name的
     pub columnName_expr: HashMap<String, Expr>,
     pub filterExpr: Option<Expr>,
 }
