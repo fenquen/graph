@@ -44,6 +44,15 @@ pub enum Command {
     Unlink(Unlink),
 }
 
+impl Command {
+    pub fn isDml(&self) -> bool {
+        match self {
+            Command::Insert(_) | Command::Link(_) | Command::Update(_) | Command::Unlink(_) => true,
+            _ => false
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Parser {
     sql: String,

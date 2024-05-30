@@ -13,11 +13,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::WebSocketStream;
-use crate::command_executor::SelectResultToFront;
 use crate::{config, parser, throw};
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
 use crate::session::Session;
+use crate::types::SelectResultToFront;
 
 #[derive(Deserialize, Serialize)]
 pub struct GraphWsRequest {
@@ -155,6 +155,8 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
 
             let graphWsRequest = graphWsRequest.unwrap();
 
+            log::info!("current thread: {:?}",thread::current().id());
+
             let mut selectResultToFront = None;
 
             match graphWsRequest.requestType {
@@ -168,7 +170,7 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
                         return Ok(());
                     }
 
-                    selectResultToFront.replace(session.executeSql(&sql)?);
+                    selectResultToFront.replace(tokio::task::block_in_place(|| session.executeSql(&sql))?);
                 }
                 RequestType::TestParser => {
                     if remoteAddr.ip().is_loopback() == false {
@@ -186,7 +188,7 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
 
                     parser::parse(&sql)?;
                 }
-                RequestType::SetAutoCommit => session.setAutoCommit(graphWsRequest.autoCommit),
+                RequestType::SetAutoCommit => session.setAutoCommit(graphWsRequest.autoCommit)?,
                 RequestType::Commit => session.commit()?,
                 RequestType::Rollback => session.rollback()?,
                 _ => {}

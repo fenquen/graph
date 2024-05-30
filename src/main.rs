@@ -15,6 +15,7 @@ mod session;
 mod codec;
 mod utils;
 mod ws;
+mod types;
 
 use std::string::ToString;
 use anyhow::Result;

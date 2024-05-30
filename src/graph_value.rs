@@ -9,8 +9,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::ser::SerializeMap;
 use serde_json::Value;
 use crate::codec::{BinaryCodec, MyBytes};
-use crate::global::{Byte};
-use crate::meta::DataKey;
+use crate::types::{Byte, DataKey};
 
 #[derive(Deserialize, Debug, Clone)]
 pub enum GraphValue {

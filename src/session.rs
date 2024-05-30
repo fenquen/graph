@@ -11,16 +11,15 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
-use crate::{command_executor, global, meta, parser, throw};
+use crate::{command_executor, global, meta, parser, throw, u64_to_byte_array_reference};
 use anyhow::Result;
 use log::log;
 use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
               MultiThreaded, OptimisticTransactionDB, Options, SnapshotWithThreadMode, Transaction, WriteBatchWithTransaction};
 use tokio::io::AsyncWriteExt;
-use crate::command_executor::{CommandExecutor, SelectResultToFront};
-use crate::global::Byte;
-use crate::meta::TxId;
+use crate::command_executor::{CommandExecutor};
 use crate::parser::{Command, SqlOp};
+use crate::types::{Byte, ColumnFamily, SelectResultToFront, Snapshot, TxId};
 
 pub struct Session {
     autoCommit: bool,
@@ -28,7 +27,8 @@ pub struct Session {
     txId: Option<TxId>,
     dataStore: &'static DB,
     pub tableName_mutationsOnTable: RefCell<HashMap<String, BTreeMap<Vec<Byte>, Vec<Byte>>>>,
-    snapshot: Option<SnapshotWithThreadMode<'static, DBWithThreadMode<MultiThreaded>>>,
+    snapshot: Option<Snapshot<'static>>,
+    hasDmlInTx: bool,
 }
 
 impl Session {
@@ -49,7 +49,16 @@ impl Session {
             self.generateTx();
         }
 
-        let selectResultToFront = self.executeCommands(&mut commands)?;
+        if self.hasDmlInTx == false {
+            for command in &commands {
+                if command.isDml() {
+                    self.hasDmlInTx = true;
+                    break;
+                }
+            }
+        }
+
+        let selectResultToFront = CommandExecutor::new(self).execute(&mut commands)?;
 
         if self.autoCommit {
             self.commit()?;
@@ -58,11 +67,7 @@ impl Session {
         Ok(selectResultToFront)
     }
 
-    fn executeCommands(&mut self, commands: &mut [Command]) -> Result<SelectResultToFront> {
-        let commandExecutor = CommandExecutor::new(self);
-        commandExecutor.execute(commands)
-    }
-
+    /// 提交之后 在到下个执行sql前 session都是 not in tx 的
     pub fn commit(&mut self) -> Result<()> {
         self.needInTx()?;
 
@@ -72,6 +77,23 @@ impl Session {
             let colFamily = self.getColFamily(tableName)?;
             for (key, value) in mutations {
                 batch.put_cf(&colFamily, key, value);
+            }
+        }
+
+        // todo lastest的txId要持久化 完成
+        // todo 要是tx中没有 update这样的dml的不需要持久化txId 以达到节约的目的 完成
+        {
+            if self.hasDmlInTx {
+                let currentTxId = self.txId.unwrap();
+
+                if (currentTxId - *meta::TX_ID_START_UP.getRef()) % meta::TX_CONCURRENCY_MAX as u64 == 0 {
+                    // TX_CONCURRENCY_MAX
+                    tokio::task::spawn_blocking(|| {});
+
+                } meta::TX_ID_COUNTER.fetch_update()
+
+                let cf = self.getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
+                batch.put_cf(&cf, u64_to_byte_array_reference!(self.txId.unwrap()), global::EMPTY_BINARY);
             }
         }
 
@@ -92,14 +114,10 @@ impl Session {
         self.txId = None;
         self.snapshot = None;
         self.tableName_mutationsOnTable.borrow_mut().clear();
-    }
-
-    fn notInTx(&self) -> bool {
-        self.txId.is_none() || self.snapshot.is_none()
+        self.hasDmlInTx = false;
     }
 
     fn generateTx(&mut self) {
-        // todo TX_ID_COUNTER 需要持久化和还原
         self.txId = Some(meta::TX_ID_COUNTER.fetch_add(1, Ordering::AcqRel));
         self.snapshot = Some(self.dataStore.snapshot());
         self.tableName_mutationsOnTable.borrow_mut().clear();
@@ -121,8 +139,19 @@ impl Session {
         }
     }
 
-    pub fn setAutoCommit(&mut self, autoCommit: bool) {
+    fn notInTx(&self) -> bool {
+        self.txId.is_none() || self.snapshot.is_none()
+    }
+
+    /// 如果当前是 false  && in tx 那么会提交当前tx ,jdbc也是这样的
+    pub fn setAutoCommit(&mut self, autoCommit: bool) -> Result<()> {
+        if self.autoCommit == false && self.notInTx() == false {
+            self.commit()?;
+        }
+
         self.autoCommit = autoCommit;
+
+        Ok(())
     }
 
     pub fn getTxId(&self) -> Result<TxId> {
@@ -132,7 +161,7 @@ impl Session {
         }
     }
 
-    pub fn getColFamily(&self, colFamilyName: &str) -> Result<Arc<BoundColumnFamily>> {
+    pub fn getColFamily(&self, colFamilyName: &str) -> Result<ColumnFamily> {
         match meta::STORE.dataStore.cf_handle(colFamilyName) {
             Some(cf) => Ok(cf),
             None => throw!(&format!("column family:{} not exist", colFamilyName))
@@ -234,6 +263,7 @@ impl Default for Session {
             txId: None,
             tableName_mutationsOnTable: Default::default(),
             snapshot: None,
+            hasDmlInTx: false,
         }
     }
 }

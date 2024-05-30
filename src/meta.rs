@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fmt::{Display, Formatter};
 use std::io::SeekFrom;
 use std::mem;
@@ -5,8 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta,
-            suffix_plus_plus, throw, u64_to_byte_array_reference};
+use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, suffix_plus_plus, throw, types, u64_to_byte_array_reference};
 use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
@@ -19,19 +19,18 @@ use rocksdb::{BoundColumnFamily, ColumnFamilyDescriptor, DB, DBCommon,
 use tokio::sync::RwLock;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use crate::config::CONFIG;
-use crate::global::Byte;
 use crate::graph_value::GraphValue;
 use crate::parser::Command;
 use crate::session::Session;
+use crate::types::{Byte, DataKey, DBIterator, DBRawIterator, KeyPrefix, KeyTag, TableId, TxId};
 use crate::utils::TrickyContainer;
-
-pub type TableId = u64;
 
 lazy_static! {
     pub static ref STORE: TrickyContainer<Store> = TrickyContainer::new();
     pub static ref TABLE_NAME_TABLE: DashMap<String, Table> = DashMap::new();
     pub static ref TABLE_ID_COUNTER: AtomicU64 = AtomicU64::default();
     pub static ref TX_ID_COUNTER: AtomicU64 = AtomicU64::new(TX_ID_MIN);
+    pub static ref TX_ID_START_UP: TrickyContainer<TxId> = TrickyContainer::new();
 }
 
 pub struct Store {
@@ -39,20 +38,14 @@ pub struct Store {
     pub dataStore: DB,
 }
 
-pub type KeyPrefix = Byte;
-
 pub const KEY_PREFIX_BIT_LEN: usize = 4;
 pub const KEY_PREFIX_MAX: KeyPrefix = (1 << KEY_PREFIX_BIT_LEN) - 1;
 pub const KEY_PREFIX_DATA: KeyPrefix = 0;
 pub const KEY_PREFIX_POINTER: KeyPrefix = 1;
 pub const KEY_PREFIX_MVCC: KeyPrefix = 2;
 
-pub type RowId = u64;
-
 pub const ROW_ID_BIT_LEN: usize = 64 - KEY_PREFIX_BIT_LEN;
 pub const MAX_ROW_ID: u64 = (1 << ROW_ID_BIT_LEN) - 1;
-
-pub type DataKey = u64;
 
 // key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
 pub const DATA_KEY_BYTE_LEN: usize = mem::size_of::<DataKey>();
@@ -67,8 +60,6 @@ lazy_static! {
 }
 
 // tag 用到POINTER前缀的key上的1Byte
-pub type KeyTag = Byte;
-
 pub const KEY_TAG_BYTE_LEN: usize = 1;
 
 /// node 下游rel的tableId
@@ -84,7 +75,6 @@ pub const POINTER_KEY_TAG_DATA_KEY: KeyTag = 4;
 // pub const POINTER_KEY_TAG_XMIN: KeyTag = 5;
 // pub const POINTER_KEY_TAG_XMAX: KeyTag = 7;
 
-// todo  pointerKey如何应对mvcc
 pub const POINTER_KEY_BYTE_LEN: usize = {
     DATA_KEY_BYTE_LEN + // keyPrefix 4bit + rowId 60bit
         KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // table/relation的id
@@ -93,10 +83,8 @@ pub const POINTER_KEY_BYTE_LEN: usize = {
 };
 
 /// pointerKey的对端的dataKey前边的byte数量
-pub const POINTER_KEY_DATA_KEY_OFFSET: usize = POINTER_KEY_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN - TX_ID_BYTE_LEN;
-pub const POINTER_KEY_MVCC_KEY_TAG_OFFSET: usize = POINTER_KEY_DATA_KEY_OFFSET + DATA_KEY_BYTE_LEN;
-
-pub type TxId = u64;
+pub const POINTER_KEY_TARGET_DATA_KEY_OFFSET: usize = POINTER_KEY_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN - TX_ID_BYTE_LEN;
+pub const POINTER_KEY_MVCC_KEY_TAG_OFFSET: usize = POINTER_KEY_TARGET_DATA_KEY_OFFSET + DATA_KEY_BYTE_LEN;
 
 // 写到dataKey
 // add put 添加新的
@@ -121,6 +109,9 @@ pub const MVCC_KEY_TAG_XMAX: KeyTag = 1;
 pub const MVCC_KEY_BYTE_LEN: usize = {
     DATA_KEY_BYTE_LEN + KEY_TAG_BYTE_LEN + TX_ID_BYTE_LEN
 };
+
+/// 用来保存txId的colFamily的name
+pub const COLUMN_FAMILY_NAME_TX_ID: &str = "tx_id";
 
 pub fn isVisible(currentTxId: TxId, xmin: TxId, xmax: TxId) -> bool {
     // invisible
@@ -148,7 +139,7 @@ macro_rules! key_prefix_add_row_id {
 #[macro_export]
 macro_rules! extract_row_id_from_data_key {
     ($key: expr) => {
-        (($key as u64) & meta::MAX_ROW_ID) as meta::RowId
+        (($key as u64) & meta::MAX_ROW_ID) as types::RowId
     };
 }
 
@@ -157,7 +148,7 @@ macro_rules! extract_row_id_from_key_slice {
     ($slice: expr) => {
         {
            let leadingU64 = byte_slice_to_u64!($slice);
-           ((leadingU64) & meta::MAX_ROW_ID) as meta::RowId
+           ((leadingU64) & meta::MAX_ROW_ID) as types::RowId
         }
     };
 }
@@ -165,16 +156,16 @@ macro_rules! extract_row_id_from_key_slice {
 #[macro_export]
 macro_rules! extract_prefix_from_key_slice {
     ($slice: expr) => {
-        ((($slice[0]) >> meta::KEY_PREFIX_BIT_LEN) & meta::KEY_PREFIX_MAX) as meta::KeyPrefix
+        ((($slice[0]) >> meta::KEY_PREFIX_BIT_LEN) & meta::KEY_PREFIX_MAX) as types::KeyPrefix
     };
 }
 
 #[macro_export]
-macro_rules! extract_data_key_from_pointer_key {
+macro_rules! extract_target_data_key_from_pointer_key {
     ($pointerKey: expr) => {
         {
-            let slice = &$pointerKey[meta::POINTER_KEY_DATA_KEY_OFFSET..(meta::POINTER_KEY_DATA_KEY_OFFSET + meta::DATA_KEY_BYTE_LEN)];
-            byte_slice_to_u64!(slice) as meta::DataKey
+            let slice = &$pointerKey[meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET..(meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET + meta::DATA_KEY_BYTE_LEN)];
+            byte_slice_to_u64!(slice) as types::DataKey
         }
     };
 }
@@ -185,7 +176,7 @@ macro_rules! extract_tx_id_from_mvcc_key {
     ($mvccKey: expr) => {
         {
             let txIdSlice = &$mvccKey[(meta::MVCC_KEY_BYTE_LEN - meta::TX_ID_BYTE_LEN)..meta::MVCC_KEY_BYTE_LEN];
-            byte_slice_to_u64!(txIdSlice) as meta::TxId
+            byte_slice_to_u64!(txIdSlice) as types::TxId
         }
     };
 }
@@ -196,7 +187,7 @@ macro_rules! extract_tx_id_from_pointer_key {
     ($pointerKey: expr) => {
         {
             let slice = &$pointerKey[(meta::POINTER_KEY_BYTE_LEN - meta::TX_ID_BYTE_LEN)..meta::POINTER_KEY_BYTE_LEN];
-            byte_slice_to_u64!(slice) as meta::TxId
+            byte_slice_to_u64!(slice) as types::TxId
         }
     };
 }
@@ -319,6 +310,9 @@ pub fn init() -> Result<()> {
     // 用来后边dataStore时候对应各个的columnFamily
     let mut tableNames = Vec::new();
 
+    // tx id 对应的column family
+    tableNames.push(COLUMN_FAMILY_NAME_TX_ID.to_string());
+
     // 生成用来保存表文件和元数据的目录
     // meta的保存格式是 tableId->json
     let metaStore = {
@@ -331,10 +325,10 @@ pub fn init() -> Result<()> {
 
         let metaStore = DB::open(&metaStoreOption, CONFIG.metaDir.as_str())?;
 
-        // todo tableId的计数不对 要以当前max的table id  完成
+        // todo tableId的计数不对 要以当前max的table id不能以表的数量  完成
         let mut latestTableId = 0u64;
 
-        let iterator = metaStore.iterator(IteratorMode::Start);
+        let iterator: DBIterator = metaStore.iterator(IteratorMode::Start);
         for iterResult in iterator {
             let (key, value) = iterResult?;
 
@@ -381,14 +375,26 @@ pub fn init() -> Result<()> {
     // 遍历各个cf读取last的key 读取lastest的rowId
     for ref tableName in tableNames {
         let cf = dataStore.cf_handle(tableName.as_str()).unwrap();
-        let mut rawIterator = dataStore.raw_iterator_cf(&cf);
+        let mut rawIterator: DBRawIterator = dataStore.raw_iterator_cf(&cf);
 
         // 到last条目而不是末尾 不用去调用prev()
         rawIterator.seek_to_last();
 
         if let Some(key) = rawIterator.key() {
-            let lastRowId = byte_slice_to_u64!(key);
-            TABLE_NAME_TABLE.get_mut(tableName.as_str()).unwrap().rowIdCounter.store(lastRowId + 1, Ordering::Release);
+            // todo latest的txId需要还原
+            // 应对的记录txId的column family
+            // 读取last的key对应的latest的tx id
+            if tableName == COLUMN_FAMILY_NAME_TX_ID {
+                let lastTxId = byte_slice_to_u64!(key);
+
+                TX_ID_START_UP.set(lastTxId);
+                TX_ID_COUNTER.store(lastTxId + 1, Ordering::Release);
+            } else {
+                // 严格意义上应该只要dataKey的部分
+                // 不过现在这样的话也是可以的,因为不管是什么key它的后60bit都是rowId
+                let lastRowId = byte_slice_to_u64!(key);
+                TABLE_NAME_TABLE.get_mut(tableName.as_str()).unwrap().rowIdCounter.store(lastRowId + 1, Ordering::Release);
+            }
         }
     }
 
@@ -396,6 +402,7 @@ pub fn init() -> Result<()> {
         metaStore,
         dataStore,
     });
+
 
     Ok(())
 }

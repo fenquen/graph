@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::mem;
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 use crate::graph_error::GraphError;
 use crate::meta;
 use crate::meta::Table;
+use crate::types::Byte;
 
 thread_local! {
     /// https://www.cnblogs.com/jiangbo4444/p/15932305.html <br>
@@ -20,8 +21,6 @@ thread_local! {
 }
 
 pub const TOTAL_DATA_OF_TABLE: u64 = u64::MAX;
-
-pub type Byte = u8;
 
 // --------------------------------------------------------
 
@@ -76,3 +75,5 @@ pub const 方括号1_STR: &str = "]";
 
 pub const 回车_CHAR: char = '\r';
 pub const 换行_CHAR: char = '\n';
+
+pub const EMPTY_BINARY: Vec<Byte> = vec![];
