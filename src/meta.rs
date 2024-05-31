@@ -22,7 +22,7 @@ use crate::config::CONFIG;
 use crate::graph_value::GraphValue;
 use crate::parser::Command;
 use crate::session::Session;
-use crate::types::{Byte, DataKey, DBIterator, DBRawIterator, KeyPrefix, KeyTag, OriginDataKey, RowId, TableId, TxId};
+use crate::types::{Byte, DataKey, DBIterator, DBRawIterator, KeyPrefix, KeyTag, RowId, TableId, TxId};
 use crate::utils::TrickyContainer;
 
 lazy_static! {
@@ -110,9 +110,9 @@ pub const MVCC_KEY_BYTE_LEN: usize = {
 // -----------------------------------------------------------------------------------------
 
 /// 4bit + 60bit
-pub const ORIGIN_DATA_KEY_BYTE_LEN: usize = mem::size_of::<OriginDataKey>();
+pub const ORIGIN_DATA_KEY_KEY_BYTE_LEN: usize = mem::size_of::<u64>();
 /// 是value啊不是像以往的key
-pub const DATA_KEY_INVALID: OriginDataKey = crate::key_prefix_add_row_id!(KEY_PREFIX_DATA, ROW_ID_INVALID);
+pub const DATA_KEY_INVALID: DataKey = crate::key_prefix_add_row_id!(KEY_PREFIX_DATA, ROW_ID_INVALID);
 
 /// 用来保存txId的colFamily的name
 pub const COLUMN_FAMILY_NAME_TX_ID: &str = "tx_id";

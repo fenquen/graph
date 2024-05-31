@@ -798,12 +798,12 @@ impl<'session> CommandExecutor<'session> {
             |dataKey: DataKey| -> Result<()> {
                 // todo getRowDatasByDataKeys() 也要mvcc筛选 完成
                 // mvcc的visibility筛选
-                if self.checkCommittedDataVisibilityWithoutCurrentTxMutations(&mut mvccKeyBuffer, &mut rawIterator, dataKey)? == false {
+                if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer, &mut rawIterator, dataKey, &columnFamily)? == false {
                     return Ok(());
                 }
 
                 if let Some(mutationsRawCurrentTx) = mutationsRawCurrentTx {
-                    if self.checkCommittedDataVisibilityWithCurrentTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
+                    if self.checkCommittedDataVisibilityWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
                         return Ok(());
                     }
                 }
@@ -879,7 +879,7 @@ impl<'session> CommandExecutor<'session> {
                     }
 
                     // mvcc的visibility筛选
-                    if self.checkCommittedDataVisibilityWithoutCurrentTxMutations(&mut mvccKeyBuffer, &mut rawIterator, dataKey)? == false {
+                    if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer, &mut rawIterator, dataKey, &columnFamily)? == false {
                         continue;
                     }
 
@@ -887,7 +887,7 @@ impl<'session> CommandExecutor<'session> {
                     // 先要结合mutations 看已落地的是不是应该干掉
                     // 然后看mutations 有没有想要的
                     if let Some(mutationsRawCurrentTx) = mutationsRawOnTableCurrentTx {
-                        if self.checkCommittedDataVisibilityWithCurrentTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
+                        if self.checkCommittedDataVisibilityWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
                             continue;
                         }
                     }
@@ -948,10 +948,11 @@ impl<'session> CommandExecutor<'session> {
     //-------------------------------------------------------------------------------------------
 
     // 对data对应的mvccKey的visibility筛选
-    fn checkCommittedDataVisibilityWithoutCurrentTxMutations(&self,
-                                                             mvccKeyBuffer: &mut BytesMut,
-                                                             rawIterator: &mut DBRawIterator,
-                                                             dataKey: DataKey) -> Result<bool> {
+    fn checkCommittedDataVisibilityWithoutTxMutations(&self,
+                                                      mvccKeyBuffer: &mut BytesMut,
+                                                      rawIterator: &mut DBRawIterator,
+                                                      dataKey: DataKey,
+                                                      columnFamily: &ColumnFamily) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // xmin
@@ -965,18 +966,37 @@ impl<'session> CommandExecutor<'session> {
         // xmax
         mvccKeyBuffer.writeDataMvccXmax(dataKey, currentTxId);
         rawIterator.seek_for_prev(mvccKeyBuffer.as_ref());
-        // todo 要能确保会至少有xmax是0的 mvcc条目
+        // 能确保会至少有xmax是0的 mvcc条目
         let mvccKeyXmax = rawIterator.key().unwrap();
         let xmax = extract_tx_id_from_mvcc_key!(mvccKeyXmax);
 
         let snapshot = self.session.getSnapshot()?;
+
+        let originDataKeyKey = u64_to_byte_array_reference!(key_prefix_add_row_id!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, extract_row_id_from_data_key!(dataKey)));
+        let originDataKey = snapshot.get_cf(columnFamily, originDataKeyKey)?.unwrap();
+        let originDataKey = byte_slice_to_u64!(originDataKey);
+        // 说明本条data是通过update而来 老data的dataKey是originDataKey
+        if meta::DATA_KEY_INVALID != originDataKey {
+            // 探寻originDataKey对应的mvcc xmax记录
+            mvccKeyBuffer.writeDataMvccXmax(originDataKey, currentTxId);
+            rawIterator.seek_for_prev(mvccKeyBuffer.as_ref());
+
+            // 能确保会至少有xmax是0的 mvcc条目
+            // 得知本tx可视范围内该条老data是recently被哪个tx干掉的
+            let originDataXmax = extract_tx_id_from_mvcc_key!( rawIterator.key().unwrap());
+            // 要和本条data的xmin比较 如果不相等的话抛弃
+            if xmin != originDataXmax {
+                return Ok(false);
+            }
+        }
+
         Ok(meta::isVisible(currentTxId, xmin, xmax))
     }
 
-    fn checkCommittedDataVisibilityWithCurrentTxMutations(&self,
-                                                          mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
-                                                          mvccKeyBuffer: &mut BytesMut,
-                                                          dataKey: DataKey) -> Result<bool> {
+    fn checkCommittedDataVisibilityWithTxMutations(&self,
+                                                   mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                   mvccKeyBuffer: &mut BytesMut,
+                                                   dataKey: DataKey) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 要看落地的有没有被当前的tx上的干掉  只要读取相应的xmax的mvccKey
@@ -1237,16 +1257,6 @@ impl<'session> CommandExecutor<'session> {
         };
 
         Ok(destByteSlice.freeze())
-    }
-
-    fn a() {}
-
-    fn b<F>(f: F) where F: Fn() -> () {
-        f()
-    }
-
-    fn c() {
-        Self::b(Self::a);
     }
 
     fn getKeysByPrefix(&self,
