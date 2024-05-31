@@ -19,8 +19,8 @@ use crate::codec::{BinaryCodec, MyBytes};
 use crate::expr::Expr;
 use crate::graph_error::GraphError;
 use crate::graph_value::{GraphValue, PointDesc};
-use crate::session::{KV, Session};
-use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, DBRawIterator, KeyTag, RowId, SelectResultToFront, TableId, TxId};
+use crate::session::Session;
+use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, DBRawIterator, KeyTag, KV, RowId, SelectResultToFront, TableId, TxId};
 use crate::types;
 
 type RowData = HashMap<String, GraphValue>;
@@ -142,10 +142,7 @@ impl<'session> CommandExecutor<'session> {
         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
         let (xminAdd, xmaxAdd) = self.generateAddDataXminXmax(&mut mvccKeyBuffer, dataKey)?;
 
-        let origin = (
-            u64_to_byte_array_reference!(key_prefix_add_row_id!(meta::KEY_PPREFIX_ORIGIN_DATA, rowId)).to_vec(),
-            u64_to_byte_array_reference!(meta::ORIGIN_DATA_VALUE_INVALID).to_vec()
-        );
+        let origin = self.generateOrigin(dataKey, meta::DATA_KEY_INVALID);
 
         self.session.writeAddDataMutation(&table.name, dataAdd, xminAdd, xmaxAdd, origin);
 
@@ -293,10 +290,11 @@ impl<'session> CommandExecutor<'session> {
         };
 
         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
-
         let (xminAdd, xmaxAdd) = self.generateAddDataXminXmax(&mut mvccKeyBuffer, relDataKey)?;
 
-        self.session.writeAddDataMutation(&relation.name, dataAdd, xminAdd, xmaxAdd);
+        let origin: KV = self.generateOrigin(relDataKey, meta::DATA_KEY_INVALID);
+
+        self.session.writeAddDataMutation(&relation.name, dataAdd, xminAdd, xmaxAdd, origin);
 
         //--------------------------------------------------------------------
 
@@ -748,13 +746,14 @@ impl<'session> CommandExecutor<'session> {
             // 写新的data
             let newRowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
             let newDataKey = key_prefix_add_row_id!(meta::KEY_PREFIX_MVCC,newRowId);
-            // self.session.getCurrentTx()?.put_cf(&columnFamily, dataKeyBinary, value)?;
-            let newData = (u64_to_byte_array_reference!(newDataKey).to_vec(), value.to_vec());
+            let newData: KV = (u64_to_byte_array_reference!(newDataKey).to_vec(), value.to_vec());
 
             // 写新的data的xmin xmax
             let (newXmin, newXmax) = self.generateAddDataXminXmax(&mut mvccKeyBuffer, newDataKey)?;
 
-            self.session.writeUpdateDataMutation(&table.name, oldXmax, newData, newXmin, newXmax);
+            let origin = self.generateOrigin(newDataKey, *dataKey);
+
+            self.session.writeUpdateDataMutation(&table.name, oldXmax, newData, newXmin, newXmax, origin);
         }
 
         Ok(CommandExecResult::DmlResult)
@@ -959,24 +958,18 @@ impl<'session> CommandExecutor<'session> {
         // 当vaccum时候会变为 TX_ID_FROZEN 别的时候不会变动 只会有1条
         mvccKeyBuffer.writeDataMvccXmin(dataKey, meta::TX_ID_FROZEN);
         rawIterator.seek(mvccKeyBuffer.as_ref());
-        // rawIterator生成的时候可以通过read option设置 bound
-        if rawIterator.valid() == false {
-            panic!("impossible")
-        }
+        // rawIterator生成的时候可以通过readOption设置bound 要是越过的话iterator.valid()为false
         let mvccKeyXmin = rawIterator.key().unwrap();
         let xmin = extract_tx_id_from_mvcc_key!(mvccKeyXmin);
 
         // xmax
         mvccKeyBuffer.writeDataMvccXmax(dataKey, currentTxId);
         rawIterator.seek_for_prev(mvccKeyBuffer.as_ref());
-        // todo 目前想不明白iterator 是 invalid 如何应对
-        if rawIterator.valid() == false {
-            panic!("impossible")
-        }
         // todo 要能确保会至少有xmax是0的 mvcc条目
         let mvccKeyXmax = rawIterator.key().unwrap();
         let xmax = extract_tx_id_from_mvcc_key!(mvccKeyXmax);
 
+        let snapshot = self.session.getSnapshot()?;
         Ok(meta::isVisible(currentTxId, xmin, xmax))
     }
 
@@ -1324,6 +1317,14 @@ impl<'session> CommandExecutor<'session> {
     fn generateDeleteDataXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> Result<KV> {
         mvccKeyBuffer.writeDataMvccXmax(dataKey, self.session.getTxId()?);
         Ok((mvccKeyBuffer.to_vec(), global::EMPTY_BINARY))
+    }
+
+    fn generateOrigin(&self, selfDataKey: DataKey, originDataKey: DataKey) -> KV {
+        let selfRowId = extract_row_id_from_data_key!(selfDataKey);
+        (
+            u64_to_byte_array_reference!(key_prefix_add_row_id!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, selfRowId)).to_vec(),
+            u64_to_byte_array_reference!(originDataKey).to_vec()
+        )
     }
 
     /// 当前tx上link的时候 生成的含有xmin 和 xmax 的pointerKey

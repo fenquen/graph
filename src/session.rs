@@ -19,7 +19,7 @@ use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
 use tokio::io::AsyncWriteExt;
 use crate::command_executor::{CommandExecutor};
 use crate::parser::{Command, SqlOp};
-use crate::types::{Byte, ColumnFamily, SelectResultToFront, Snapshot, TxId};
+use crate::types::{Byte, ColumnFamily, KV, SelectResultToFront, Snapshot, TxId};
 
 pub struct Session {
     autoCommit: bool,
@@ -167,7 +167,7 @@ impl Session {
         }
     }
 
-    pub fn getSnapshot(&self) -> Result<&SnapshotWithThreadMode<DBWithThreadMode<MultiThreaded>>> {
+    pub fn getSnapshot(&self) -> Result<&Snapshot> {
         match self.snapshot {
             Some(ref snapshot) => Ok(snapshot),
             None => throw!("not in a transaction")
@@ -241,16 +241,18 @@ impl Session {
         let mutationsOnTable = tableName_mutationsOnTable.getMutWithDefault(tableName);
 
         match mutation {
-            Mutation::AddData { data, xmin, xmax } => {
+            Mutation::AddData { data, xmin, xmax, origin } => {
                 mutationsOnTable.insert(data.0, data.1);
                 mutationsOnTable.insert(xmin.0, xmin.1);
                 mutationsOnTable.insert(xmax.0, xmax.1);
+                mutationsOnTable.insert(origin.0, origin.1);
             }
-            Mutation::UpdateData { oldXmax, newData, newXmin, newXmax } => {
+            Mutation::UpdateData { oldXmax, newData, newXmin, newXmax, origin } => {
                 mutationsOnTable.insert(oldXmax.0, oldXmax.1);
                 mutationsOnTable.insert(newData.0, newData.1);
                 mutationsOnTable.insert(newXmin.0, newXmin.1);
                 mutationsOnTable.insert(newXmax.0, newXmax.1);
+                mutationsOnTable.insert(origin.0, origin.1);
             }
             Mutation::DeleteData { oldXmax } => {
                 mutationsOnTable.insert(oldXmax.0, oldXmax.1);
@@ -297,8 +299,6 @@ impl<K: Eq + Hash, V, S: BuildHasher> HashMapExt<K, V, S> for HashMap<K, V, S> {
         self.get_mut(k).unwrap()
     }
 }
-
-pub type KV = (Vec<Byte>, Vec<Byte>);
 
 pub enum Mutation {
     AddData {

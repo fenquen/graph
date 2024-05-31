@@ -43,7 +43,7 @@ pub const KEY_PREFIX_MAX: KeyPrefix = (1 << KEY_PREFIX_BIT_LEN) - 1;
 pub const KEY_PREFIX_DATA: KeyPrefix = 0;
 pub const KEY_PREFIX_POINTER: KeyPrefix = 1;
 pub const KEY_PREFIX_MVCC: KeyPrefix = 2;
-pub const KEY_PPREFIX_ORIGIN_DATA: KeyPrefix = 3;
+pub const KEY_PPREFIX_ORIGIN_DATA_KEY: KeyPrefix = 3;
 
 pub const ROW_ID_BIT_LEN: usize = 64 - KEY_PREFIX_BIT_LEN;
 pub const ROW_ID_MAX: RowId = (1 << ROW_ID_BIT_LEN) - 1;
@@ -109,8 +109,10 @@ pub const MVCC_KEY_BYTE_LEN: usize = {
 
 // -----------------------------------------------------------------------------------------
 
+/// 4bit + 60bit
 pub const ORIGIN_DATA_KEY_BYTE_LEN: usize = mem::size_of::<OriginDataKey>();
-pub const ORIGIN_DATA_VALUE_INVALID: OriginDataKey = crate::key_prefix_add_row_id!(KEY_PREFIX_DATA, ROW_ID_INVALID);
+/// 是value啊不是像以往的key
+pub const DATA_KEY_INVALID: OriginDataKey = crate::key_prefix_add_row_id!(KEY_PREFIX_DATA, ROW_ID_INVALID);
 
 /// 用来保存txId的colFamily的name
 pub const COLUMN_FAMILY_NAME_TX_ID: &str = "tx_id";

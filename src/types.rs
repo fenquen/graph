@@ -25,3 +25,5 @@ pub type OriginDataKey = u64;
 pub type KeyTag = Byte;
 
 pub type TxId = u64;
+
+pub type KV = (Vec<Byte>, Vec<Byte>);
