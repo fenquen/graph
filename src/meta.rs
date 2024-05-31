@@ -22,7 +22,7 @@ use crate::config::CONFIG;
 use crate::graph_value::GraphValue;
 use crate::parser::Command;
 use crate::session::Session;
-use crate::types::{Byte, DataKey, DBIterator, DBRawIterator, KeyPrefix, KeyTag, TableId, TxId};
+use crate::types::{Byte, DataKey, DBIterator, DBRawIterator, KeyPrefix, KeyTag, OriginDataKey, RowId, TableId, TxId};
 use crate::utils::TrickyContainer;
 
 lazy_static! {
@@ -43,9 +43,12 @@ pub const KEY_PREFIX_MAX: KeyPrefix = (1 << KEY_PREFIX_BIT_LEN) - 1;
 pub const KEY_PREFIX_DATA: KeyPrefix = 0;
 pub const KEY_PREFIX_POINTER: KeyPrefix = 1;
 pub const KEY_PREFIX_MVCC: KeyPrefix = 2;
+pub const KEY_PPREFIX_ORIGIN_DATA: KeyPrefix = 3;
 
 pub const ROW_ID_BIT_LEN: usize = 64 - KEY_PREFIX_BIT_LEN;
-pub const MAX_ROW_ID: u64 = (1 << ROW_ID_BIT_LEN) - 1;
+pub const ROW_ID_MAX: RowId = (1 << ROW_ID_BIT_LEN) - 1;
+pub const ROW_ID_INVALID: RowId = 0;
+pub const ROW_ID_MIN: RowId = 1;
 
 // key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
 pub const DATA_KEY_BYTE_LEN: usize = mem::size_of::<DataKey>();
@@ -72,8 +75,6 @@ pub const POINTER_KEY_TAG_SRC_TABLE_ID: KeyTag = 2;
 pub const POINTER_KEY_TAG_DEST_TABLE_ID: KeyTag = 3;
 /// 后边实际的table/rel上的dataKey
 pub const POINTER_KEY_TAG_DATA_KEY: KeyTag = 4;
-// pub const POINTER_KEY_TAG_XMIN: KeyTag = 5;
-// pub const POINTER_KEY_TAG_XMAX: KeyTag = 7;
 
 pub const POINTER_KEY_BYTE_LEN: usize = {
     DATA_KEY_BYTE_LEN + // keyPrefix 4bit + rowId 60bit
@@ -86,14 +87,8 @@ pub const POINTER_KEY_BYTE_LEN: usize = {
 pub const POINTER_KEY_TARGET_DATA_KEY_OFFSET: usize = POINTER_KEY_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN - TX_ID_BYTE_LEN;
 pub const POINTER_KEY_MVCC_KEY_TAG_OFFSET: usize = POINTER_KEY_TARGET_DATA_KEY_OFFSET + DATA_KEY_BYTE_LEN;
 
-// 写到dataKey
-// add put 添加新的
-// update  删掉old 添加作废的old 添加新的 -> 修改old 添加新的
-// delete 删掉old 添加作废的old -> 修改old
+// ---------------------------------------------------------------------------------------
 
-// 写到 mvcc key
-// add 写dataKey 写mvcc_xmin 写mvcc_xmax
-// update 删掉
 pub const TX_ID_BYTE_LEN: usize = mem::size_of::<TxId>();
 pub const TX_ID_INVALID: TxId = 0;
 pub const TX_ID_FROZEN: TxId = 2;
@@ -102,6 +97,8 @@ pub const TX_ID_MAX: TxId = TxId::MAX;
 
 pub const TX_CONCURRENCY_MAX: usize = 100000;
 
+// ------------------------------------------------------------------------------------------
+
 // KEY_PREFIX_MVCC + rowId + MVCC_KEY_TAG_XMIN + txId
 pub const MVCC_KEY_TAG_XMIN: KeyTag = 0;
 pub const MVCC_KEY_TAG_XMAX: KeyTag = 1;
@@ -109,6 +106,11 @@ pub const MVCC_KEY_TAG_XMAX: KeyTag = 1;
 pub const MVCC_KEY_BYTE_LEN: usize = {
     DATA_KEY_BYTE_LEN + KEY_TAG_BYTE_LEN + TX_ID_BYTE_LEN
 };
+
+// -----------------------------------------------------------------------------------------
+
+pub const ORIGIN_DATA_KEY_BYTE_LEN: usize = mem::size_of::<OriginDataKey>();
+pub const ORIGIN_DATA_VALUE_INVALID: OriginDataKey = crate::key_prefix_add_row_id!(KEY_PREFIX_DATA, ROW_ID_INVALID);
 
 /// 用来保存txId的colFamily的name
 pub const COLUMN_FAMILY_NAME_TX_ID: &str = "tx_id";
@@ -132,14 +134,14 @@ pub fn isVisible(currentTxId: TxId, xmin: TxId, xmax: TxId) -> bool {
 #[macro_export]
 macro_rules! key_prefix_add_row_id {
     ($keyPrefix: expr, $rowId: expr) => {
-        (($keyPrefix as u64) << meta::ROW_ID_BIT_LEN) | (($rowId as u64) & meta::MAX_ROW_ID)
+        (($keyPrefix as u64) << meta::ROW_ID_BIT_LEN) | (($rowId as u64) & meta::ROW_ID_MAX)
     };
 }
 
 #[macro_export]
 macro_rules! extract_row_id_from_data_key {
     ($key: expr) => {
-        (($key as u64) & meta::MAX_ROW_ID) as types::RowId
+        (($key as u64) & meta::ROW_ID_MAX) as types::RowId
     };
 }
 
@@ -148,7 +150,7 @@ macro_rules! extract_row_id_from_key_slice {
     ($slice: expr) => {
         {
            let leadingU64 = byte_slice_to_u64!($slice);
-           ((leadingU64) & meta::MAX_ROW_ID) as types::RowId
+           ((leadingU64) & meta::ROW_ID_MAX) as types::RowId
         }
     };
 }

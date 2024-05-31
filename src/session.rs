@@ -89,8 +89,7 @@ impl Session {
                 if (currentTxId - *meta::TX_ID_START_UP.getRef()) % meta::TX_CONCURRENCY_MAX as u64 == 0 {
                     // TX_CONCURRENCY_MAX
                     tokio::task::spawn_blocking(|| {});
-
-                } meta::TX_ID_COUNTER.fetch_update()
+                }
 
                 let cf = self.getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
                 batch.put_cf(&cf, u64_to_byte_array_reference!(self.txId.unwrap()), global::EMPTY_BINARY);
@@ -181,23 +180,30 @@ impl Session {
 
     pub fn writeAddDataMutation(&self,
                                 tableName: &String,
-                                data: KV, xmin: KV, xmax: KV) {
-        let addMutation = Mutation::AddData {
-            data,
-            xmin,
-            xmax,
-        };
+                                data: KV,
+                                xmin: KV,
+                                xmax: KV,
+                                origin: KV) {
+        let addMutation =
+            Mutation::AddData {
+                data,
+                xmin,
+                xmax,
+                origin,
+            };
 
         self.writeMutation(tableName, addMutation);
     }
 
     pub fn writeAddPointerMutation(&self,
                                    tableName: &String,
-                                   xmin: KV, xmax: KV) {
-        let addMutation = Mutation::AddPointer {
-            xmin,
-            xmax,
-        };
+                                   xmin: KV,
+                                   xmax: KV) {
+        let addMutation =
+            Mutation::AddPointer {
+                xmin,
+                xmax,
+            };
 
         self.writeMutation(tableName, addMutation);
     }
@@ -206,13 +212,18 @@ impl Session {
     pub fn writeUpdateDataMutation(&self,
                                    tableName: &String,
                                    oldXmax: KV,
-                                   newData: KV, newXmin: KV, newXmax: KV) {
-        let updateMutation = Mutation::UpdateData {
-            oldXmax,
-            newData,
-            newXmin,
-            newXmax,
-        };
+                                   newData: KV,
+                                   newXmin: KV,
+                                   newXmax: KV,
+                                   origin: KV) {
+        let updateMutation =
+            Mutation::UpdateData {
+                oldXmax,
+                newData,
+                newXmin,
+                newXmax,
+                origin,
+            };
 
         self.writeMutation(tableName, updateMutation);
     }
@@ -294,6 +305,7 @@ pub enum Mutation {
         data: KV,
         xmin: KV,
         xmax: KV,
+        origin: KV,
     },
     AddPointer {
         xmin: KV,
@@ -304,6 +316,7 @@ pub enum Mutation {
         newData: KV,
         newXmin: KV,
         newXmax: KV,
+        origin: KV,
     },
     DeleteData {
         oldXmax: KV

@@ -142,7 +142,12 @@ impl<'session> CommandExecutor<'session> {
         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
         let (xminAdd, xmaxAdd) = self.generateAddDataXminXmax(&mut mvccKeyBuffer, dataKey)?;
 
-        self.session.writeAddDataMutation(&table.name, dataAdd, xminAdd, xmaxAdd);
+        let origin = (
+            u64_to_byte_array_reference!(key_prefix_add_row_id!(meta::KEY_PPREFIX_ORIGIN_DATA, rowId)).to_vec(),
+            u64_to_byte_array_reference!(meta::ORIGIN_DATA_VALUE_INVALID).to_vec()
+        );
+
+        self.session.writeAddDataMutation(&table.name, dataAdd, xminAdd, xmaxAdd, origin);
 
         Ok(CommandExecResult::DmlResult)
     }
@@ -1241,11 +1246,9 @@ impl<'session> CommandExecutor<'session> {
         Ok(destByteSlice.freeze())
     }
 
-    fn a() {
+    fn a() {}
 
-    }
-
-    fn b<F>(f:F) where F:Fn()->(){
+    fn b<F>(f: F) where F: Fn() -> () {
         f()
     }
 

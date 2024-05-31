@@ -21,6 +21,7 @@ pub type RowId = u64;
 
 pub type KeyPrefix = Byte;
 pub type DataKey = u64;
+pub type OriginDataKey = u64;
 pub type KeyTag = Byte;
 
 pub type TxId = u64;
