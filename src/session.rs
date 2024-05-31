@@ -11,13 +11,13 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
-use crate::{command_executor, global, meta, parser, throw, u64_to_byte_array_reference};
+use crate::{global, meta, parser, throw, u64_to_byte_array_reference};
 use anyhow::Result;
 use log::log;
 use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
               MultiThreaded, OptimisticTransactionDB, Options, SnapshotWithThreadMode, Transaction, WriteBatchWithTransaction};
 use tokio::io::AsyncWriteExt;
-use crate::command_executor::{CommandExecutor};
+use crate::executor::CommandExecutor;
 use crate::parser::{Command, SqlOp};
 use crate::types::{Byte, ColumnFamily, KV, SelectResultToFront, Snapshot, TxId};
 

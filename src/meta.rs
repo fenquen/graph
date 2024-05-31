@@ -6,7 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::{byte_slice_to_u64, command_executor, file_goto_start, global, meta, suffix_plus_plus, throw, types, u64_to_byte_array_reference};
+use crate::{byte_slice_to_u64, file_goto_start, global, meta, suffix_plus_plus, throw, types, u64_to_byte_array_reference};
 use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
@@ -143,7 +143,7 @@ macro_rules! key_prefix_add_row_id {
 #[macro_export]
 macro_rules! extract_row_id_from_data_key {
     ($key: expr) => {
-        (($key as u64) & meta::ROW_ID_MAX) as types::RowId
+        (($key as u64) & meta::ROW_ID_MAX) as crate::types::RowId
     };
 }
 
@@ -152,7 +152,7 @@ macro_rules! extract_row_id_from_key_slice {
     ($slice: expr) => {
         {
            let leadingU64 = byte_slice_to_u64!($slice);
-           ((leadingU64) & meta::ROW_ID_MAX) as types::RowId
+           ((leadingU64) & meta::ROW_ID_MAX) as crate::types::RowId
         }
     };
 }
@@ -160,7 +160,7 @@ macro_rules! extract_row_id_from_key_slice {
 #[macro_export]
 macro_rules! extract_prefix_from_key_slice {
     ($slice: expr) => {
-        ((($slice[0]) >> meta::KEY_PREFIX_BIT_LEN) & meta::KEY_PREFIX_MAX) as types::KeyPrefix
+        ((($slice[0]) >> meta::KEY_PREFIX_BIT_LEN) & meta::KEY_PREFIX_MAX) as crate::types::KeyPrefix
     };
 }
 
@@ -169,7 +169,7 @@ macro_rules! extract_target_data_key_from_pointer_key {
     ($pointerKey: expr) => {
         {
             let slice = &$pointerKey[meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET..(meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET + meta::DATA_KEY_BYTE_LEN)];
-            byte_slice_to_u64!(slice) as types::DataKey
+            byte_slice_to_u64!(slice) as crate::types::DataKey
         }
     };
 }
@@ -180,7 +180,7 @@ macro_rules! extract_tx_id_from_mvcc_key {
     ($mvccKey: expr) => {
         {
             let txIdSlice = &$mvccKey[(meta::MVCC_KEY_BYTE_LEN - meta::TX_ID_BYTE_LEN)..meta::MVCC_KEY_BYTE_LEN];
-            byte_slice_to_u64!(txIdSlice) as types::TxId
+            byte_slice_to_u64!(txIdSlice) as crate::types::TxId
         }
     };
 }
@@ -191,7 +191,7 @@ macro_rules! extract_tx_id_from_pointer_key {
     ($pointerKey: expr) => {
         {
             let slice = &$pointerKey[(meta::POINTER_KEY_BYTE_LEN - meta::TX_ID_BYTE_LEN)..meta::POINTER_KEY_BYTE_LEN];
-            byte_slice_to_u64!(slice) as types::TxId
+            byte_slice_to_u64!(slice) as crate::types::TxId
         }
     };
 }

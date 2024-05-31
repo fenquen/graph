@@ -7,7 +7,6 @@ mod graph_error;
 mod global;
 mod parser;
 mod meta;
-mod command_executor;
 mod a;
 mod expr;
 mod graph_value;
@@ -16,6 +15,7 @@ mod codec;
 mod utils;
 mod ws;
 mod types;
+mod executor;
 
 use std::string::ToString;
 use anyhow::Result;
