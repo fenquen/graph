@@ -22,7 +22,6 @@ impl<'session> CommandExecutor<'session> {
 
             let columnFamily = columnFamily.unwrap();
             let mut dbRawIterator: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
-
         }
     }
 }
