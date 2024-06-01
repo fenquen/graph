@@ -15,7 +15,6 @@ impl<'session> CommandExecutor<'session> {
 
             // dataKey mvccKey pointerKey originDataKeyKey
             // 先去scan mvccKey
-
             let columnFamily: Option<ColumnFamily> = dataStore.cf_handle(tableName.as_str());
             if let None = columnFamily {
                 continue;
@@ -23,7 +22,7 @@ impl<'session> CommandExecutor<'session> {
 
             let columnFamily = columnFamily.unwrap();
             let mut dbRawIterator: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
-            
+
         }
     }
 }

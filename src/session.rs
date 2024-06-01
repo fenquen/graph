@@ -23,7 +23,6 @@ use crate::types::{Byte, ColumnFamily, KV, SelectResultToFront, Snapshot, TxId};
 
 pub struct Session {
     autoCommit: bool,
-    // currentTx: Option<Transaction<'db, OptimisticTransactionDB>>,
     txId: Option<TxId>,
     dataStore: &'static DB,
     pub tableName_mutationsOnTable: RefCell<HashMap<String, BTreeMap<Vec<Byte>, Vec<Byte>>>>,
