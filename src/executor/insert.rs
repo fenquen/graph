@@ -2,13 +2,13 @@ use std::sync::atomic::Ordering;
 use bytes::BytesMut;
 use crate::meta::TableType;
 use crate::parser::Insert;
-use crate::{key_prefix_add_row_id, meta, throw, u64_to_byte_array_reference};
+use crate::{keyPrefixAddRowId, meta, throw, u64ToByteArrRef};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::types::{DataKey, KV, RowId};
 
 impl<'session> CommandExecutor<'session> {
     // todo insert时候value的排布要和创建表的时候column的顺序对应 完成
-    pub fn insert(&self, insert: &mut Insert) -> anyhow::Result<CommandExecResult> {
+    pub (super) fn insert(&self, insert: &mut Insert) -> anyhow::Result<CommandExecResult> {
         // 对应的表是不是exist
         let table = self.getTableRefByName(&insert.tableName)?;
 
@@ -18,11 +18,11 @@ impl<'session> CommandExecutor<'session> {
         }
 
         let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
-        let dataKey: DataKey = key_prefix_add_row_id!(meta::KEY_PREFIX_DATA, rowId);
+        let dataKey: DataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, rowId);
 
         // 写 data本身的key和value
         let dataAdd = {
-            let dataKeyBinary = u64_to_byte_array_reference!(dataKey);
+            let dataKeyBinary = u64ToByteArrRef!(dataKey);
             let rowDataBinary = self.generateInsertValuesBinary(insert, &*table)?;
 
             (dataKeyBinary.to_vec(), rowDataBinary.to_vec()) as KV

@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, RowData};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extract_prefix_from_key_slice, global, meta, throw, u64_to_byte_array_reference};
+use crate::{byte_slice_to_u64, extract_prefix_from_key_slice, global, meta, throw, u64ToByteArrRef};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
@@ -32,7 +32,11 @@ impl<'session> CommandExecutor<'session> {
             |dataKey: DataKey| -> anyhow::Result<()> {
                 // todo getRowDatasByDataKeys() 也要mvcc筛选 完成
                 // mvcc的visibility筛选
-                if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer, &mut rawIterator, dataKey, &columnFamily)? == false {
+                if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
+                                                                       &mut rawIterator,
+                                                                       dataKey,
+                                                                       &columnFamily,
+                                                                       &table.name)? == false {
                     return Ok(());
                 }
 
@@ -43,7 +47,7 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 let rowDataBinary =
-                    match self.session.getSnapshot()?.get_cf(&columnFamily, u64_to_byte_array_reference!(dataKey))? {
+                    match self.session.getSnapshot()?.get_cf(&columnFamily, u64ToByteArrRef!(dataKey))? {
                         Some(rowDataBinary) => rowDataBinary,
                         None => return Ok(()), // 有可能
                     };
@@ -76,8 +80,7 @@ impl<'session> CommandExecutor<'session> {
                              select: bool,
                              rowChecker: Option<fn(commandExecutor: &CommandExecutor,
                                                    columnFamily: &ColumnFamily,
-                                                   dataKey: DataKey,
-                                                   rowDataBinary: &[Byte]) -> anyhow::Result<bool>>) -> anyhow::Result<Vec<(DataKey, RowData)>> {
+                                                   dataKey: DataKey) -> anyhow::Result<bool>>) -> anyhow::Result<Vec<(DataKey, RowData)>> {
         // todo 使用table id 为 column family 标识
         let columnFamily = self.session.getColFamily(&table.name)?;
 
@@ -107,13 +110,17 @@ impl<'session> CommandExecutor<'session> {
                     let dataKey = byte_slice_to_u64!(&*dataKeyBinary) as DataKey;
 
                     if let Some(ref rowChecker) = rowChecker {
-                        if rowChecker(self, &columnFamily, dataKey, &*rowDataBinary)? == false {
+                        if rowChecker(self, &columnFamily, dataKey)? == false {
                             continue;
                         }
                     }
 
                     // mvcc的visibility筛选
-                    if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer, &mut rawIterator, dataKey, &columnFamily)? == false {
+                    if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
+                                                                           &mut rawIterator,
+                                                                           dataKey,
+                                                                           &columnFamily,
+                                                                           &table.name)? == false {
                         continue;
                     }
 
@@ -146,7 +153,7 @@ impl<'session> CommandExecutor<'session> {
 
                     // end include
                     // seek_for_prev 意思是 定位到目标 要是目标没有的话 那么定位到它前个
-                    rawIterator.seek_for_prev(u64_to_byte_array_reference!(((meta::KEY_PREFIX_DATA + 1) as u64)  << meta::ROW_ID_BIT_LEN));
+                    rawIterator.seek_for_prev(u64ToByteArrRef!(((meta::KEY_PREFIX_DATA + 1) as u64)  << meta::ROW_ID_BIT_LEN));
                     let endKeyBinInclude = rawIterator.key().unwrap();
                     let endKeyInclude = byte_slice_to_u64!(endKeyBinInclude);
 

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::ops::{Index, Range};
 use bytes::{BufMut, BytesMut};
-use crate::{byte_slice_to_u64, extract_row_id_from_data_key, extract_tx_id_from_mvcc_key, extract_tx_id_from_pointer_key, global,
-            key_prefix_add_row_id, meta, throw, u64_to_byte_array_reference};
+use crate::{byte_slice_to_u64, extract_row_id_from_data_key, extractTxIdFromMvccKey, extractTxIdFromPointerKey, global,
+            keyPrefixAddRowId, meta, throw, u64ToByteArrRef};
 use crate::executor::CommandExecutor;
 use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, TableId, TxId};
 
@@ -12,7 +12,8 @@ impl<'session> CommandExecutor<'session> {
                                                           mvccKeyBuffer: &mut BytesMut,
                                                           rawIterator: &mut DBRawIterator,
                                                           dataKey: DataKey,
-                                                          columnFamily: &ColumnFamily) -> anyhow::Result<bool> {
+                                                          columnFamily: &ColumnFamily,
+                                                          tableName: &String) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // xmin
@@ -21,18 +22,19 @@ impl<'session> CommandExecutor<'session> {
         rawIterator.seek(mvccKeyBuffer.as_ref());
         // rawIterator生成的时候可以通过readOption设置bound 要是越过的话iterator.valid()为false
         let mvccKeyXmin = rawIterator.key().unwrap();
-        let xmin = extract_tx_id_from_mvcc_key!(mvccKeyXmin);
+        let xmin = extractTxIdFromMvccKey!(mvccKeyXmin);
 
         // xmax
         mvccKeyBuffer.writeDataMvccXmax(dataKey, currentTxId);
         rawIterator.seek_for_prev(mvccKeyBuffer.as_ref());
         // 能确保会至少有xmax是0的 mvcc条目
         let mvccKeyXmax = rawIterator.key().unwrap();
-        let xmax = extract_tx_id_from_mvcc_key!(mvccKeyXmax);
+        let xmax = extractTxIdFromMvccKey!(mvccKeyXmax);
 
         let snapshot = self.session.getSnapshot()?;
 
-        let originDataKeyKey = u64_to_byte_array_reference!(key_prefix_add_row_id!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, extract_row_id_from_data_key!(dataKey)));
+        // 应对多个tx对相同rowId的数据update而产生的多条新data
+        let originDataKeyKey = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, extract_row_id_from_data_key!(dataKey)));
         let originDataKey = snapshot.get_cf(columnFamily, originDataKeyKey)?.unwrap();
         let originDataKey = byte_slice_to_u64!(originDataKey);
         // 说明本条data是通过update而来 老data的dataKey是originDataKey
@@ -43,9 +45,12 @@ impl<'session> CommandExecutor<'session> {
 
             // 能确保会至少有xmax是0的 mvcc条目
             // 得知本tx可视范围内该条老data是recently被哪个tx干掉的
-            let originDataXmax = extract_tx_id_from_mvcc_key!( rawIterator.key().unwrap());
+            let originDataXmax = extractTxIdFromMvccKey!( rawIterator.key().unwrap());
             // 要和本条data的xmin比较 如果不相等的话抛弃
             if xmin != originDataXmax {
+                // todo 还需要把这条因为update产生的多的new data 干掉 完成
+                let xmax = self.generateDeleteDataXmax(mvccKeyBuffer, dataKey)?;
+                self.session.writeDeleteDataMutation(tableName, xmax);
                 return Ok(false);
             }
         }
@@ -113,11 +118,11 @@ impl<'session> CommandExecutor<'session> {
                 // 生成xmax是currentTxId 的pointerKey
                 pointerKeyBuffer.replacePointerKeyMcvvTagTxId(committedPointerKey, meta::MVCC_KEY_TAG_XMIN, meta::TX_ID_FROZEN);
                 rawIterator.seek(pointerKeyBuffer.as_ref());
-                let xmin = extract_tx_id_from_pointer_key!(rawIterator.key().unwrap());
+                let xmin = extractTxIdFromPointerKey!(rawIterator.key().unwrap());
 
                 pointerKeyBuffer.replacePointerKeyMcvvTagTxId(committedPointerKey, meta::MVCC_KEY_TAG_XMAX, currentTxId);
                 rawIterator.seek_for_prev(pointerKeyBuffer.as_ref());
-                let xmax = extract_tx_id_from_pointer_key!(rawIterator.key().unwrap());
+                let xmax = extractTxIdFromPointerKey!(rawIterator.key().unwrap());
 
                 Ok(meta::isVisible(currentTxId, xmin, xmax))
             }
@@ -173,8 +178,8 @@ impl<'session> CommandExecutor<'session> {
     pub fn generateOrigin(&self, selfDataKey: DataKey, originDataKey: DataKey) -> KV {
         let selfRowId = extract_row_id_from_data_key!(selfDataKey);
         (
-            u64_to_byte_array_reference!(key_prefix_add_row_id!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, selfRowId)).to_vec(),
-            u64_to_byte_array_reference!(originDataKey).to_vec()
+            u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, selfRowId)).to_vec(),
+            u64ToByteArrRef!(originDataKey).to_vec()
         )
     }
 
@@ -259,7 +264,7 @@ impl BytesMutExt for BytesMut {
         self.clear();
 
         let rowId = extract_row_id_from_data_key!(selfDataKey);
-        self.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, rowId));
+        self.put_u64(keyPrefixAddRowId!(meta::KEY_PREFIX_POINTER, rowId));
 
         // 写relation的tableId
         self.put_u8(keyTag);
@@ -295,7 +300,7 @@ impl BytesMutExt for BytesMut {
         match mvccKeyTag {
             meta::MVCC_KEY_TAG_XMIN | meta::MVCC_KEY_TAG_XMAX => {
                 let rowId = extract_row_id_from_data_key!(dataKey);
-                self.put_u64(key_prefix_add_row_id!(meta::KEY_PREFIX_MVCC, rowId));
+                self.put_u64(keyPrefixAddRowId!(meta::KEY_PREFIX_MVCC, rowId));
                 self.put_u8(mvccKeyTag);
                 self.put_u64(txid);
             }

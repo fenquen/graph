@@ -64,7 +64,7 @@ macro_rules! file_goto_end {
 }
 
 #[macro_export]
-macro_rules! u64_to_byte_array_reference {
+macro_rules! u64ToByteArrRef {
     ($u64: expr) => {
         &[
             ($u64 >> 56) as u8,

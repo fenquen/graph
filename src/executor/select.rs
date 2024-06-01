@@ -13,7 +13,7 @@ use crate::global;
 
 impl<'session> CommandExecutor<'session> {
     /// 如果不是含有relation的select 便是普通的select
-    pub fn select(&self, selectFamily: &Select) -> anyhow::Result<CommandExecResult> {
+    pub (super) fn select(&self, selectFamily: &Select) -> anyhow::Result<CommandExecResult> {
         match selectFamily {
             // 普通模式不含有relation
             Select::SelectTable(selectTable) => self.selectTable(selectTable),

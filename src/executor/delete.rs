@@ -3,10 +3,10 @@ use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::meta;
 use crate::parser::Delete;
 
-impl <'session> CommandExecutor<'session> {
+impl<'session> CommandExecutor<'session> {
     // todo rel不能直接delete 应该先把rel上的点全都取消 rel不存在src和dest的点 然后
     /// 得到满足expr的record 然后把它的xmax变为当前的txId
-    pub fn delete(&self, delete: &Delete) -> anyhow::Result<CommandExecResult> {
+    pub(super) fn delete(&self, delete: &Delete) -> anyhow::Result<CommandExecResult> {
         let pairs = {
             let table = self.getTableRefByName(delete.tableName.as_str())?;
             self.scanSatisfiedRows(table.value(), delete.filterExpr.as_ref(), None, true, None)?

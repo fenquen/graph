@@ -8,7 +8,7 @@ use crate::types::DataKey;
 
 impl<'session> CommandExecutor<'session> {
     // todo pointer指向点和边的xmin xmax如何应对
-    pub fn unlink(&self, unlink: &Unlink) -> anyhow::Result<CommandExecResult> {
+    pub (super) fn unlink(&self, unlink: &Unlink) -> anyhow::Result<CommandExecResult> {
         match unlink {
             Unlink::LinkStyle(unlinkLinkStyle) => self.unlinkLinkStyle(unlinkLinkStyle),
             Unlink::SelfStyle(unlinkSelfStyle) => self.unlinkSelfStyle(unlinkSelfStyle),

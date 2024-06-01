@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
-use crate::{global, meta, parser, throw, u64_to_byte_array_reference};
+use crate::{global, meta, parser, throw, u64ToByteArrRef};
 use anyhow::Result;
 use log::log;
 use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
@@ -95,7 +95,7 @@ impl Session {
 
                 // cf需要现用现取 内部使用的是read 而create cf会用到write
                 let cf = self.getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
-                batch.put_cf(&cf, u64_to_byte_array_reference!(self.txId.unwrap()), global::EMPTY_BINARY);
+                batch.put_cf(&cf, u64ToByteArrRef!(self.txId.unwrap()), global::EMPTY_BINARY);
             }
         }
 
@@ -331,14 +331,11 @@ pub enum Mutation {
 
 #[derive(Default)]
 pub struct TxMutation {
-    /// 原样
-    pub totalMutations: Vec<Arc<Mutation>>,
     pub tableName_tableMutation: HashMap<String, TableMutation>,
 }
 
 impl TxMutation {
     pub fn clear(&mut self) {
-        self.totalMutations.clear();
         self.tableName_tableMutation.clear();
     }
 }

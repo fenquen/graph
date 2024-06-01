@@ -6,7 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::{byte_slice_to_u64, file_goto_start, global, meta, suffix_plus_plus, throw, types, u64_to_byte_array_reference};
+use crate::{byte_slice_to_u64, file_goto_start, global, meta, suffix_plus_plus, throw, types, u64ToByteArrRef};
 use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
@@ -48,14 +48,15 @@ pub const KEY_PPREFIX_ORIGIN_DATA_KEY: KeyPrefix = 3;
 
 pub const ROW_ID_BIT_LEN: usize = 64 - KEY_PREFIX_BIT_LEN;
 pub const ROW_ID_MAX: RowId = (1 << ROW_ID_BIT_LEN) - 1;
+pub const ROW_ID_MAX_AVAILABLE: RowId = ROW_ID_MAX - 1;
 pub const ROW_ID_INVALID: RowId = 0;
 pub const ROW_ID_MIN: RowId = 1;
 
 // key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
 pub const DATA_KEY_BYTE_LEN: usize = mem::size_of::<DataKey>();
-pub const DATA_KEY_PATTERN: &[Byte] = u64_to_byte_array_reference!((KEY_PREFIX_DATA as u64) << ROW_ID_BIT_LEN);
-pub const POINTER_KEY_PATTERN: &[Byte] = u64_to_byte_array_reference!((KEY_PREFIX_POINTER as u64) << ROW_ID_BIT_LEN);
-pub const MVCC_KEY_PATTERN: &[Byte] = u64_to_byte_array_reference!((KEY_PREFIX_MVCC as u64) << ROW_ID_BIT_LEN);
+pub const DATA_KEY_PATTERN: &[Byte] = u64ToByteArrRef!((KEY_PREFIX_DATA as u64) << ROW_ID_BIT_LEN);
+pub const POINTER_KEY_PATTERN: &[Byte] = u64ToByteArrRef!((KEY_PREFIX_POINTER as u64) << ROW_ID_BIT_LEN);
+pub const MVCC_KEY_PATTERN: &[Byte] = u64ToByteArrRef!((KEY_PREFIX_MVCC as u64) << ROW_ID_BIT_LEN);
 
 lazy_static! {
     pub static ref DATA_KEY_PATTERN_VEC: Vec<Byte> = DATA_KEY_PATTERN.to_vec();
@@ -113,7 +114,7 @@ pub const MVCC_KEY_BYTE_LEN: usize = {
 /// 4bit + 60bit
 pub const ORIGIN_DATA_KEY_KEY_BYTE_LEN: usize = mem::size_of::<u64>();
 /// 是value啊不是像以往的key
-pub const DATA_KEY_INVALID: DataKey = crate::key_prefix_add_row_id!(KEY_PREFIX_DATA, ROW_ID_INVALID);
+pub const DATA_KEY_INVALID: DataKey = crate::keyPrefixAddRowId!(KEY_PREFIX_DATA, ROW_ID_INVALID);
 
 /// 用来保存txId的colFamily的name
 pub const COLUMN_FAMILY_NAME_TX_ID: &str = "tx_id";
@@ -135,7 +136,7 @@ pub fn isVisible(currentTxId: TxId, xmin: TxId, xmax: TxId) -> bool {
 }
 
 #[macro_export]
-macro_rules! key_prefix_add_row_id {
+macro_rules! keyPrefixAddRowId {
     ($keyPrefix: expr, $rowId: expr) => {
         (($keyPrefix as u64) << meta::ROW_ID_BIT_LEN) | (($rowId as u64) & meta::ROW_ID_MAX)
     };
@@ -149,7 +150,7 @@ macro_rules! extract_row_id_from_data_key {
 }
 
 #[macro_export]
-macro_rules! extract_row_id_from_key_slice {
+macro_rules! extractRowIdFromKeySlice {
     ($slice: expr) => {
         {
            let leadingU64 = byte_slice_to_u64!($slice);
@@ -177,7 +178,7 @@ macro_rules! extract_target_data_key_from_pointer_key {
 
 /// txId 是在 mvccKey 末尾
 #[macro_export]
-macro_rules! extract_tx_id_from_mvcc_key {
+macro_rules! extractTxIdFromMvccKey {
     ($mvccKey: expr) => {
         {
             let txIdSlice = &$mvccKey[(meta::MVCC_KEY_BYTE_LEN - meta::TX_ID_BYTE_LEN)..meta::MVCC_KEY_BYTE_LEN];
@@ -188,12 +189,19 @@ macro_rules! extract_tx_id_from_mvcc_key {
 
 /// txId 是在 pointerkey 末尾
 #[macro_export]
-macro_rules! extract_tx_id_from_pointer_key {
+macro_rules! extractTxIdFromPointerKey {
     ($pointerKey: expr) => {
         {
             let slice = &$pointerKey[(meta::POINTER_KEY_BYTE_LEN - meta::TX_ID_BYTE_LEN)..meta::POINTER_KEY_BYTE_LEN];
             byte_slice_to_u64!(slice) as crate::types::TxId
         }
+    };
+}
+
+#[macro_export]
+macro_rules! extractKeyTagFromMvccKey {
+    ($mvccKey: expr) => {
+        $mvccKey[meta::DATA_KEY_BYTE_LEN]
     };
 }
 

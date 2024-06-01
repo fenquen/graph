@@ -77,7 +77,6 @@ impl<'session> CommandExecutor<'session> {
                 Command::Delete(delete) => self.delete(delete)?,
                 Command::Update(update) => self.update(update)?,
                 Command::Unlink(unlink) => self.unlink(unlink)?,
-                _ => throw!(&format!("unsupported command {:?}", command)),
             };
 
             // 如何应对多个的select
@@ -117,7 +116,7 @@ mod test {
     use tokio::fs::OpenOptions;
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     use crate::graph_value::GraphValue;
-    use crate::{byte_slice_to_u64, global, u64_to_byte_array_reference};
+    use crate::{byte_slice_to_u64, global, u64ToByteArrRef};
 
     #[test]
     pub fn a() {
@@ -175,7 +174,7 @@ mod test {
 
     #[test]
     pub fn testU64Codec() {
-        let s = u64_to_byte_array_reference!(2147389121u64);
+        let s = u64ToByteArrRef!(2147389121u64);
 
         let s1 = u64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
         let aa = byte_slice_to_u64!(s);

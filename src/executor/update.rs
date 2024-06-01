@@ -5,8 +5,8 @@ use rocksdb::{Direction, IteratorMode};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::meta::TableType;
 use crate::parser::Update;
-use crate::{extract_row_id_from_data_key, extract_row_id_from_key_slice,
-            key_prefix_add_row_id, meta, throw, u64_to_byte_array_reference, byte_slice_to_u64};
+use crate::{extract_row_id_from_data_key, extractRowIdFromKeySlice,
+            keyPrefixAddRowId, meta, throw, u64ToByteArrRef, byte_slice_to_u64};
 use crate::codec::BinaryCodec;
 use crate::expr::Expr;
 use crate::graph_error::GraphError;
@@ -15,7 +15,7 @@ use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, KV, RowId};
 
 impl<'session> CommandExecutor<'session> {
     // todo 要是point还有rel的联系不能update 完成
-    pub fn update(&self, update: &Update) -> anyhow::Result<CommandExecResult> {
+    pub(super) fn update(&self, update: &Update) -> anyhow::Result<CommandExecResult> {
         let table = self.getTableRefByName(update.tableName.as_str())?;
 
         if let TableType::Relation = table.type0 {
@@ -32,21 +32,22 @@ impl<'session> CommandExecutor<'session> {
         };
 
         // 要是data有link的话 通过抛异常来跳出scanSatisfiedRows的循环
-        let testDataHasBeenLinked = |commandExecutor: &CommandExecutor, columnFamily: &ColumnFamily, dataKey: DataKey, rowDataBinary: &[Byte]| {
-            let rowId = extract_row_id_from_data_key!(dataKey);
-            let pointerKeyPrefix = u64_to_byte_array_reference!(key_prefix_add_row_id!(meta::KEY_PREFIX_POINTER, rowId));
+        let testDataHasBeenLinked =
+            |commandExecutor: &CommandExecutor, columnFamily: &ColumnFamily, dataKey: DataKey| {
+                let rowId = extract_row_id_from_data_key!(dataKey);
+                let pointerKeyPrefix = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_POINTER, rowId));
 
-            let mut dbIterator: DBIterator = commandExecutor.session.getSnapshot()?.iterator_cf(columnFamily, IteratorMode::From(pointerKeyPrefix, Direction::Forward));
-            if let Some(kv) = dbIterator.next() {
-                let (pointerKey, _) = kv?;
-                // 说明有该data条目对应的pointerKey
-                if rowId == extract_row_id_from_key_slice!(pointerKey) {
-                    throw!("update can not execute, because data has been linked");
+                let mut dbIterator: DBIterator = commandExecutor.session.getSnapshot()?.iterator_cf(columnFamily, IteratorMode::From(pointerKeyPrefix, Direction::Forward));
+                if let Some(kv) = dbIterator.next() {
+                    let (pointerKey, _) = kv?;
+                    // 说明有该data条目对应的pointerKey
+                    if pointerKey.starts_with(pointerKeyPrefix) {
+                        throw!("update can not execute, because data has been linked");
+                    }
                 }
-            }
 
-            anyhow::Result::<bool>::Ok(true)
-        };
+                anyhow::Result::<bool>::Ok(true)
+            };
 
         let mut pairs = self.scanSatisfiedRows(table.value(), update.filterExpr.as_ref(), None, true, Some(testDataHasBeenLinked))?;
 
@@ -123,8 +124,8 @@ impl<'session> CommandExecutor<'session> {
 
             // 写新的data
             let newRowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
-            let newDataKey = key_prefix_add_row_id!(meta::KEY_PREFIX_MVCC,newRowId);
-            let newData: KV = (u64_to_byte_array_reference!(newDataKey).to_vec(), value.to_vec());
+            let newDataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_MVCC,newRowId);
+            let newData: KV = (u64ToByteArrRef!(newDataKey).to_vec(), value.to_vec());
 
             // 写新的data的xmin xmax
             let (newXmin, newXmax) = self.generateAddDataXminXmax(&mut mvccKeyBuffer, newDataKey)?;

@@ -95,12 +95,11 @@ mod test {
         {
             let db: OptimisticTransactionDB = OptimisticTransactionDB::open_cf_descriptors(&db_opts, path, vec![cf]).unwrap();
 
-            let a = db.cf_handle("cf1").unwrap();
             let tx = db.transaction();
 
             // let iterator = tx.iterator(IteratorMode::Start);
 
-            tx.put_cf(&db.cf_handle("cf1").unwrap(), &[1][..], &[0][..]).unwrap();
+            tx.put_cf(& db.cf_handle("cf1").unwrap(), &[1][..], &[0][..]).unwrap();
             tx.commit().unwrap();
 
             db.create_cf("cf7", &Options::default()).unwrap();

@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 use bytes::BytesMut;
-use crate::{global, key_prefix_add_row_id, meta, u64_to_byte_array_reference};
+use crate::{global, keyPrefixAddRowId, meta, u64ToByteArrRef};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::meta::Table;
 use crate::parser::{Insert, Link};
@@ -9,7 +9,7 @@ use crate::types::{DataKey, KeyTag, KV, RowId};
 impl <'session> CommandExecutor <'session> {
     /// 它本质是向relation对应的data file写入
     /// 两个元素之间的relation只看种类不看里边的属性的
-    pub fn link(&self, link: &Link) -> anyhow::Result<CommandExecResult> {
+    pub (super) fn link(&self, link: &Link) -> anyhow::Result<CommandExecResult> {
         // 得到3个表的对象
         let srcTable = self.getTableRefByName(link.srcTableName.as_str())?;
         let destTable = self.getTableRefByName(link.destTableName.as_str())?;
@@ -38,11 +38,11 @@ impl <'session> CommandExecutor <'session> {
         let relation = self.getTableRefByName(&link.relationName)?;
 
         let relRowId: RowId = relation.rowIdCounter.fetch_add(1, Ordering::AcqRel);
-        let relDataKey = key_prefix_add_row_id!(meta::KEY_PREFIX_DATA, relRowId);
+        let relDataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, relRowId);
 
         let dataAdd = {
             let rowDataBinary = self.generateInsertValuesBinary(&mut insertValues, &*relation)?;
-            (u64_to_byte_array_reference!(relDataKey).to_vec(), rowDataBinary.to_vec()) as KV
+            (u64ToByteArrRef!(relDataKey).to_vec(), rowDataBinary.to_vec()) as KV
         };
 
         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);

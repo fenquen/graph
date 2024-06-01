@@ -1,10 +1,10 @@
 use std::sync::atomic::Ordering;
-use crate::{meta, throw, u64_to_byte_array_reference};
+use crate::{meta, throw, u64ToByteArrRef};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::meta::Table;
 
 impl<'session> CommandExecutor<'session> {
-    pub fn createTable(&self, mut table: Table) -> anyhow::Result<CommandExecResult> {
+    pub(super) fn createTable(&self, mut table: Table) -> anyhow::Result<CommandExecResult> {
         if meta::TABLE_NAME_TABLE.contains_key(table.name.as_str()) {
             if table.createIfNotExist == false {
                 throw!(&format!("table/relation: {} already exist", table.name))
@@ -19,7 +19,7 @@ impl<'session> CommandExecutor<'session> {
         self.session.createColFamily(table.name.as_str())?;
 
         // todo 使用 u64的tableId 为key 完成
-        let key = u64_to_byte_array_reference!(table.tableId);
+        let key = u64ToByteArrRef!(table.tableId);
         let json = serde_json::to_string(&table)?;
         meta::STORE.metaStore.put(key, json.as_bytes())?;
 
