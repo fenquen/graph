@@ -2081,6 +2081,7 @@ mod test {
 
         parser::parse(sql).unwrap();
     }
+
 }
 
 

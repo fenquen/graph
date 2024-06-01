@@ -30,6 +30,7 @@ lazy_static! {
     pub static ref TABLE_NAME_TABLE: DashMap<String, Table> = DashMap::new();
     pub static ref TABLE_ID_COUNTER: AtomicU64 = AtomicU64::default();
     pub static ref TX_ID_COUNTER: AtomicU64 = AtomicU64::new(TX_ID_MIN);
+    /// db启动的时候设置的原先已使用的最大的txId
     pub static ref TX_ID_START_UP: TrickyContainer<TxId> = TrickyContainer::new();
 }
 
@@ -95,7 +96,7 @@ pub const TX_ID_FROZEN: TxId = 2;
 pub const TX_ID_MIN: TxId = 3;
 pub const TX_ID_MAX: TxId = TxId::MAX;
 
-pub const TX_CONCURRENCY_MAX: usize = 100000;
+pub const TX_UNDERGOING_MAX_COUNT: usize = 100000;
 
 // ------------------------------------------------------------------------------------------
 
@@ -202,8 +203,9 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub type0: TableType,
     #[serde(skip_serializing, skip_deserializing)]
+    /// start from 1
     pub rowIdCounter: AtomicU64,
-    // start from 0
+    /// start from 0
     pub tableId: TableId,
     pub createIfNotExist: bool,
 }

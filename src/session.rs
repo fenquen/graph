@@ -86,11 +86,15 @@ impl Session {
             if self.hasDmlInTx {
                 let currentTxId = self.txId.unwrap();
 
-                if (currentTxId - *meta::TX_ID_START_UP.getRef()) % meta::TX_CONCURRENCY_MAX as u64 == 0 {
+                if (currentTxId - *meta::TX_ID_START_UP.getRef()) % meta::TX_UNDERGOING_MAX_COUNT as u64 == 0 {
                     // TX_CONCURRENCY_MAX
-                    tokio::task::spawn_blocking(|| {});
+                    tokio::task::spawn_blocking(move || {
+                        let thresholdTx = currentTxId - meta::TX_UNDERGOING_MAX_COUNT as u64;
+                        CommandExecutor::vaccumData(thresholdTx);
+                    });
                 }
 
+                // cf需要现用现取 内部使用的是read 而create cf会用到write
                 let cf = self.getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
                 batch.put_cf(&cf, u64_to_byte_array_reference!(self.txId.unwrap()), global::EMPTY_BINARY);
             }
