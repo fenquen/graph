@@ -1,6 +1,6 @@
 use bytes::BytesMut;
 use rocksdb::{Direction, IteratorMode};
-use crate::{extract_target_data_key_from_pointer_key, meta, byte_slice_to_u64};
+use crate::{extractTargetDataKeyFromPointerKey, meta, byte_slice_to_u64};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::executor::mvcc::BytesMutExt;
 use crate::parser::{Unlink, UnlinkLinkStyle, UnlinkSelfStyle};
@@ -50,7 +50,7 @@ impl<'session> CommandExecutor<'session> {
                     break;
                 }
 
-                let targetDataKey = extract_target_data_key_from_pointer_key!(&*relPointerKey);
+                let targetDataKey = extractTargetDataKeyFromPointerKey!(&*relPointerKey);
 
                 // 是不是符合src上的筛选expr
                 if self.getRowDatasByDataKeys(&[targetDataKey], srcTable.value(), unlinkLinkStyle.srcTableFilterExpr.as_ref(), None)?.is_empty() {

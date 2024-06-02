@@ -43,6 +43,7 @@ pub const KEY_PREFIX_BIT_LEN: usize = 4;
 pub const KEY_PREFIX_MAX: KeyPrefix = (1 << KEY_PREFIX_BIT_LEN) - 1;
 pub const KEY_PREFIX_DATA: KeyPrefix = 0;
 pub const KEY_PREFIX_POINTER: KeyPrefix = 1;
+/// 应对的是data本身的 pointer体系的mvcc信息是在pointerKey末尾
 pub const KEY_PREFIX_MVCC: KeyPrefix = 2;
 pub const KEY_PPREFIX_ORIGIN_DATA_KEY: KeyPrefix = 3;
 
@@ -88,6 +89,7 @@ pub const POINTER_KEY_BYTE_LEN: usize = {
 /// pointerKey的对端的dataKey前边的byte数量
 pub const POINTER_KEY_TARGET_DATA_KEY_OFFSET: usize = POINTER_KEY_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN - TX_ID_BYTE_LEN;
 pub const POINTER_KEY_MVCC_KEY_TAG_OFFSET: usize = POINTER_KEY_TARGET_DATA_KEY_OFFSET + DATA_KEY_BYTE_LEN;
+pub const POINTER_KEY_TX_ID_OFFSET: usize = POINTER_KEY_MVCC_KEY_TAG_OFFSET + KEY_TAG_BYTE_LEN;
 
 // ---------------------------------------------------------------------------------------
 
@@ -143,7 +145,7 @@ macro_rules! keyPrefixAddRowId {
 }
 
 #[macro_export]
-macro_rules! extract_row_id_from_data_key {
+macro_rules! extractRowIdFromDataKey {
     ($key: expr) => {
         (($key as u64) & meta::ROW_ID_MAX) as crate::types::RowId
     };
@@ -160,14 +162,14 @@ macro_rules! extractRowIdFromKeySlice {
 }
 
 #[macro_export]
-macro_rules! extract_prefix_from_key_slice {
+macro_rules! extractPrefixFromKeySlice {
     ($slice: expr) => {
         ((($slice[0]) >> meta::KEY_PREFIX_BIT_LEN) & meta::KEY_PREFIX_MAX) as crate::types::KeyPrefix
     };
 }
 
 #[macro_export]
-macro_rules! extract_target_data_key_from_pointer_key {
+macro_rules! extractTargetDataKeyFromPointerKey {
     ($pointerKey: expr) => {
         {
             let slice = &$pointerKey[meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET..(meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET + meta::DATA_KEY_BYTE_LEN)];
@@ -199,9 +201,16 @@ macro_rules! extractTxIdFromPointerKey {
 }
 
 #[macro_export]
+macro_rules! extractMvccKeyTagFromPointerKey {
+    ($pointerKey: expr) => {
+        $pointerKey[meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET] as crate::types::KeyTag
+    };
+}
+
+#[macro_export]
 macro_rules! extractKeyTagFromMvccKey {
     ($mvccKey: expr) => {
-        $mvccKey[meta::DATA_KEY_BYTE_LEN]
+        $mvccKey[meta::DATA_KEY_BYTE_LEN] as crate::types::KeyTag
     };
 }
 

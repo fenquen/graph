@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::ops::{Index, Range};
 use bytes::{BufMut, BytesMut};
-use crate::{byte_slice_to_u64, extract_row_id_from_data_key, extractTxIdFromMvccKey, extractTxIdFromPointerKey, global,
+use crate::{byte_slice_to_u64, extractRowIdFromDataKey, extractTxIdFromMvccKey, extractTxIdFromPointerKey, global,
             keyPrefixAddRowId, meta, throw, u64ToByteArrRef};
 use crate::executor::CommandExecutor;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, TableId, TxId};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, RowId, TableId, TxId};
 
 impl<'session> CommandExecutor<'session> {
     // 对data对应的mvccKey的visibility筛选
@@ -34,7 +34,7 @@ impl<'session> CommandExecutor<'session> {
         let snapshot = self.session.getSnapshot()?;
 
         // 应对多个tx对相同rowId的数据update而产生的多条新data
-        let originDataKeyKey = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, extract_row_id_from_data_key!(dataKey)));
+        let originDataKeyKey = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, extractRowIdFromDataKey!(dataKey)));
         let originDataKey = snapshot.get_cf(columnFamily, originDataKeyKey)?.unwrap();
         let originDataKey = byte_slice_to_u64!(originDataKey);
         // 说明本条data是通过update而来 老data的dataKey是originDataKey
@@ -176,7 +176,7 @@ impl<'session> CommandExecutor<'session> {
     }
 
     pub fn generateOrigin(&self, selfDataKey: DataKey, originDataKey: DataKey) -> KV {
-        let selfRowId = extract_row_id_from_data_key!(selfDataKey);
+        let selfRowId = extractRowIdFromDataKey!(selfDataKey);
         (
             u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, selfRowId)).to_vec(),
             u64ToByteArrRef!(originDataKey).to_vec()
@@ -247,14 +247,24 @@ pub trait BytesMutExt {
         self.writeDataMvccKey(dataKey, meta::MVCC_KEY_TAG_XMIN, xmin).unwrap();
     }
 
+    fn writeDataMvccXminByRowId(&mut self, rowId: RowId, xmin: TxId) {
+        self.writeDataMvccKeyByRowId(rowId, meta::MVCC_KEY_TAG_XMIN, xmin).unwrap();
+    }
+
     fn writeDataMvccXmax(&mut self, dataKey: DataKey, xmax: TxId) {
         self.writeDataMvccKey(dataKey, meta::MVCC_KEY_TAG_XMAX, xmax).unwrap()
     }
 
     fn writeDataMvccKey(&mut self,
                         dataKey: DataKey,
-                        mvccKeyTag: KeyTag,
-                        txid: TxId) -> anyhow::Result<()>;
+                        mvccKeyTag: KeyTag, txid: TxId) -> anyhow::Result<()> {
+        let rowId = extractRowIdFromDataKey!(dataKey);
+        self.writeDataMvccKeyByRowId(rowId, mvccKeyTag, txid)
+    }
+
+    fn writeDataMvccKeyByRowId(&mut self,
+                               rowId: RowId,
+                               mvccKeyTag: KeyTag, txid: TxId) -> anyhow::Result<()>;
 }
 
 impl BytesMutExt for BytesMut {
@@ -263,7 +273,7 @@ impl BytesMutExt for BytesMut {
                                   keyTag: KeyTag, targetTableId: TableId) {
         self.clear();
 
-        let rowId = extract_row_id_from_data_key!(selfDataKey);
+        let rowId = extractRowIdFromDataKey!(selfDataKey);
         self.put_u64(keyPrefixAddRowId!(meta::KEY_PREFIX_POINTER, rowId));
 
         // 写relation的tableId
@@ -293,13 +303,13 @@ impl BytesMutExt for BytesMut {
         self.put_u64(txId);
     }
 
-    fn writeDataMvccKey(&mut self,
-                        dataKey: DataKey, mvccKeyTag: KeyTag, txid: TxId) -> anyhow::Result<()> {
+    fn writeDataMvccKeyByRowId(&mut self,
+                               rowId: RowId,
+                               mvccKeyTag: KeyTag, txid: TxId) -> anyhow::Result<()> {
         self.clear();
 
         match mvccKeyTag {
             meta::MVCC_KEY_TAG_XMIN | meta::MVCC_KEY_TAG_XMAX => {
-                let rowId = extract_row_id_from_data_key!(dataKey);
                 self.put_u64(keyPrefixAddRowId!(meta::KEY_PREFIX_MVCC, rowId));
                 self.put_u8(mvccKeyTag);
                 self.put_u64(txid);

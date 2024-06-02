@@ -5,7 +5,7 @@ use rocksdb::{Direction, IteratorMode};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::meta::TableType;
 use crate::parser::Update;
-use crate::{extract_row_id_from_data_key, extractRowIdFromKeySlice,
+use crate::{extractRowIdFromDataKey, extractRowIdFromKeySlice,
             keyPrefixAddRowId, meta, throw, u64ToByteArrRef, byte_slice_to_u64};
 use crate::codec::BinaryCodec;
 use crate::expr::Expr;
@@ -34,7 +34,7 @@ impl<'session> CommandExecutor<'session> {
         // 要是data有link的话 通过抛异常来跳出scanSatisfiedRows的循环
         let testDataHasBeenLinked =
             |commandExecutor: &CommandExecutor, columnFamily: &ColumnFamily, dataKey: DataKey| {
-                let rowId = extract_row_id_from_data_key!(dataKey);
+                let rowId = extractRowIdFromDataKey!(dataKey);
                 let pointerKeyPrefix = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_POINTER, rowId));
 
                 let mut dbIterator: DBIterator = commandExecutor.session.getSnapshot()?.iterator_cf(columnFamily, IteratorMode::From(pointerKeyPrefix, Direction::Forward));

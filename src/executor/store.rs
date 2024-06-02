@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, RowData};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extract_prefix_from_key_slice, global, meta, throw, u64ToByteArrRef};
+use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, global, meta, throw, u64ToByteArrRef};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
@@ -103,7 +103,7 @@ impl<'session> CommandExecutor<'session> {
 
                     // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
                     // 前4个bit的值是不是 KEY_PREFIX_DATA
-                    if extract_prefix_from_key_slice!(dataKeyBinary) != meta::KEY_PREFIX_DATA {
+                    if extractPrefixFromKeySlice!(dataKeyBinary) != meta::KEY_PREFIX_DATA {
                         break;
                     }
 

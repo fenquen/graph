@@ -3,7 +3,7 @@ use std::ops::RangeFrom;
 use bytes::BytesMut;
 use serde_json::{json, Value};
 use crate::executor::{CommandExecResult, CommandExecutor, RowData};
-use crate::{extract_target_data_key_from_pointer_key, JSON_ENUM_UNTAGGED, meta, suffix_plus_plus, byte_slice_to_u64};
+use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED, meta, suffix_plus_plus, byte_slice_to_u64};
 use crate::executor::mvcc::BytesMutExt;
 use crate::graph_value::{GraphValue, PointDesc};
 use crate::meta::Table;
@@ -124,7 +124,7 @@ impl<'session> CommandExecutor<'session> {
                             }
                         }
 
-                        let targetDataKeys = pointerKeys.into_iter().map(|pointerKey| extract_target_data_key_from_pointer_key!(&*pointerKey)).collect::<Vec<DataKey>>();
+                        let targetDataKeys = pointerKeys.into_iter().map(|pointerKey| extractTargetDataKeyFromPointerKey!(&*pointerKey)).collect::<Vec<DataKey>>();
 
                         // todo 不知道要不要dedup
 
