@@ -32,6 +32,7 @@ lazy_static! {
     pub static ref TX_ID_COUNTER: AtomicU64 = AtomicU64::new(TX_ID_MIN);
     /// db启动的时候设置的原先已使用的最大的txId
     pub static ref TX_ID_START_UP: TrickyContainer<TxId> = TrickyContainer::new();
+    pub static ref TX_UNDERGOING_COUNT:AtomicU64 = AtomicU64::default();
 }
 
 pub struct Store {

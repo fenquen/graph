@@ -27,7 +27,6 @@ pub struct Session {
     dataStore: &'static DB,
     pub tableName_mutationsOnTable: RefCell<HashMap<String, BTreeMap<Vec<Byte>, Vec<Byte>>>>,
     snapshot: Option<Snapshot<'static>>,
-    hasDmlInTx: bool,
 }
 
 impl Session {
@@ -46,15 +45,6 @@ impl Session {
         // 不要求是不是auto commit的 要不在tx那么生成1个tx
         if self.notInTx() {
             self.generateTx();
-        }
-
-        if self.hasDmlInTx == false {
-            for command in &commands {
-                if command.isDml() {
-                    self.hasDmlInTx = true;
-                    break;
-                }
-            }
         }
 
         let selectResultToFront = CommandExecutor::new(self).execute(&mut commands)?;
@@ -80,26 +70,29 @@ impl Session {
         }
 
         // todo lastest的txId要持久化 完成
-        // todo 要是tx中没有 update这样的dml的不需要持久化txId 以达到节约的目的 完成
         {
-            if self.hasDmlInTx {
-                let currentTxId = self.txId.unwrap();
+            let currentTxId = self.txId.unwrap();
+            // cf需要现用现取 内部使用的是read 而create cf会用到write
+            let cf = self.getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
 
-                if (currentTxId - *meta::TX_ID_START_UP.getRef()) % meta::TX_UNDERGOING_MAX_COUNT as u64 == 0 {
-                    // TX_CONCURRENCY_MAX
-                    tokio::task::spawn_blocking(move || {
-                        let thresholdTx = currentTxId - meta::TX_UNDERGOING_MAX_COUNT as u64;
-                        CommandExecutor::vaccumData(thresholdTx);
-                    });
-                }
+            if (currentTxId - *meta::TX_ID_START_UP.getRef()) % meta::TX_UNDERGOING_MAX_COUNT as u64 == 0 {
+                // TX_CONCURRENCY_MAX
+                tokio::task::spawn_blocking(move || {
+                    let thresholdTx = currentTxId - meta::TX_UNDERGOING_MAX_COUNT as u64;
+                    CommandExecutor::vaccumData(thresholdTx);
+                });
 
-                // cf需要现用现取 内部使用的是read 而create cf会用到write
-                let cf = self.getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
-                batch.put_cf(&cf, u64ToByteArrRef!(self.txId.unwrap()), global::EMPTY_BINARY);
+                // todo 干掉columnFamily "tx_id" 老的txId 完成
+                self.dataStore.delete_range_cf(&cf, u64ToByteArrRef!(meta::TX_ID_INVALID), u64ToByteArrRef!(currentTxId))?;
             }
+
+            // 以当前的txId为key落地到单独的columnFamil "tx_id"
+            batch.put_cf(&cf, u64ToByteArrRef!(self.txId.unwrap()), global::EMPTY_BINARY);
         }
 
         self.dataStore.write(batch)?;
+
+        meta::TX_UNDERGOING_COUNT.fetch_sub(1, Ordering::AcqRel);
 
         self.clean();
 
@@ -116,13 +109,26 @@ impl Session {
         self.txId = None;
         self.snapshot = None;
         self.tableName_mutationsOnTable.borrow_mut().clear();
-        self.hasDmlInTx = false;
     }
 
-    fn generateTx(&mut self) {
+    fn generateTx(&mut self) -> Result<()> {
+        // 函数返回的不管是Ok还是Err里边的都是previsou value
+        // 要是闭包返回的是Some那么函数返回Ok 不然是Err
+        if let Err(_) = meta::TX_UNDERGOING_COUNT.fetch_update(Ordering::Release, Ordering::Acquire,
+                                                               |current| {
+                                                                   // 满了
+                                                                   if current >= meta::TX_UNDERGOING_MAX_COUNT as u64 {
+                                                                       return None;
+                                                                   }
+                                                                   Some(current + 1)
+                                                               }) {
+            throw!("too many undergoing tx");
+        }
         self.txId = Some(meta::TX_ID_COUNTER.fetch_add(1, Ordering::AcqRel));
         self.snapshot = Some(self.dataStore.snapshot());
         self.tableName_mutationsOnTable.borrow_mut().clear();
+
+        Ok(())
     }
 
     fn needInTx(&self) -> Result<()> {
@@ -279,7 +285,6 @@ impl Default for Session {
             txId: None,
             tableName_mutationsOnTable: Default::default(),
             snapshot: None,
-            hasDmlInTx: false,
         }
     }
 }
