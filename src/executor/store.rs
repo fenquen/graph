@@ -8,7 +8,8 @@ use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, global, meta, throw, u
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
-use crate::parser::{Element, Insert};
+use crate::parser::command::insert::Insert;
+use crate::parser::element::Element;
 use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData};
 
 impl<'session> CommandExecutor<'session> {

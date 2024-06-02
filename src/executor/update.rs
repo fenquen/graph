@@ -4,13 +4,13 @@ use bytes::BytesMut;
 use rocksdb::{Direction, IteratorMode};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::meta::TableType;
-use crate::parser::Update;
 use crate::{extractRowIdFromDataKey, extractRowIdFromKeySlice,
             keyPrefixAddRowId, meta, throw, u64ToByteArrRef, byte_slice_to_u64};
 use crate::codec::BinaryCodec;
 use crate::expr::Expr;
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
+use crate::parser::command::update::Update;
 use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, KV, RowId};
 
 impl<'session> CommandExecutor<'session> {

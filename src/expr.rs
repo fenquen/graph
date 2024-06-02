@@ -3,7 +3,8 @@ use serde_json::Value;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use crate::graph_value::GraphValue;
-use crate::parser::{Element, MathCmpOp, Op, SqlOp};
+use crate::parser::element::Element;
+use crate::parser::op::Op;
 use crate::throw;
 use crate::types::RowData;
 

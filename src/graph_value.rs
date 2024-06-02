@@ -2,13 +2,14 @@ use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::Display;
 use crate::graph_error::GraphError;
-use crate::parser::{Element, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
 use crate::{global, meta, throw};
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::ser::SerializeMap;
 use serde_json::Value;
 use crate::codec::{BinaryCodec, MyBytes};
+use crate::parser::element::Element;
+use crate::parser::op::{LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
 use crate::types::{Byte, DataKey};
 
 #[derive(Deserialize, Debug, Clone)]

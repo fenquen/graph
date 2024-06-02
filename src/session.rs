@@ -11,14 +11,13 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
-use crate::{global, meta, parser, throw, u64ToByteArrRef};
+use crate::{global, meta, parser, parser0, throw, u64ToByteArrRef};
 use anyhow::Result;
 use log::log;
 use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
               MultiThreaded, OptimisticTransactionDB, Options, SnapshotWithThreadMode, Transaction, WriteBatchWithTransaction};
 use tokio::io::AsyncWriteExt;
 use crate::executor::CommandExecutor;
-use crate::parser::{Command, SqlOp};
 use crate::types::{Byte, ColumnFamily, KV, SelectResultToFront, Snapshot, TxId};
 
 pub struct Session {

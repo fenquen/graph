@@ -1,9 +1,9 @@
 use std::sync::atomic::Ordering;
 use bytes::BytesMut;
 use crate::meta::TableType;
-use crate::parser::Insert;
 use crate::{keyPrefixAddRowId, meta, throw, u64ToByteArrRef};
 use crate::executor::{CommandExecResult, CommandExecutor};
+use crate::parser::command::insert::Insert;
 use crate::types::{DataKey, KV, RowId};
 
 impl<'session> CommandExecutor<'session> {

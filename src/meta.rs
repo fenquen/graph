@@ -20,7 +20,6 @@ use tokio::sync::RwLock;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use crate::config::CONFIG;
 use crate::graph_value::GraphValue;
-use crate::parser::Command;
 use crate::session::Session;
 use crate::types::{Byte, DataKey, DBIterator, DBRawIterator, KeyPrefix, KeyTag, RowId, TableId, TxId};
 use crate::utils::TrickyContainer;

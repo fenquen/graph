@@ -3,7 +3,7 @@ use rocksdb::{Direction, IteratorMode};
 use crate::{extractTargetDataKeyFromPointerKey, meta, byte_slice_to_u64};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::executor::mvcc::BytesMutExt;
-use crate::parser::{Unlink, UnlinkLinkStyle, UnlinkSelfStyle};
+use crate::parser::command::unlink::{Unlink, UnlinkLinkStyle, UnlinkSelfStyle};
 use crate::types::DataKey;
 
 impl<'session> CommandExecutor<'session> {

@@ -7,9 +7,9 @@ use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED, meta, suffix
 use crate::executor::mvcc::BytesMutExt;
 use crate::graph_value::{GraphValue, PointDesc};
 use crate::meta::Table;
-use crate::parser::{Select, SelectRel, SelectTable};
 use crate::types::{Byte, DataKey, KeyTag, RowData};
 use crate::global;
+use crate::parser::command::select::{Select, SelectRel, SelectTable};
 
 impl<'session> CommandExecutor<'session> {
     /// 如果不是含有relation的select 便是普通的select

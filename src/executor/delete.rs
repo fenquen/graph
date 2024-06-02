@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::meta;
-use crate::parser::Delete;
+use crate::parser::command::delete::Delete;
 
 impl<'session> CommandExecutor<'session> {
     // todo rel不能直接delete 应该先把rel上的点全都取消 rel不存在src和dest的点 然后

@@ -4,10 +4,10 @@ use dashmap::mapref::one::{Ref, RefMut};
 use serde_json::Value;
 use strum_macros::Display;
 use crate::meta::Table;
-use crate::parser::Command;
 use crate::session::Session;
 use crate::{meta, throw};
 use crate::graph_value::GraphValue;
+use crate::parser::command::Command;
 use crate::types::{SelectResultToFront, TableId};
 
 mod create;

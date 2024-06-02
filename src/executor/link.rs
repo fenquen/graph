@@ -3,7 +3,8 @@ use bytes::BytesMut;
 use crate::{global, keyPrefixAddRowId, meta, u64ToByteArrRef};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::meta::Table;
-use crate::parser::{Insert, Link};
+use crate::parser::command::insert::Insert;
+use crate::parser::command::link::Link;
 use crate::types::{DataKey, KeyTag, KV, RowId};
 
 impl <'session> CommandExecutor <'session> {
