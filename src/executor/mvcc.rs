@@ -8,12 +8,12 @@ use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, RowId
 
 impl<'session> CommandExecutor<'session> {
     // 对data对应的mvccKey的visibility筛选
-    pub fn checkCommittedDataVisibilityWithoutTxMutations(&self,
-                                                          mvccKeyBuffer: &mut BytesMut,
-                                                          rawIterator: &mut DBRawIterator,
-                                                          dataKey: DataKey,
-                                                          columnFamily: &ColumnFamily,
-                                                          tableName: &String) -> anyhow::Result<bool> {
+    pub(super) fn checkCommittedDataVisibilityWithoutTxMutations(&self,
+                                                                 mvccKeyBuffer: &mut BytesMut,
+                                                                 rawIterator: &mut DBRawIterator,
+                                                                 dataKey: DataKey,
+                                                                 columnFamily: &ColumnFamily,
+                                                                 tableName: &String) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // xmin
@@ -58,10 +58,10 @@ impl<'session> CommandExecutor<'session> {
         Ok(meta::isVisible(currentTxId, xmin, xmax))
     }
 
-    pub fn checkCommittedDataVisibilityWithTxMutations(&self,
-                                                       mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
-                                                       mvccKeyBuffer: &mut BytesMut,
-                                                       dataKey: DataKey) -> anyhow::Result<bool> {
+    pub(super) fn checkCommittedDataVisibilityWithTxMutations(&self,
+                                                              mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                              mvccKeyBuffer: &mut BytesMut,
+                                                              dataKey: DataKey) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 要看落地的有没有被当前的tx上的干掉  只要读取相应的xmax的mvccKey
@@ -71,10 +71,10 @@ impl<'session> CommandExecutor<'session> {
         Ok(mutationsRawCurrentTx.get(mvccKeyBuffer.as_ref()).is_none())
     }
 
-    pub fn checkUncommittedDataVisibility(&self,
-                                          mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
-                                          mvccKeyBuffer: &mut BytesMut,
-                                          addedDataKeyCurrentTx: DataKey) -> anyhow::Result<bool> {
+    pub(super) fn checkUncommittedDataVisibility(&self,
+                                                 mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                 mvccKeyBuffer: &mut BytesMut,
+                                                 addedDataKeyCurrentTx: DataKey) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 检验当前tx上新add的话 只要检验相应的xmax便可以了 就算有xmax那对应的txId也只会是currentTx
@@ -86,10 +86,10 @@ impl<'session> CommandExecutor<'session> {
 
     // todo  pointerKey如何应对mvcc 完成
     /// 因为mvcc信息直接是在pointerKey上的 去看它的末尾的xmax
-    pub fn checkCommittedPointerVisibilityWithoutCurrentTxMutations(&self,
-                                                                    pointerKeyBuffer: &mut BytesMut,
-                                                                    rawIterator: &mut DBRawIterator,
-                                                                    committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
+    pub(super) fn checkCommittedPointerVisibilityWithoutCurrentTxMutations(&self,
+                                                                           pointerKeyBuffer: &mut BytesMut,
+                                                                           rawIterator: &mut DBRawIterator,
+                                                                           committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         const RANGE: Range<usize> = meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET..meta::POINTER_KEY_BYTE_LEN;
@@ -130,10 +130,10 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
-    pub fn checkCommittedPointerVisibilityWithCurrentTxMutations(&self,
-                                                                 mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
-                                                                 pointerKeyBuffer: &mut BytesMut,
-                                                                 committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
+    pub(super) fn checkCommittedPointerVisibilityWithCurrentTxMutations(&self,
+                                                                        mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                                        pointerKeyBuffer: &mut BytesMut,
+                                                                        committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 要是当前的tx干掉的话会有这样的xmax
@@ -142,10 +142,10 @@ impl<'session> CommandExecutor<'session> {
         Ok(mutationsRawCurrentTx.get(pointerKeyBuffer.as_ref()).is_none())
     }
 
-    pub fn checkUncommittedPointerVisibility(&self,
-                                             mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
-                                             pointerKeyBuffer: &mut BytesMut,
-                                             addedPointerKeyCurrentTx: &[Byte]) -> anyhow::Result<bool> {
+    pub(super) fn checkUncommittedPointerVisibility(&self,
+                                                    mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                    pointerKeyBuffer: &mut BytesMut,
+                                                    addedPointerKeyCurrentTx: &[Byte]) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 要是当前的tx干掉的话会有这样的xmax
@@ -155,7 +155,7 @@ impl<'session> CommandExecutor<'session> {
     }
 
     /// 当前tx上add时候生成 xmin xmax 对应的mvcc key
-    pub fn generateAddDataXminXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> anyhow::Result<(KV, KV)> {
+    pub(super) fn generateAddDataXminXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> anyhow::Result<(KV, KV)> {
         let xmin = {
             mvccKeyBuffer.writeDataMvccXmin(dataKey, self.session.getTxId()?);
             (mvccKeyBuffer.to_vec(), global::EMPTY_BINARY)
@@ -170,12 +170,12 @@ impl<'session> CommandExecutor<'session> {
     }
 
     /// 当前tx上delete时候生成 xmax的 mvccKey
-    pub fn generateDeleteDataXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> anyhow::Result<KV> {
+    pub(super) fn generateDeleteDataXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> anyhow::Result<KV> {
         mvccKeyBuffer.writeDataMvccXmax(dataKey, self.session.getTxId()?);
         Ok((mvccKeyBuffer.to_vec(), global::EMPTY_BINARY))
     }
 
-    pub fn generateOrigin(&self, selfDataKey: DataKey, originDataKey: DataKey) -> KV {
+    pub(super) fn generateOrigin(&self, selfDataKey: DataKey, originDataKey: DataKey) -> KV {
         let selfRowId = extractRowIdFromDataKey!(selfDataKey);
         (
             u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, selfRowId)).to_vec(),
@@ -184,10 +184,10 @@ impl<'session> CommandExecutor<'session> {
     }
 
     /// 当前tx上link的时候 生成的含有xmin 和 xmax 的pointerKey
-    pub fn generateAddPointerXminXmax(&self,
-                                      pointerKeyBuffer: &mut BytesMut,
-                                      selfDataKey: DataKey,
-                                      pointerKeyTag: KeyTag, tableId: TableId, targetDatakey: DataKey) -> anyhow::Result<(KV, KV)> {
+    pub(super) fn generateAddPointerXminXmax(&self,
+                                             pointerKeyBuffer: &mut BytesMut,
+                                             selfDataKey: DataKey,
+                                             pointerKeyTag: KeyTag, tableId: TableId, targetDatakey: DataKey) -> anyhow::Result<(KV, KV)> {
         let xmin = {
             pointerKeyBuffer.writePointerKeyMvccXmin(selfDataKey, pointerKeyTag, tableId, targetDatakey, self.session.getTxId()?);
             (pointerKeyBuffer.to_vec(), global::EMPTY_BINARY) as KV
@@ -202,10 +202,10 @@ impl<'session> CommandExecutor<'session> {
     }
 
     /// 当前tx上unlink时候 生成的含有xmax的 pointerKey
-    pub fn generateDeletePointerXmax(&self,
-                                     pointerKeyBuffer: &mut BytesMut,
-                                     selfDataKey: DataKey,
-                                     pointerKeyTag: KeyTag, tableId: TableId, targetDatakey: DataKey) -> anyhow::Result<KV> {
+    pub(super) fn generateDeletePointerXmax(&self,
+                                            pointerKeyBuffer: &mut BytesMut,
+                                            selfDataKey: DataKey,
+                                            pointerKeyTag: KeyTag, tableId: TableId, targetDatakey: DataKey) -> anyhow::Result<KV> {
         pointerKeyBuffer.writePointerKeyMvccXmax(selfDataKey, pointerKeyTag, tableId, targetDatakey, self.session.getTxId()?);
         Ok((pointerKeyBuffer.to_vec(), global::EMPTY_BINARY))
     }

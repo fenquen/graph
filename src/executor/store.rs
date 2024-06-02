@@ -13,11 +13,11 @@ use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator};
 
 impl<'session> CommandExecutor<'session> {
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
-    pub fn getRowDatasByDataKeys(&self,
-                                 dataKeys: &[DataKey],
-                                 table: &Table,
-                                 tableFilter: Option<&Expr>,
-                                 selectedColNames: Option<&Vec<String>>) -> anyhow::Result<Vec<(DataKey, RowData)>> {
+    pub(super) fn getRowDatasByDataKeys(&self,
+                                        dataKeys: &[DataKey],
+                                        table: &Table,
+                                        tableFilter: Option<&Expr>,
+                                        selectedColNames: Option<&Vec<String>>) -> anyhow::Result<Vec<(DataKey, RowData)>> {
         let mut rowDatas = Vec::with_capacity(dataKeys.len());
 
         let columnFamily = self.session.getColFamily(&table.name)?;
@@ -74,13 +74,13 @@ impl<'session> CommandExecutor<'session> {
     }
 
     // todo 实现 index
-    pub fn scanSatisfiedRows(&self, table: &Table,
-                             tableFilter: Option<&Expr>,
-                             selectedColumnNames: Option<&Vec<String>>,
-                             select: bool,
-                             rowChecker: Option<fn(commandExecutor: &CommandExecutor,
-                                                   columnFamily: &ColumnFamily,
-                                                   dataKey: DataKey) -> anyhow::Result<bool>>) -> anyhow::Result<Vec<(DataKey, RowData)>> {
+    pub(super) fn scanSatisfiedRows(&self, table: &Table,
+                                    tableFilter: Option<&Expr>,
+                                    selectedColumnNames: Option<&Vec<String>>,
+                                    select: bool,
+                                    rowChecker: Option<fn(commandExecutor: &CommandExecutor,
+                                                          columnFamily: &ColumnFamily,
+                                                          dataKey: DataKey) -> anyhow::Result<bool>>) -> anyhow::Result<Vec<(DataKey, RowData)>> {
         // todo 使用table id 为 column family 标识
         let columnFamily = self.session.getColFamily(&table.name)?;
 
@@ -244,7 +244,7 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
-    pub fn generateInsertValuesBinary(&self, insert: &mut Insert, table: &Table) -> anyhow::Result<Bytes> {
+    pub(super) fn generateInsertValuesBinary(&self, insert: &mut Insert, table: &Table) -> anyhow::Result<Bytes> {
         // 要是未显式说明column的话还需要读取table的column
         if insert.useExplicitColumnNames == false {
             for column in &table.columns {
@@ -337,19 +337,19 @@ impl<'session> CommandExecutor<'session> {
         Ok(destByteSlice.freeze())
     }
 
-    pub fn getKeysByPrefix(&self,
-                           tableName: &str,
-                           colFamily: &impl AsColumnFamilyRef,
-                           prefix: &[Byte],
-                           // 和上下文有联系的闭包不能使用fn来表示 要使用Fn的tarit表示 fn是函数指针只和入参有联系 它可以用Fn的trait表达
-                           filterWithoutMutation: Option<fn(&CommandExecutor<'session>,
-                                                            pointerKeyBuffer: &mut BytesMut,
-                                                            rawIterator: &mut DBRawIterator,
-                                                            pointerKey: &[Byte]) -> anyhow::Result<bool>>,
-                           filterWithMutation: Option<fn(&CommandExecutor<'session>,
-                                                         mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
-                                                         pointerKeyBuffer: &mut BytesMut,
-                                                         pointerKey: &[Byte]) -> anyhow::Result<bool>>) -> anyhow::Result<Vec<Box<[Byte]>>> {
+    pub(super) fn getKeysByPrefix(&self,
+                                  tableName: &str,
+                                  colFamily: &impl AsColumnFamilyRef,
+                                  prefix: &[Byte],
+                                  // 和上下文有联系的闭包不能使用fn来表示 要使用Fn的tarit表示 fn是函数指针只和入参有联系 它可以用Fn的trait表达
+                                  filterWithoutMutation: Option<fn(&CommandExecutor<'session>,
+                                                                   pointerKeyBuffer: &mut BytesMut,
+                                                                   rawIterator: &mut DBRawIterator,
+                                                                   pointerKey: &[Byte]) -> anyhow::Result<bool>>,
+                                  filterWithMutation: Option<fn(&CommandExecutor<'session>,
+                                                                mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                                pointerKeyBuffer: &mut BytesMut,
+                                                                pointerKey: &[Byte]) -> anyhow::Result<bool>>) -> anyhow::Result<Vec<Box<[Byte]>>> {
         let mut keys = Vec::new();
 
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
