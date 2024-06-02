@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use rocksdb::{BoundColumnFamily, DBIteratorWithThreadMode, DBRawIteratorWithThreadMode,
               DBWithThreadMode, MultiThreaded, SnapshotWithThreadMode};
 use serde_json::Value;
+use crate::graph_value::GraphValue;
 
 
 /// 到后台的sql可能是由多个小sql构成的 单个小select的sql对应个Vec<Value>
@@ -26,3 +28,5 @@ pub type KeyTag = Byte;
 pub type TxId = u64;
 
 pub type KV = (Vec<Byte>, Vec<Byte>);
+
+pub type RowData = HashMap<String, GraphValue>;

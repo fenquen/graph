@@ -40,8 +40,6 @@ enum CommandExecResult {
     DdlResult,
 }
 
-type RowData = HashMap<String, GraphValue>;
-
 pub struct CommandExecutor<'session> {
     pub session: &'session Session,
 }

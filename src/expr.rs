@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::graph_value::GraphValue;
 use crate::parser::{Element, MathCmpOp, Op, SqlOp};
 use crate::throw;
+use crate::types::RowData;
 
 // 碰到"(" 下钻递归,返回后落地到上级的left right
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,7 +26,7 @@ impl Default for Expr {
 }
 
 impl Expr {
-    pub fn calc(&self, rowData: Option<&HashMap<String, GraphValue>>) -> Result<GraphValue> {
+    pub fn calc(&self, rowData: Option<&RowData>) -> Result<GraphValue> {
         // 需要不断的向下到Single
         match self {
             Expr::Single(element) => {

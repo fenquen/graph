@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::ops::RangeFrom;
 use bytes::BytesMut;
 use serde_json::{json, Value};
-use crate::executor::{CommandExecResult, CommandExecutor, RowData};
+use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED, meta, suffix_plus_plus, byte_slice_to_u64};
 use crate::executor::mvcc::BytesMutExt;
 use crate::graph_value::{GraphValue, PointDesc};
 use crate::meta::Table;
 use crate::parser::{Select, SelectRel, SelectTable};
-use crate::types::{Byte, DataKey, KeyTag};
+use crate::types::{Byte, DataKey, KeyTag, RowData};
 use crate::global;
 
 impl<'session> CommandExecutor<'session> {

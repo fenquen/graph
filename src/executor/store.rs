@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
-use crate::executor::{CommandExecutor, RowData};
+use crate::executor::{CommandExecutor};
 use crate::expr::Expr;
 use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, global, meta, throw, u64ToByteArrRef};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
 use crate::parser::{Element, Insert};
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData};
 
 impl<'session> CommandExecutor<'session> {
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
