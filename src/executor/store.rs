@@ -86,7 +86,7 @@ impl<'session> CommandExecutor<'session> {
         let columnFamily = self.session.getColFamily(&table.name)?;
 
         let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
-        let mutationsRawOnTableCurrentTx = tableName_mutationsOnTable.get(&table.name);
+        let tableMutationsCurrentTx = tableName_mutationsOnTable.get(&table.name);
 
         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
 
@@ -108,7 +108,7 @@ impl<'session> CommandExecutor<'session> {
                         break;
                     }
 
-                    let dataKey = byte_slice_to_u64!(&*dataKeyBinary) as DataKey;
+                    let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
 
                     if let Some(ref mut rowChecker) = rowChecker {
                         if rowChecker(self, &columnFamily, dataKey)? == false {
@@ -128,7 +128,7 @@ impl<'session> CommandExecutor<'session> {
                     // 以上是全都在已落地的维度内的visibility check 还要结合当前事务上的尚未提交的mutations
                     // 先要结合mutations 看已落地的是不是应该干掉
                     // 然后看mutations 有没有想要的
-                    if let Some(mutationsRawCurrentTx) = mutationsRawOnTableCurrentTx {
+                    if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
                         if self.checkCommittedDataVisibilityWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
                             continue;
                         }
@@ -168,14 +168,14 @@ impl<'session> CommandExecutor<'session> {
             };
 
         // todo scan的时候要是当前tx有add的话 也要收录 完成
-        if let Some(mutationsRawOnTableCurrentTx) = mutationsRawOnTableCurrentTx {
+        if let Some(tableMutationsCurrentTx) = tableMutationsCurrentTx {
             let addedDataCurrentTxRange =
-                mutationsRawOnTableCurrentTx.range::<Vec<Byte>, Range<&Vec<Byte>>>(&*meta::DATA_KEY_PATTERN_VEC..&*meta::POINTER_KEY_PATTERN_VEC);
+                tableMutationsCurrentTx.range::<Vec<Byte>, Range<&Vec<Byte>>>(&*meta::DATA_KEY_PATTERN_VEC..&*meta::POINTER_KEY_PATTERN_VEC);
 
             for (addedDataKeyBinaryCurrentTx, addRowDataBinaryCurrentTx) in addedDataCurrentTxRange {
                 let addedDataKeyCurrentTx: DataKey = byte_slice_to_u64!(addedDataKeyBinaryCurrentTx);
 
-                if self.checkUncommittedDataVisibility(mutationsRawOnTableCurrentTx, &mut mvccKeyBuffer, addedDataKeyCurrentTx)? == false {
+                if self.checkUncommittedDataVisibility(tableMutationsCurrentTx, &mut mvccKeyBuffer, addedDataKeyCurrentTx)? == false {
                     continue;
                 }
 

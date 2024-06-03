@@ -142,7 +142,7 @@ impl<'session> CommandExecutor<'session> {
     }
 
     pub(super) fn checkUncommittedPointerVisi(&self,
-                                              mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                              tableMutationsCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
                                               pointerKeyBuffer: &mut BytesMut,
                                               addedPointerKeyCurrentTx: &[Byte]) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
@@ -150,7 +150,7 @@ impl<'session> CommandExecutor<'session> {
         // 要是当前的tx干掉的话会有这样的xmax
         pointerKeyBuffer.replacePointerKeyMcvvTagTxId(addedPointerKeyCurrentTx, meta::MVCC_KEY_TAG_XMAX, currentTxId);
 
-        Ok(mutationsRawCurrentTx.get(pointerKeyBuffer.as_ref()).is_none())
+        Ok(tableMutationsCurrentTx.get(pointerKeyBuffer.as_ref()).is_none())
     }
 
     /// 当前tx上add时候生成 xmin xmax 对应的mvcc key

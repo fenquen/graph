@@ -107,22 +107,22 @@ impl<'session> CommandExecutor<'session> {
                                                  Some(CommandExecutor::checkCommittedPointerVisiWithoutTxMutations),
                                                  Some(CommandExecutor::checkCommittedPointerVisiWithTxMutations))?;
 
-
-                        // todo 应对当前tx上 新增的 当前rel 当前targetTable pointer 完成
+                        // todo 应对当前tx上 新增的 当前rel 指向 端点的pointerKey 完成
                         if let Some(mutationsOnTableCurrentTx) = mutationsOnTableCurrentTx {
-                            let addedPointerUnderRelTargetTableCurrentTxRange =
+                            let addedRelPointerKeyCurrentTxRange =
                                 mutationsOnTableCurrentTx.range::<Vec<Byte>, RangeFrom<&Vec<Byte>>>(&pointerKeyPrefixBuffer.to_vec()..);
 
-                            for (addedPointerUnderRelTargetTableCurrentTxRange, _) in addedPointerUnderRelTargetTableCurrentTxRange {
+                            for (addedRelPointerKeyCurrentTx, _) in addedRelPointerKeyCurrentTxRange {
                                 // 因为右边的是未限制的 需要手动
-                                if addedPointerUnderRelTargetTableCurrentTxRange.starts_with(pointerKeyPrefixBuffer.as_ref()) == false {
+                                if addedRelPointerKeyCurrentTx.starts_with(pointerKeyPrefixBuffer.as_ref()) == false {
                                     break;
                                 }
 
                                 // todo mutation要去掉delete的提升速度
-
-                                if self.checkUncommittedPointerVisi(&mutationsOnTableCurrentTx, &mut pointerKeyPrefixBuffer, addedPointerUnderRelTargetTableCurrentTxRange)? {
-                                    pointerKeys.push(addedPointerUnderRelTargetTableCurrentTxRange.clone().into_boxed_slice());
+                                if self.checkUncommittedPointerVisi(&mutationsOnTableCurrentTx,
+                                                                    &mut pointerKeyPrefixBuffer,
+                                                                    addedRelPointerKeyCurrentTx)? {
+                                    pointerKeys.push(addedRelPointerKeyCurrentTx.clone().into_boxed_slice());
                                 }
                             }
                         }
@@ -287,8 +287,7 @@ impl<'session> CommandExecutor<'session> {
 
     /// select user(id >1 ) as user0 ,in usage (number = 7) ,end in own(number =7)
     fn selectTableUnderRels(&self, selectTableUnderRels: &SelectTableUnderRels) -> Result<CommandExecResult> {
-        // 先要以普通select table体系筛选 然后对通过满足要求的pointerKey筛选
-
+        // 先要以普通select table体系筛选 然后对pointerKey筛选
         let table = self.getTableRefByName(selectTableUnderRels.selectTable.tableName.as_str())?;
         let columnFamily = self.session.getColFamily(table.name.as_str())?;
         let mut dbRawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
@@ -304,6 +303,7 @@ impl<'session> CommandExecutor<'session> {
             |commandExecutor: &CommandExecutor, columnFamily: &ColumnFamily, dataKey: DataKey| {
                 let mut buffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
 
+                'loopRelDesc:
                 for relDesc in &selectTableUnderRels.relDescVec {
                     let relation = self.getTableRefByName(relDesc.relationName.as_str())?;
 
@@ -317,6 +317,7 @@ impl<'session> CommandExecutor<'session> {
                             // 到本columnFamily上scan 相应的pointerKey
                             dbRawIterator.seek(buffer.as_ref());
 
+                            // 遍历table和rel对应的全部pointerKey 要是有符合的设置true然后break
                             loop {
                                 // 到了family末尾 || 到了设置的bound末尾
                                 if let None = dbRawIterator.key() {
@@ -330,31 +331,40 @@ impl<'session> CommandExecutor<'session> {
                                     break;
                                 }
 
-                                // 应对mvcc
+                                // 应对mvcc的visible
+                                // 该函数会筛掉xmin
                                 if self.checkCommittedPointerVisiWithoutTxMutations(&mut buffer, &mut dbRawIteratorInner, pointerKey)? == false {
                                     dbRawIterator.next();
                                     continue;
                                 }
-
                                 if let Some(tableMutationsCurrentTx) = tableMutationsCurrentTx {
-                                    self.checkCommittedPointerVisiWithTxMutations(tableMutationsCurrentTx, &mut buffer, pointerKey)?;
-                                } else {
-
+                                    if self.checkCommittedPointerVisiWithTxMutations(tableMutationsCurrentTx, &mut buffer, pointerKey)? == false {
+                                        dbRawIterator.next();
+                                        continue;
+                                    }
                                 }
 
-
-                                dbRawIterator.next();
+                                // 对rel的data本身筛选
+                                let relationDataKey = extractTargetDataKeyFromPointerKey!(pointerKey);
+                                // 因为getRowDatasByDataKeys()能够筛选mvcc relationFliter是none也要调用
+                                if self.getRowDatasByDataKeys(&[relationDataKey],
+                                                              relation.value(),
+                                                              relDesc.relationFliter.as_ref(),
+                                                              None)?.len() > 0 {
+                                    continue 'loopRelDesc;
+                                }
                             }
 
-                            // 还要到mutation上搜索
+                            // 到了这边说明上边都未通过,需要看看mutations上有没有的
+
+                            return Ok(false);
                         }
                         EndPointType::End => {}
                         EndPointType::Either => {}
                     }
                 }
 
-                selectTableUnderRels.relDescVec.len();
-                anyhow::Result::<bool>::Ok(true)
+                Ok(true)
             };
 
         let rowDatas =
