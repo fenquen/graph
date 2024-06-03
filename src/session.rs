@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
-use crate::{global, meta, parser, parser0, throw, u64ToByteArrRef};
+use crate::{global, meta, parser, throw, u64ToByteArrRef};
 use anyhow::Result;
 use log::log;
 use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
@@ -24,7 +24,7 @@ pub struct Session {
     autoCommit: bool,
     txId: Option<TxId>,
     dataStore: &'static DB,
-    pub tableName_mutationsOnTable: RefCell<HashMap<String, BTreeMap<Vec<Byte>, Vec<Byte>>>>,
+    pub tableName_mutations: RefCell<HashMap<String, BTreeMap<Vec<Byte>, Vec<Byte>>>>,
     snapshot: Option<Snapshot<'static>>,
 }
 
@@ -43,7 +43,7 @@ impl Session {
 
         // 不要求是不是auto commit的 要不在tx那么生成1个tx
         if self.notInTx() {
-            self.generateTx();
+            self.generateTx()?;
         }
 
         let selectResultToFront = CommandExecutor::new(self).execute(&mut commands)?;
@@ -61,7 +61,7 @@ impl Session {
 
         let mut batch = WriteBatchWithTransaction::<false>::default();
 
-        for (tableName, mutations) in self.tableName_mutationsOnTable.borrow().iter() {
+        for (tableName, mutations) in self.tableName_mutations.borrow().iter() {
             let colFamily = self.getColFamily(tableName)?;
             for (key, value) in mutations {
                 batch.put_cf(&colFamily, key, value);
@@ -107,7 +107,7 @@ impl Session {
     fn clean(&mut self) {
         self.txId = None;
         self.snapshot = None;
-        self.tableName_mutationsOnTable.borrow_mut().clear();
+        self.tableName_mutations.borrow_mut().clear();
     }
 
     fn generateTx(&mut self) -> Result<()> {
@@ -125,7 +125,7 @@ impl Session {
         }
         self.txId = Some(meta::TX_ID_COUNTER.fetch_add(1, Ordering::AcqRel));
         self.snapshot = Some(self.dataStore.snapshot());
-        self.tableName_mutationsOnTable.borrow_mut().clear();
+        self.tableName_mutations.borrow_mut().clear();
 
         Ok(())
     }
@@ -245,7 +245,7 @@ impl Session {
     }
 
     fn writeMutation(&self, tableName: &String, mutation: Mutation) {
-        let mut tableName_mutationsOnTable = self.tableName_mutationsOnTable.borrow_mut();
+        let mut tableName_mutationsOnTable = self.tableName_mutations.borrow_mut();
         let mutationsOnTable = tableName_mutationsOnTable.getMutWithDefault(tableName);
 
         match mutation {
@@ -282,7 +282,7 @@ impl Default for Session {
             autoCommit: true,
             dataStore: &meta::STORE.dataStore,
             txId: None,
-            tableName_mutationsOnTable: Default::default(),
+            tableName_mutations: Default::default(),
             snapshot: None,
         }
     }

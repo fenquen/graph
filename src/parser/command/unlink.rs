@@ -115,7 +115,7 @@ impl Parser {
                         State::ReadRelFilterExpr => {
                             if currentElement.expectTextLiteralContentIgnoreCaseBool(global::圆括号_STR) {
                                 self.skipElement(-1)?;
-                                relDesc.relationFliterExpr = Some(self.parseExpr(false)?);
+                                relDesc.relationFliter = Some(self.parseExpr(false)?);
                             }
 
                             if let Some(element) = self.getCurrentElementAdvanceOption() {

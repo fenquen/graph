@@ -279,7 +279,8 @@ impl Parser {
         for targetChar in targetChars {
             // 到了末尾
             if self.advanceChar(1) {
-                break;
+                self.currentCharIndex = currentCharIndexCopy;
+                return false;
             }
 
             let currentChar = self.getCurrentChar();

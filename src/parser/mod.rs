@@ -57,16 +57,20 @@ impl Parser {
         let mut commandVec = Vec::new();
 
         loop {
-            let command = match self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str() {
-                "CREATE" => self.parseCreate()?,
-                "INSERT" => self.parseInsert()?,
-                "LINK" => self.parseLink(false)?,
-                "DELETE" => self.parseDelete()?,
-                "UPDATE" => self.parseUpdate()?,
-                "SELECT" => self.parseSelect()?,
-                "UNLINK" => self.parseUnlink()?,
-                _ => self.throwSyntaxError()?,
-            };
+            let command =
+                match self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str() {
+                    "CREATE" => self.parseCreate()?,
+                    "INSERT" => self.parseInsert()?,
+                    "LINK" => self.parseLink(false)?,
+                    "DELETE" => self.parseDelete()?,
+                    "UPDATE" => self.parseUpdate()?,
+                    "SELECT" => self.parseSelect()?,
+                    "UNLINK" => self.parseUnlink()?,
+                    "COMMIT" => self.parseCommit()?,
+                    "ROLLBACK" => self.parseRollback()?,
+                    "SET" => self.parseSet()?,
+                    _ => self.throwSyntaxError()?,
+                };
 
             println!("{:?}\n", command);
 
@@ -107,24 +111,23 @@ impl Parser {
 
 #[cfg(test)]
 mod test {
-    use crate::parser0;
-    use crate::parser0::Parser;
+    use crate::parser;
 
     #[test]
     pub fn testParseCreateTable() {
-        parser0::parse("CREATE    TABLE    TEST   ( COLUMN1 string null  ,  COLUMN2 DECIMAL null)").unwrap();
+        parser::parse("CREATE    TABLE    TEST   ( COLUMN1 string null  ,  COLUMN2 DECIMAL null)").unwrap();
     }
 
     #[test]
     pub fn testParseInsert() {
         // println!("{}", "".parse::<f64>().unwrap());
-        parser0::parse("insert into user values (1,null)").unwrap();
+        parser::parse("insert into user values (1,null)").unwrap();
     }
 
     #[test]
     pub fn testParseSelect() {
         // parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> wheel").unwrap();
-        parser0::parse("select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)").unwrap();
+        parser::parse("select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)").unwrap();
     }
 
     #[test]
@@ -136,23 +139,23 @@ mod test {
         // parser::parse("link user ((a = 1) = true)").unwrap();
         // parser::parse("link user (((a = 1)) = true)").unwrap();
         // parser::parse("link user ( a in (a,b,d))").unwrap();
-        parser0::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
+        parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
     }
 
     #[test]
     pub fn testUpdate() {
-        parser0::parse("update user[name='a',order=7]").unwrap();
+        parser::parse("update user[name='a',order=7]").unwrap();
     }
 
     #[test]
     pub fn testParseDelete() {
-        parser0::parse("delete from user(a=0)").unwrap();
+        parser::parse("delete from user(a=0)").unwrap();
     }
 
     #[test]
     pub fn testUnlink() {
         //parser::parse("unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13)").unwrap();
-        parser0::parse("unlink user(id >1 ) as start by usage (number = 7) ,as end by own(number =7)").unwrap();
+        parser::parse("unlink user(id >1 ) as start by usage (number = 7) ,as end by own(number =7)").unwrap();
     }
 
     #[test]
@@ -167,6 +170,11 @@ mod test {
         let sql = "create table if not exist user (id integer,name string)
                        insert into user values (1,'tom')";
 
-        parser0::parse(sql).unwrap();
+        parser::parse(sql).unwrap();
+    }
+
+    #[test]
+    pub fn testAutocommit() {
+        parser::parse("set autocommit true").unwrap();
     }
 }

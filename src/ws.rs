@@ -13,7 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::WebSocketStream;
-use crate::{config, parser, parser0, throw};
+use crate::{config, parser, throw};
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
 use crate::session::Session;
@@ -40,11 +40,8 @@ impl Default for GraphWsRequest {
 // #[serde(untagged)] // 如果使用的话 对应的json变为null
 pub enum RequestType {
     ExecuteSql,
-    Commit,
-    Rollback,
     TestParser,
     None,
-    SetAutoCommit,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -188,9 +185,6 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
 
                     parser::parse(&sql)?;
                 }
-                RequestType::SetAutoCommit => session.setAutoCommit(graphWsRequest.autoCommit)?,
-                RequestType::Commit => session.commit()?,
-                RequestType::Rollback => session.rollback()?,
                 _ => {}
             }
 

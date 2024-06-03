@@ -7,30 +7,31 @@ use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED, meta, suffix
 use crate::executor::mvcc::BytesMutExt;
 use crate::graph_value::{GraphValue, PointDesc};
 use crate::meta::Table;
-use crate::types::{Byte, DataKey, KeyTag, RowData};
+use crate::types::{Byte, ColumnFamily, DataKey, KeyTag, RowData, RowChecker, DBRawIterator};
 use crate::global;
-use crate::parser::command::select::{Select, SelectRel, SelectTable};
+use crate::parser::command::select::{EndPointType, Select, SelectRel, SelectTable, SelectTableUnderRels};
+use anyhow::{anyhow, Result};
 
 impl<'session> CommandExecutor<'session> {
     /// 如果不是含有relation的select 便是普通的select
-    pub (super) fn select(&self, selectFamily: &Select) -> anyhow::Result<CommandExecResult> {
+    pub(super) fn select(&self, selectFamily: &Select) -> Result<CommandExecResult> {
         match selectFamily {
             // 普通模式不含有relation
             Select::SelectTable(selectTable) => self.selectTable(selectTable),
             Select::SelectRels(selectVec) => self.selectRels(selectVec),
-            _ => { panic!("undo") }
+            Select::SelectTableUnderRels(selectTableUnderRels) => self.selectTableUnderRels(selectTableUnderRels),
         }
     }
 
     /// 普通的和rdbms相同的 select
-    fn selectTable(&self, selectTable: &SelectTable) -> anyhow::Result<CommandExecResult> {
-        let srcTable = self.getTableRefByName(selectTable.tableName.as_str())?;
+    fn selectTable(&self, selectTable: &SelectTable) -> Result<CommandExecResult> {
+        let table = self.getTableRefByName(selectTable.tableName.as_str())?;
 
         let rowDatas =
-            self.scanSatisfiedRows(srcTable.value(),
-                                   selectTable.tableFilterExpr.as_ref(),
-                                   selectTable.selectedColNames.as_ref(),
-                                   true, None)?;
+            self.scanSatisfiedRows::<Box<dyn crate::types::RowChecker>>(table.value(),
+                                                                        selectTable.tableFilterExpr.as_ref(),
+                                                                        selectTable.selectedColNames.as_ref(),
+                                                                        true, None)?;
 
         let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(_, rowData)| rowData).collect();
 
@@ -67,10 +68,10 @@ impl<'session> CommandExecutor<'session> {
             let relationDatas: Vec<(DataKey, RowData)> = {
                 let relation = self.getTableRefByName(select.relationName.as_ref().unwrap())?;
                 let relationDatas =
-                    self.scanSatisfiedRows(relation.value(),
-                                           select.relationFliterExpr.as_ref(),
-                                           select.relationColumnNames.as_ref(),
-                                           true, None)?;
+                    self.scanSatisfiedRows::<Box<dyn RowChecker>>(relation.value(),
+                                                                  select.relationFliterExpr.as_ref(),
+                                                                  select.relationColumnNames.as_ref(),
+                                                                  true, None)?;
                 relationDatas.into_iter().map(|(dataKey, rowData)| (dataKey, rowData)).collect()
             };
 
@@ -88,8 +89,8 @@ impl<'session> CommandExecutor<'session> {
             // let mut rawIteratorDest = self.session.dataStore.raw_iterator_cf(&destColFamily);
 
             let relColFamily = self.session.getColFamily(select.relationName.as_ref().unwrap())?;
-            let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.borrow();
-            let mutationsRawOnTableCurrentTx = tableName_mutationsOnTable.get(select.relationName.as_ref().unwrap());
+            let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
+            let mutationsOnTableCurrentTx = tableName_mutationsOnTable.get(select.relationName.as_ref().unwrap());
 
             // 遍历当前的select的多个relation
             'loopRelationData:
@@ -98,19 +99,19 @@ impl<'session> CommandExecutor<'session> {
                     |keyTag: KeyTag, targetTable: &Table| {
                         pointerKeyPrefixBuffer.writePointerKeyLeadingPart(relationDataKey, keyTag, targetTable.tableId);
 
-                        // todo selectRels时候如何应对pointerKey的mvcc
+                        // todo selectRels时候如何应对pointerKey的mvcc 完成
                         let mut pointerKeys =
                             self.getKeysByPrefix(select.relationName.as_ref().unwrap(),
                                                  &relColFamily,
                                                  pointerKeyPrefixBuffer.as_ref(),
-                                                 Some(CommandExecutor::checkCommittedPointerVisibilityWithoutCurrentTxMutations),
-                                                 Some(CommandExecutor::checkCommittedPointerVisibilityWithCurrentTxMutations))?;
+                                                 Some(CommandExecutor::checkCommittedPointerVisiWithoutTxMutations),
+                                                 Some(CommandExecutor::checkCommittedPointerVisiWithTxMutations))?;
 
 
-                        // todo 应对当前tx上 add的 当前rel 当前targetTable pointer
-                        if let Some(mutationsRawOnTableCurrentTx) = mutationsRawOnTableCurrentTx {
+                        // todo 应对当前tx上 新增的 当前rel 当前targetTable pointer 完成
+                        if let Some(mutationsOnTableCurrentTx) = mutationsOnTableCurrentTx {
                             let addedPointerUnderRelTargetTableCurrentTxRange =
-                                mutationsRawOnTableCurrentTx.range::<Vec<Byte>, RangeFrom<&Vec<Byte>>>(&pointerKeyPrefixBuffer.to_vec()..);
+                                mutationsOnTableCurrentTx.range::<Vec<Byte>, RangeFrom<&Vec<Byte>>>(&pointerKeyPrefixBuffer.to_vec()..);
 
                             for (addedPointerUnderRelTargetTableCurrentTxRange, _) in addedPointerUnderRelTargetTableCurrentTxRange {
                                 // 因为右边的是未限制的 需要手动
@@ -118,7 +119,9 @@ impl<'session> CommandExecutor<'session> {
                                     break;
                                 }
 
-                                if self.checkUncommittedPointerVisibility(&mutationsRawOnTableCurrentTx, &mut pointerKeyPrefixBuffer, addedPointerUnderRelTargetTableCurrentTxRange)? {
+                                // todo mutation要去掉delete的提升速度
+
+                                if self.checkUncommittedPointerVisi(&mutationsOnTableCurrentTx, &mut pointerKeyPrefixBuffer, addedPointerUnderRelTargetTableCurrentTxRange)? {
                                     pointerKeys.push(addedPointerUnderRelTargetTableCurrentTxRange.clone().into_boxed_slice());
                                 }
                             }
@@ -280,5 +283,87 @@ impl<'session> CommandExecutor<'session> {
         //println!("{}", serde_json::to_string(&valueVec)?);
 
         Ok(CommandExecResult::SelectResult(valueVec))
+    }
+
+    /// select user(id >1 ) as user0 ,in usage (number = 7) ,end in own(number =7)
+    fn selectTableUnderRels(&self, selectTableUnderRels: &SelectTableUnderRels) -> Result<CommandExecResult> {
+        // 先要以普通select table体系筛选 然后对通过满足要求的pointerKey筛选
+
+        let table = self.getTableRefByName(selectTableUnderRels.selectTable.tableName.as_str())?;
+        let columnFamily = self.session.getColFamily(table.name.as_str())?;
+        let mut dbRawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
+
+        // 用来给mvcc visibility函数使用的
+        let mut dbRawIteratorInner: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
+
+        let tableName_mutations = self.session.tableName_mutations.borrow();
+        let tableMutationsCurrentTx = tableName_mutations.get(&table.name);
+
+        // 确认当前的data是不是满足在各个rel上的位置
+        let rowChecker =
+            |commandExecutor: &CommandExecutor, columnFamily: &ColumnFamily, dataKey: DataKey| {
+                let mut buffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+
+                for relDesc in &selectTableUnderRels.relDescVec {
+                    let relation = self.getTableRefByName(relDesc.relationName.as_str())?;
+
+                    // assemble 相应的pointerKey
+                    match relDesc.endPointType {
+                        EndPointType::Start => {
+                            // 如果是起点的话 那么rel便是它的downstream
+                            // 搜寻满足和当前table data的相互地位的rel的data 遍历的是rel
+                            buffer.writePointerKeyLeadingPart(dataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation.tableId);
+
+                            // 到本columnFamily上scan 相应的pointerKey
+                            dbRawIterator.seek(buffer.as_ref());
+
+                            loop {
+                                // 到了family末尾 || 到了设置的bound末尾
+                                if let None = dbRawIterator.key() {
+                                    break;
+                                }
+
+                                let pointerKey = dbRawIterator.key().unwrap();
+
+                                // 需要手动来确保不越界
+                                if pointerKey.starts_with(buffer.as_ref()) == false {
+                                    break;
+                                }
+
+                                // 应对mvcc
+                                if self.checkCommittedPointerVisiWithoutTxMutations(&mut buffer, &mut dbRawIteratorInner, pointerKey)? == false {
+                                    dbRawIterator.next();
+                                    continue;
+                                }
+
+                                if let Some(tableMutationsCurrentTx) = tableMutationsCurrentTx {
+                                    self.checkCommittedPointerVisiWithTxMutations(tableMutationsCurrentTx, &mut buffer, pointerKey)?;
+                                } else {
+
+                                }
+
+
+                                dbRawIterator.next();
+                            }
+
+                            // 还要到mutation上搜索
+                        }
+                        EndPointType::End => {}
+                        EndPointType::Either => {}
+                    }
+                }
+
+                selectTableUnderRels.relDescVec.len();
+                anyhow::Result::<bool>::Ok(true)
+            };
+
+        let rowDatas =
+            self.scanSatisfiedRows(table.value(),
+                                   selectTableUnderRels.selectTable.tableFilterExpr.as_ref(),
+                                   selectTableUnderRels.selectTable.selectedColNames.as_ref(),
+                                   true,
+                                   Some(rowChecker))?;
+
+        panic!()
     }
 }

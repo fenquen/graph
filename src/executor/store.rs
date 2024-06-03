@@ -10,7 +10,7 @@ use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, RowChecker};
 
 impl<'session> CommandExecutor<'session> {
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
@@ -26,7 +26,7 @@ impl<'session> CommandExecutor<'session> {
         let mut mvccKeyBuffer = &mut BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
         let mut rawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
 
-        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.borrow();
+        let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
         let mutationsRawCurrentTx = tableName_mutationsOnTable.get(&table.name);
 
         let mut process =
@@ -75,17 +75,17 @@ impl<'session> CommandExecutor<'session> {
     }
 
     // todo 实现 index
-    pub(super) fn scanSatisfiedRows(&self, table: &Table,
-                                    tableFilter: Option<&Expr>,
-                                    selectedColumnNames: Option<&Vec<String>>,
-                                    select: bool,
-                                    rowChecker: Option<fn(commandExecutor: &CommandExecutor,
-                                                          columnFamily: &ColumnFamily,
-                                                          dataKey: DataKey) -> anyhow::Result<bool>>) -> anyhow::Result<Vec<(DataKey, RowData)>> {
+    pub(super) fn scanSatisfiedRows<F: RowChecker>(&self,
+                                                   table: &Table,
+                                                   tableFilter: Option<&Expr>,
+                                                   selectedColumnNames: Option<&Vec<String>>,
+                                                   select: bool,
+                                                   // 如果传递的是fn()的话(不是Fn)是函数指针而不是闭包 不能和上下文有联系
+                                                   mut rowChecker: Option<F>) -> anyhow::Result<Vec<(DataKey, RowData)>> {
         // todo 使用table id 为 column family 标识
         let columnFamily = self.session.getColFamily(&table.name)?;
 
-        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.borrow();
+        let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
         let mutationsRawOnTableCurrentTx = tableName_mutationsOnTable.get(&table.name);
 
         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
@@ -110,7 +110,7 @@ impl<'session> CommandExecutor<'session> {
 
                     let dataKey = byte_slice_to_u64!(&*dataKeyBinary) as DataKey;
 
-                    if let Some(ref rowChecker) = rowChecker {
+                    if let Some(ref mut rowChecker) = rowChecker {
                         if rowChecker(self, &columnFamily, dataKey)? == false {
                             continue;
                         }
@@ -169,7 +169,8 @@ impl<'session> CommandExecutor<'session> {
 
         // todo scan的时候要是当前tx有add的话 也要收录 完成
         if let Some(mutationsRawOnTableCurrentTx) = mutationsRawOnTableCurrentTx {
-            let addedDataCurrentTxRange = mutationsRawOnTableCurrentTx.range::<Vec<Byte>, Range<&Vec<Byte>>>(&*meta::DATA_KEY_PATTERN_VEC..&*meta::POINTER_KEY_PATTERN_VEC);
+            let addedDataCurrentTxRange =
+                mutationsRawOnTableCurrentTx.range::<Vec<Byte>, Range<&Vec<Byte>>>(&*meta::DATA_KEY_PATTERN_VEC..&*meta::POINTER_KEY_PATTERN_VEC);
 
             for (addedDataKeyBinaryCurrentTx, addRowDataBinaryCurrentTx) in addedDataCurrentTxRange {
                 let addedDataKeyCurrentTx: DataKey = byte_slice_to_u64!(addedDataKeyBinaryCurrentTx);
@@ -190,7 +191,7 @@ impl<'session> CommandExecutor<'session> {
     fn readRowDataBinary(&self,
                          table: &Table,
                          rowBinary: &[u8],
-                         tableFilterExpr: Option<&Expr>,
+                         tableFilter: Option<&Expr>,
                          selectedColumnNames: Option<&Vec<String>>) -> anyhow::Result<Option<RowData>> {
         let columnNames = table.columns.iter().map(|column| column.name.clone()).collect::<Vec<String>>();
 
@@ -230,11 +231,11 @@ impl<'session> CommandExecutor<'session> {
                 rowData
             };
 
-        if tableFilterExpr.is_none() {
+        if tableFilter.is_none() {
             return Ok(Some(rowData));
         }
 
-        if let GraphValue::Boolean(satisfy) = tableFilterExpr.unwrap().calc(Some(&rowData))? {
+        if let GraphValue::Boolean(satisfy) = tableFilter.unwrap().calc(Some(&rowData))? {
             if satisfy {
                 Ok(Some(rowData))
             } else {
@@ -356,8 +357,8 @@ impl<'session> CommandExecutor<'session> {
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
         let mut rawIterator = self.session.getSnapshot()?.raw_iterator_cf(colFamily) as DBRawIterator;
 
-        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.borrow();
-        let mutationsRawCurrentTx = tableName_mutationsOnTable.get(tableName);
+        let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
+        let tableMutationsCurrentTx = tableName_mutationsOnTable.get(tableName);
 
         for iterResult in self.session.getSnapshot()?.iterator_cf(colFamily, IteratorMode::From(prefix, Direction::Forward)) {
             let (key, _) = iterResult?;
@@ -374,7 +375,7 @@ impl<'session> CommandExecutor<'session> {
             }
 
             if let Some(filterWithMutation) = filterWithMutation.as_ref() {
-                if let Some(mutationsRawCurrentTx) = mutationsRawCurrentTx {
+                if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
                     if filterWithMutation(self, mutationsRawCurrentTx, &mut pointerKeyBuffer, key.as_ref())? == false {
                         continue;
                     }

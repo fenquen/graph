@@ -49,7 +49,12 @@ impl<'session> CommandExecutor<'session> {
                 anyhow::Result::<bool>::Ok(true)
             };
 
-        let mut pairs = self.scanSatisfiedRows(table.value(), update.filterExpr.as_ref(), None, true, Some(testDataHasBeenLinked))?;
+        let mut pairs =
+            self.scanSatisfiedRows(table.value(),
+                                   update.filterExpr.as_ref(),
+                                   None,
+                                   true,
+                                   Some(testDataHasBeenLinked))?;
 
         enum A<'a> {
             DirectValue(GraphValue),

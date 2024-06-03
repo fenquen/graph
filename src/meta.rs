@@ -87,7 +87,7 @@ pub const POINTER_KEY_BYTE_LEN: usize = {
 };
 
 /// pointerKey的对端的dataKey前边的byte数量
-pub const POINTER_KEY_TARGET_DATA_KEY_OFFSET: usize = POINTER_KEY_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN - TX_ID_BYTE_LEN;
+pub const POINTER_KEY_TARGET_DATA_KEY_OFFSET: usize = POINTER_KEY_BYTE_LEN - TX_ID_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN;
 pub const POINTER_KEY_MVCC_KEY_TAG_OFFSET: usize = POINTER_KEY_TARGET_DATA_KEY_OFFSET + DATA_KEY_BYTE_LEN;
 pub const POINTER_KEY_TX_ID_OFFSET: usize = POINTER_KEY_MVCC_KEY_TAG_OFFSET + KEY_TAG_BYTE_LEN;
 
@@ -404,7 +404,7 @@ pub fn init() -> Result<()> {
         rawIterator.seek_to_last();
 
         if let Some(key) = rawIterator.key() {
-            // todo latest的txId需要还原
+            // todo latest的txId需要还原 完成
             // 应对的记录txId的column family
             // 读取last的key对应的latest的tx id
             if tableName == COLUMN_FAMILY_NAME_TX_ID {

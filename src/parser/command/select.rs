@@ -51,9 +51,10 @@ pub struct SelectTableUnderRels {
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 pub struct RelDesc {
+    /// 该node处在rel的哪个位置上
     pub endPointType: EndPointType,
     pub relationName: String,
-    pub relationFliterExpr: Option<Expr>,
+    pub relationFliter: Option<Expr>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -392,7 +393,7 @@ impl Parser {
                         State::ReadRelFilterExpr => {
                             if currentElement.expectTextLiteralContentIgnoreCaseBool(global::圆括号_STR) {
                                 self.skipElement(-1)?;
-                                relDesc.relationFliterExpr = Some(self.parseExpr(false)?);
+                                relDesc.relationFliter = Some(self.parseExpr(false)?);
                             }
 
                             if let Some(element) = self.getCurrentElementAdvanceOption() {

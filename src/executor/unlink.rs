@@ -1,14 +1,14 @@
 use bytes::BytesMut;
 use rocksdb::{Direction, IteratorMode};
-use crate::{extractTargetDataKeyFromPointerKey, meta, byte_slice_to_u64};
+use crate::{extractTargetDataKeyFromPointerKey, meta, byte_slice_to_u64, types};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::executor::mvcc::BytesMutExt;
 use crate::parser::command::unlink::{Unlink, UnlinkLinkStyle, UnlinkSelfStyle};
-use crate::types::DataKey;
+use crate::types::{ColumnFamily, DataKey, RowChecker};
 
 impl<'session> CommandExecutor<'session> {
     // todo pointer指向点和边的xmin xmax如何应对
-    pub (super) fn unlink(&self, unlink: &Unlink) -> anyhow::Result<CommandExecResult> {
+    pub(super) fn unlink(&self, unlink: &Unlink) -> anyhow::Result<CommandExecResult> {
         match unlink {
             Unlink::LinkStyle(unlinkLinkStyle) => self.unlinkLinkStyle(unlinkLinkStyle),
             Unlink::SelfStyle(unlinkSelfStyle) => self.unlinkSelfStyle(unlinkSelfStyle),
@@ -25,7 +25,10 @@ impl<'session> CommandExecutor<'session> {
         let relColFamily = self.session.getColFamily(unlinkLinkStyle.relationName.as_str())?;
 
         // 得到rel 干掉指向src和dest的pointer key
-        let relStatisfiedRowDatas = self.scanSatisfiedRows(relation.value(), unlinkLinkStyle.relationFilterExpr.as_ref(), None, true, None)?;
+        let relStatisfiedRowDatas =
+            self.scanSatisfiedRows::<Box<dyn RowChecker>>(relation.value(),
+                                                          unlinkLinkStyle.relationFilterExpr.as_ref(),
+                                                          None, true, None)?;
 
         // KEY_PREFIX_POINTER + relDataRowId + KEY_TAG_SRC_TABLE_ID + src的tableId + KEY_TAG_KEY
         let mut pointerKeyLeadingPartBuffer = BytesMut::with_capacity(meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET);

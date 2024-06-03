@@ -3,6 +3,7 @@ use std::sync::Arc;
 use rocksdb::{BoundColumnFamily, DBIteratorWithThreadMode, DBRawIteratorWithThreadMode,
               DBWithThreadMode, MultiThreaded, SnapshotWithThreadMode};
 use serde_json::Value;
+use crate::executor::CommandExecutor;
 use crate::graph_value::GraphValue;
 
 
@@ -30,3 +31,5 @@ pub type TxId = u64;
 pub type KV = (Vec<Byte>, Vec<Byte>);
 
 pub type RowData = HashMap<String, GraphValue>;
+
+pub trait RowChecker = FnMut(&CommandExecutor, &ColumnFamily, DataKey) -> anyhow::Result<bool>;

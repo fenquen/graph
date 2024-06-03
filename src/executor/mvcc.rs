@@ -86,10 +86,10 @@ impl<'session> CommandExecutor<'session> {
 
     // todo  pointerKey如何应对mvcc 完成
     /// 因为mvcc信息直接是在pointerKey上的 去看它的末尾的xmax
-    pub(super) fn checkCommittedPointerVisibilityWithoutCurrentTxMutations(&self,
-                                                                           pointerKeyBuffer: &mut BytesMut,
-                                                                           rawIterator: &mut DBRawIterator,
-                                                                           committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
+    pub(super) fn checkCommittedPointerVisiWithoutTxMutations(&self,
+                                                              pointerKeyBuffer: &mut BytesMut,
+                                                              rawIterator: &mut DBRawIterator,
+                                                              committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         const RANGE: Range<usize> = meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET..meta::POINTER_KEY_BYTE_LEN;
@@ -113,7 +113,6 @@ impl<'session> CommandExecutor<'session> {
                 // 到了这边说明 满足 xmax == 0 || xmax > currentTxId
                 // 到了这边说明该pointerKey本身单独看是没有问题的 不过还需要联系后边是不是会干掉
                 // 要是后边还有 currentTxId > xmax 的 就需要应对
-                let prefix = &committedPointerKey[..meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET];
 
                 // 生成xmax是currentTxId 的pointerKey
                 pointerKeyBuffer.replacePointerKeyMcvvTagTxId(committedPointerKey, meta::MVCC_KEY_TAG_XMIN, meta::TX_ID_FROZEN);
@@ -130,22 +129,22 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
-    pub(super) fn checkCommittedPointerVisibilityWithCurrentTxMutations(&self,
-                                                                        mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
-                                                                        pointerKeyBuffer: &mut BytesMut,
-                                                                        committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
+    pub(super) fn checkCommittedPointerVisiWithTxMutations(&self,
+                                                           tableMutationsCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                           pointerKeyBuffer: &mut BytesMut,
+                                                           committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 要是当前的tx干掉的话会有这样的xmax
         pointerKeyBuffer.replacePointerKeyMcvvTagTxId(committedPointerKey, meta::MVCC_KEY_TAG_XMAX, currentTxId);
 
-        Ok(mutationsRawCurrentTx.get(pointerKeyBuffer.as_ref()).is_none())
+        Ok(tableMutationsCurrentTx.get(pointerKeyBuffer.as_ref()).is_none())
     }
 
-    pub(super) fn checkUncommittedPointerVisibility(&self,
-                                                    mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
-                                                    pointerKeyBuffer: &mut BytesMut,
-                                                    addedPointerKeyCurrentTx: &[Byte]) -> anyhow::Result<bool> {
+    pub(super) fn checkUncommittedPointerVisi(&self,
+                                              mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                              pointerKeyBuffer: &mut BytesMut,
+                                              addedPointerKeyCurrentTx: &[Byte]) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 要是当前的tx干掉的话会有这样的xmax
@@ -213,10 +212,10 @@ impl<'session> CommandExecutor<'session> {
 
 pub trait BytesMutExt {
     // todo writePointerKeyBuffer() 和 writePointerKeyLeadingPart() 有公用部分的 完成
-    /// 不包含末尾的对应其它table rel 的dataKey
+    /// 只包含了前边的dataKey keyTag targetTableId
     fn writePointerKeyLeadingPart(&mut self,
                                   dataKey: DataKey,
-                                  keyTag: KeyTag, tableId: TableId);
+                                  keyTag: KeyTag, targetTableId: TableId);
 
     // ----------------------------------------------------------------------------
 
@@ -295,10 +294,10 @@ impl BytesMutExt for BytesMut {
 
     fn writePointerKey(&mut self,
                        selfDatakey: DataKey,
-                       pointerKeyTag: KeyTag, tableId: TableId, dataKey: DataKey,
+                       pointerKeyTag: KeyTag, targetTableId: TableId, targetDataKey: DataKey,
                        pointerMvccKeyTag: KeyTag, txId: TxId) {
-        self.writePointerKeyLeadingPart(selfDatakey, pointerKeyTag, tableId);
-        self.put_u64(dataKey);
+        self.writePointerKeyLeadingPart(selfDatakey, pointerKeyTag, targetTableId);
+        self.put_u64(targetDataKey);
         self.put_u8(pointerMvccKeyTag);
         self.put_u64(txId);
     }

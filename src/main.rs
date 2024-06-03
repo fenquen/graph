@@ -1,11 +1,11 @@
 #![allow(non_snake_case, unused_imports)]
+#![feature(trait_alias)]
 
 mod config;
 mod command_line;
 mod macros;
 mod graph_error;
 mod global;
-mod parser0;
 mod meta;
 mod a;
 mod expr;

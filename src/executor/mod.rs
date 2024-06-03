@@ -20,6 +20,7 @@ mod select;
 mod store;
 mod mvcc;
 mod vaccum;
+mod manage;
 
 #[macro_export]
 macro_rules! JSON_ENUM_UNTAGGED {
@@ -38,14 +39,15 @@ enum CommandExecResult {
     SelectResult(Vec<Value>),
     DmlResult,
     DdlResult,
+    None,
 }
 
 pub struct CommandExecutor<'session> {
-    pub session: &'session Session,
+    pub session: &'session mut Session,
 }
 
 impl<'session> CommandExecutor<'session> {
-    pub fn new(session: &'session Session) -> Self {
+    pub fn new(session: &'session mut Session) -> Self {
         CommandExecutor {
             session
         }
@@ -75,6 +77,7 @@ impl<'session> CommandExecutor<'session> {
                 Command::Delete(delete) => self.delete(delete)?,
                 Command::Update(update) => self.update(update)?,
                 Command::Unlink(unlink) => self.unlink(unlink)?,
+                _ => panic!()
             };
 
             // 如何应对多个的select

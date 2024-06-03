@@ -85,7 +85,7 @@ impl<'session> CommandExecutor<'session> {
                     }
                     dataStore.put_cf(&columnFamily, keyBuffer.as_ref(), global::EMPTY_BINARY)?;
 
-                    // todo 如何应对pointerKey
+                    // todo 如何应对pointerKey 不需要了
                     {
                         // 定位到pointerKey部分
                         let pointerKeyPrefix = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_POINTER, rowId));
@@ -122,8 +122,6 @@ impl<'session> CommandExecutor<'session> {
                 dbRawIteratorMvccKey.next();
             }
         }
-
-        // todo txId应该回到哪里
 
         Ok(())
     }
