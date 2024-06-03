@@ -205,8 +205,7 @@ impl Session {
 
     pub fn writeAddPointerMutation(&self,
                                    tableName: &String,
-                                   xmin: KV,
-                                   xmax: KV) {
+                                   xmin: KV, xmax: KV) {
         let addMutation =
             Mutation::AddPointer {
                 xmin,
@@ -221,8 +220,7 @@ impl Session {
                                    tableName: &String,
                                    oldXmax: KV,
                                    newData: KV,
-                                   newXmin: KV,
-                                   newXmax: KV,
+                                   newXmin: KV, newXmax: KV,
                                    origin: KV) {
         let updateMutation =
             Mutation::UpdateData {

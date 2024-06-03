@@ -117,8 +117,7 @@ impl<'session> CommandExecutor<'session> {
                         }
                     }
                 }
-
-
+                
                 dbRawIteratorMvccKey.next();
             }
         }

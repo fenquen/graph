@@ -11,7 +11,6 @@ impl Debug for GraphError {
     }
 }
 
-
 impl Display for GraphError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "graph error message:{}", self.message)
@@ -25,6 +24,5 @@ impl GraphError {
         }
     }
 }
-
 
 impl Error for GraphError {}
