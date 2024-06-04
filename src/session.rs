@@ -18,6 +18,7 @@ use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
               MultiThreaded, OptimisticTransactionDB, Options, SnapshotWithThreadMode, Transaction, WriteBatchWithTransaction};
 use tokio::io::AsyncWriteExt;
 use crate::executor::CommandExecutor;
+use crate::parser::command::Command;
 use crate::types::{Byte, ColumnFamily, KV, SelectResultToFront, Snapshot, TxId};
 
 pub struct Session {
@@ -41,14 +42,24 @@ impl Session {
             return Ok(vec![]);
         }
 
+        // todo set autocommit 是不需要tx的 如果sql只包含set如何应对
+        let mut isPureSetSql = false;
+        for  command in &commands {
+            if let Command::Set(_) = command {
+                isPureSetSql = true;
+                break;
+            }
+        }
+
         // 不要求是不是auto commit的 要不在tx那么生成1个tx
-        if self.notInTx() {
+        if self.notInTx() && isPureSetSql == false {
             self.generateTx()?;
         }
 
         let selectResultToFront = CommandExecutor::new(self).execute(&mut commands)?;
 
-        if self.autoCommit {
+        // todo sql中执行了commit导致当前tx提交后 当前不是inTx了 调用commit报错 需要commit()不要限制inTx
+        if self.autoCommit && isPureSetSql == false {
             self.commit()?;
         }
 
@@ -57,7 +68,9 @@ impl Session {
 
     /// 提交之后 在到下个执行sql前 session都是 not in tx 的
     pub fn commit(&mut self) -> Result<()> {
-        self.needInTx()?;
+        if self.notInTx() {
+            return Ok(());
+        }
 
         let mut batch = WriteBatchWithTransaction::<false>::default();
 
@@ -97,7 +110,7 @@ impl Session {
 
         Ok(())
     }
-
+    // todo rollback()不要求inTx
     pub fn rollback(&mut self) -> Result<()> {
         self.needInTx()?;
         self.clean();

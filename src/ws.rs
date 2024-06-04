@@ -23,7 +23,6 @@ use crate::types::SelectResultToFront;
 pub struct GraphWsRequest {
     pub requestType: RequestType,
     pub sql: Option<String>,
-    pub autoCommit: bool,
 }
 
 impl Default for GraphWsRequest {
@@ -31,7 +30,6 @@ impl Default for GraphWsRequest {
         GraphWsRequest {
             requestType: RequestType::None,
             sql: None,
-            autoCommit: true,
         }
     }
 }
@@ -214,7 +212,6 @@ mod test {
         println!("{}", serde_json::to_string(&GraphWsRequest {
             requestType: RequestType::ExecuteSql,
             sql: Some("aaaa".to_string()),
-            autoCommit: true,
         }).unwrap());
     }
 }

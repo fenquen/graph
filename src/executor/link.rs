@@ -1,11 +1,12 @@
 use std::sync::atomic::Ordering;
 use bytes::BytesMut;
-use crate::{global, keyPrefixAddRowId, meta, u64ToByteArrRef};
+use crate::{global, keyPrefixAddRowId, meta, types, u64ToByteArrRef};
 use crate::executor::{CommandExecResult, CommandExecutor};
+use crate::executor::store::ScanHooks;
 use crate::meta::Table;
 use crate::parser::command::insert::Insert;
 use crate::parser::command::link::Link;
-use crate::types::{DataKey, KeyTag, KV, RowId, RowChecker};
+use crate::types::{DataKey, KeyTag, KV, RowId, ScanCommittedPreProcessor};
 
 impl<'session> CommandExecutor<'session> {
     /// 它本质是向relation对应的data file写入
@@ -16,13 +17,19 @@ impl<'session> CommandExecutor<'session> {
         let destTable = self.getTableRefByName(link.destTableName.as_str())?;
 
         // 对src table和dest table调用expr筛选
-        let srcSatisfiedVec = self.scanSatisfiedRows::<Box<dyn RowChecker>>(srcTable.value(), link.srcTableFilterExpr.as_ref(), None, false, None)?;
+        let srcSatisfiedVec =
+            self.scanSatisfiedRows(srcTable.value(),
+                                   link.srcTableFilterExpr.as_ref(), None,
+                                   false, ScanHooks::default())?;
         // src 空的 link 不成立
         if srcSatisfiedVec.is_empty() {
             return Ok(CommandExecResult::DmlResult);
         }
 
-        let destSatisfiedVec = self.scanSatisfiedRows::<Box<dyn RowChecker>>(destTable.value(), link.destTableFilterExpr.as_ref(), None, false, None)?;
+        let destSatisfiedVec =
+            self.scanSatisfiedRows(destTable.value(),
+                                   link.destTableFilterExpr.as_ref(), None,
+                                   false, ScanHooks::default())?;
         // dest 空的 link 不成立
         if destSatisfiedVec.is_empty() {
             return Ok(CommandExecResult::DmlResult);

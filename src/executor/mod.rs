@@ -8,6 +8,7 @@ use crate::session::Session;
 use crate::{meta, throw};
 use crate::graph_value::GraphValue;
 use crate::parser::command::Command;
+use crate::parser::command::manage::Set;
 use crate::types::{SelectResultToFront, TableId};
 
 mod create;
@@ -53,7 +54,7 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
-    pub fn execute(&self, commands: &mut [Command]) -> anyhow::Result<SelectResultToFront> {
+    pub fn execute(&mut self, commands: &mut [Command]) -> anyhow::Result<SelectResultToFront> {
         // 单个的command可能得到单个Vec<Value>
         let mut valueVecVec = Vec::with_capacity(commands.len());
 
@@ -77,6 +78,9 @@ impl<'session> CommandExecutor<'session> {
                 Command::Delete(delete) => self.delete(delete)?,
                 Command::Update(update) => self.update(update)?,
                 Command::Unlink(unlink) => self.unlink(unlink)?,
+                Command::Commit => self.commit()?,
+                Command::Rollback => self.rollback()?,
+                Command::Set(set) => self.set(set)?,
                 _ => panic!()
             };
 
@@ -107,6 +111,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(table.unwrap())
     }
 }
+
 
 #[cfg(test)]
 mod test {

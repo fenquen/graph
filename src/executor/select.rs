@@ -3,14 +3,16 @@ use std::ops::RangeFrom;
 use bytes::BytesMut;
 use serde_json::{json, Value};
 use crate::executor::{CommandExecResult, CommandExecutor};
-use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED, meta, suffix_plus_plus, byte_slice_to_u64};
+use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED, meta, suffix_plus_plus, byte_slice_to_u64, types};
 use crate::executor::mvcc::BytesMutExt;
 use crate::graph_value::{GraphValue, PointDesc};
 use crate::meta::Table;
-use crate::types::{Byte, ColumnFamily, DataKey, KeyTag, RowData, RowChecker, DBRawIterator};
+use crate::types::{Byte, ColumnFamily, DataKey, KeyTag, RowData, DBRawIterator, TableMutations};
 use crate::global;
-use crate::parser::command::select::{EndPointType, Select, SelectRel, SelectTable, SelectTableUnderRels};
+use crate::parser::command::select::{EndPointType, RelDesc, Select, SelectRel, SelectTable, SelectTableUnderRels};
 use anyhow::{anyhow, Result};
+use crate::executor::store::ScanHooks;
+use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
 
 impl<'session> CommandExecutor<'session> {
     /// 如果不是含有relation的select 便是普通的select
@@ -27,15 +29,20 @@ impl<'session> CommandExecutor<'session> {
     fn selectTable(&self, selectTable: &SelectTable) -> Result<CommandExecResult> {
         let table = self.getTableRefByName(selectTable.tableName.as_str())?;
 
-        let rowDatas =
-            self.scanSatisfiedRows::<Box<dyn crate::types::RowChecker>>(table.value(),
-                                                                        selectTable.tableFilterExpr.as_ref(),
-                                                                        selectTable.selectedColNames.as_ref(),
-                                                                        true, None)?;
+        let rowDatas = {
+            self.scanSatisfiedRows(table.value(),
+                                   selectTable.tableFilterExpr.as_ref(),
+                                   selectTable.selectedColNames.as_ref(),
+                                   true,
+                                   ScanHooks {
+                                       scanCommittedPreProcessor: Option::<Box<dyn ScanCommittedPreProcessor>>::None,
+                                       scanCommittedPostProcessor: Option::<Box<dyn crate::types::ScanCommittedPostProcessor>>::None,
+                                       scanUncommittedPreProcessor: Option::<Box<dyn crate::types::ScanUncommittedPreProcessor>>::None,
+                                       scanUncommittedPostProcessor: Option::<Box<dyn crate::types::ScanUncommittedPostProcessor>>::None,
+                                   })?
+        };
 
-        let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(_, rowData)| rowData).collect();
-
-        let values: Vec<Value> = JSON_ENUM_UNTAGGED!(rowDatas.into_iter().map(|rowData| serde_json::to_value(&rowData).unwrap()).collect());
+        let values: Vec<Value> = self.processRowDatasToDisplay(rowDatas);
         // JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
 
         Ok(CommandExecResult::SelectResult(values))
@@ -68,10 +75,10 @@ impl<'session> CommandExecutor<'session> {
             let relationDatas: Vec<(DataKey, RowData)> = {
                 let relation = self.getTableRefByName(select.relationName.as_ref().unwrap())?;
                 let relationDatas =
-                    self.scanSatisfiedRows::<Box<dyn RowChecker>>(relation.value(),
-                                                                  select.relationFliterExpr.as_ref(),
-                                                                  select.relationColumnNames.as_ref(),
-                                                                  true, None)?;
+                    self.scanSatisfiedRows(relation.value(),
+                                           select.relationFliterExpr.as_ref(),
+                                           select.relationColumnNames.as_ref(),
+                                           true, ScanHooks::default())?;
                 relationDatas.into_iter().map(|(dataKey, rowData)| (dataKey, rowData)).collect()
             };
 
@@ -81,16 +88,11 @@ impl<'session> CommandExecutor<'session> {
             let mut destKeysInCurrentSelect = vec![];
 
             let srcTable = self.getTableRefByName(&select.srcTableName)?;
-            // let srcColFamily = self.session.getColFamily(select.srcTableName.as_str())?;
-            // let mut rawIteratorSrc = self.session.dataStore.raw_iterator_cf(&srcColFamily);
-
             let destTable = self.getTableRefByName(select.destTableName.as_ref().unwrap())?;
-            // let destColFamily = self.session.getColFamily(select.destTableName.as_ref().unwrap())?;
-            // let mut rawIteratorDest = self.session.dataStore.raw_iterator_cf(&destColFamily);
 
             let relColFamily = self.session.getColFamily(select.relationName.as_ref().unwrap())?;
             let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
-            let mutationsOnTableCurrentTx = tableName_mutationsOnTable.get(select.relationName.as_ref().unwrap());
+            let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(select.relationName.as_ref().unwrap());
 
             // 遍历当前的select的多个relation
             'loopRelationData:
@@ -108,29 +110,19 @@ impl<'session> CommandExecutor<'session> {
                                                  Some(CommandExecutor::checkCommittedPointerVisiWithTxMutations))?;
 
                         // todo 应对当前tx上 新增的 当前rel 指向 端点的pointerKey 完成
-                        if let Some(mutationsOnTableCurrentTx) = mutationsOnTableCurrentTx {
-                            let addedRelPointerKeyCurrentTxRange =
-                                mutationsOnTableCurrentTx.range::<Vec<Byte>, RangeFrom<&Vec<Byte>>>(&pointerKeyPrefixBuffer.to_vec()..);
-
-                            for (addedRelPointerKeyCurrentTx, _) in addedRelPointerKeyCurrentTxRange {
-                                // 因为右边的是未限制的 需要手动
-                                if addedRelPointerKeyCurrentTx.starts_with(pointerKeyPrefixBuffer.as_ref()) == false {
-                                    break;
-                                }
-
-                                // todo mutation要去掉delete的提升速度
-                                if self.checkUncommittedPointerVisi(&mutationsOnTableCurrentTx,
-                                                                    &mut pointerKeyPrefixBuffer,
-                                                                    addedRelPointerKeyCurrentTx)? {
-                                    pointerKeys.push(addedRelPointerKeyCurrentTx.clone().into_boxed_slice());
-                                }
-                            }
+                        if let Some(tableMutations) = tableMutations {
+                            self.searchUncommittedPointerKeys(tableMutations,
+                                                              &pointerKeyPrefixBuffer.to_vec(),
+                                                              &mut pointerKeyPrefixBuffer,
+                                                              |satisfiedPointerKey| {
+                                                                  pointerKeys.push(satisfiedPointerKey.clone().into_boxed_slice());
+                                                                  Ok(true)
+                                                              })?;
                         }
 
                         let targetDataKeys = pointerKeys.into_iter().map(|pointerKey| extractTargetDataKeyFromPointerKey!(&*pointerKey)).collect::<Vec<DataKey>>();
 
                         // todo 不知道要不要dedup
-
                         anyhow::Result::<Vec<DataKey>>::Ok(targetDataKeys)
                     };
 
@@ -285,7 +277,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(CommandExecResult::SelectResult(valueVec))
     }
 
-    /// select user(id >1 ) as user0 ,in usage (number = 7) ,end in own(number =7)
+    /// select user(id = 1 ) as user0 ,in usage (number = 7) ,end in own(number =7)
     fn selectTableUnderRels(&self, selectTableUnderRels: &SelectTableUnderRels) -> Result<CommandExecResult> {
         // 先要以普通select table体系筛选 然后对pointerKey筛选
         let table = self.getTableRefByName(selectTableUnderRels.selectTable.tableName.as_str())?;
@@ -296,84 +288,164 @@ impl<'session> CommandExecutor<'session> {
         let mut dbRawIteratorInner: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
 
         let tableName_mutations = self.session.tableName_mutations.borrow();
-        let tableMutationsCurrentTx = tableName_mutations.get(&table.name);
+        let tableMutations: Option<&TableMutations> = tableName_mutations.get(&table.name);
 
-        // 确认当前的data是不是满足在各个rel上的位置
-        let rowChecker =
-            |commandExecutor: &CommandExecutor, columnFamily: &ColumnFamily, dataKey: DataKey| {
-                let mut buffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+        let mut buffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
 
-                'loopRelDesc:
-                for relDesc in &selectTableUnderRels.relDescVec {
-                    let relation = self.getTableRefByName(relDesc.relationName.as_str())?;
+        // true说明 能满足relDesc
+        // 返回false 是
+        let mut processRelDesc =
+            |dataKey: DataKey, pointerKeyTag: KeyTag, relDesc: &RelDesc, relation: &Table| {
+                // 如果是起点的话 那么rel便是它的downstream
+                // 搜寻满足和当前table data的相互地位的rel的data 遍历的是rel
+                buffer.writePointerKeyLeadingPart(dataKey, pointerKeyTag, relation.tableId);
 
-                    // assemble 相应的pointerKey
-                    match relDesc.endPointType {
-                        EndPointType::Start => {
-                            // 如果是起点的话 那么rel便是它的downstream
-                            // 搜寻满足和当前table data的相互地位的rel的data 遍历的是rel
-                            buffer.writePointerKeyLeadingPart(dataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation.tableId);
+                let pointerKeyPrefix = buffer.to_vec();
 
-                            // 到本columnFamily上scan 相应的pointerKey
-                            dbRawIterator.seek(buffer.as_ref());
+                // 到本columnFamily上scan 相应的pointerKey
+                dbRawIterator.seek(&pointerKeyPrefix);
 
-                            // 遍历table和rel对应的全部pointerKey 要是有符合的设置true然后break
-                            loop {
-                                // 到了family末尾 || 到了设置的bound末尾
-                                if let None = dbRawIterator.key() {
-                                    break;
-                                }
+                // 遍历table和rel对应的全部pointerKey 要是有符合的设置true然后break
+                loop {
+                    // 到了family末尾 || 到了设置的bound末尾
+                    if let None = dbRawIterator.key() {
+                        break;
+                    }
 
-                                let pointerKey = dbRawIterator.key().unwrap();
+                    let pointerKey = dbRawIterator.key().unwrap();
 
-                                // 需要手动来确保不越界
-                                if pointerKey.starts_with(buffer.as_ref()) == false {
-                                    break;
-                                }
+                    // 需要手动来确保不越界
+                    if pointerKey.starts_with(pointerKeyPrefix.as_ref()) == false {
+                        break;
+                    }
 
-                                // 应对mvcc的visible
-                                // 该函数会筛掉xmin
-                                if self.checkCommittedPointerVisiWithoutTxMutations(&mut buffer, &mut dbRawIteratorInner, pointerKey)? == false {
-                                    dbRawIterator.next();
-                                    continue;
-                                }
-                                if let Some(tableMutationsCurrentTx) = tableMutationsCurrentTx {
-                                    if self.checkCommittedPointerVisiWithTxMutations(tableMutationsCurrentTx, &mut buffer, pointerKey)? == false {
-                                        dbRawIterator.next();
-                                        continue;
-                                    }
-                                }
+                    // 下边的套路和selectRels的有点类似 也可以说是相反的
+                    // 都是查询pointerKey 然后经历pointerKet的mvcc检测
+                    // 然后去通过 filter过滤 得到pointer只想的数据
+                    // selectRels 的是 rel上的 pointerKey 跳到 table 上 然后通过filter筛选
+                    // 本函数是 table 上的pointerKey 跳到 rel 上 然后通过filter筛选
 
-                                // 对rel的data本身筛选
-                                let relationDataKey = extractTargetDataKeyFromPointerKey!(pointerKey);
-                                // 因为getRowDatasByDataKeys()能够筛选mvcc relationFliter是none也要调用
-                                if self.getRowDatasByDataKeys(&[relationDataKey],
-                                                              relation.value(),
-                                                              relDesc.relationFliter.as_ref(),
-                                                              None)?.len() > 0 {
-                                    continue 'loopRelDesc;
-                                }
-                            }
-
-                            // 到了这边说明上边都未通过,需要看看mutations上有没有的
-
-                            return Ok(false);
+                    // pointerKey应对mvcc的visible
+                    // 该函数会筛掉xmin
+                    if self.checkCommittedPointerVisiWithoutTxMutations(&mut buffer, &mut dbRawIteratorInner, pointerKey)? == false {
+                        dbRawIterator.next();
+                        continue;
+                    }
+                    if let Some(tableMutations) = tableMutations {
+                        if self.checkCommittedPointerVisiWithTxMutations(tableMutations, &mut buffer, pointerKey)? == false {
+                            dbRawIterator.next();
+                            continue;
                         }
-                        EndPointType::End => {}
-                        EndPointType::Either => {}
+                    }
+
+                    // 对rel的data本身筛选
+                    let relationDataKey = extractTargetDataKeyFromPointerKey!(pointerKey);
+
+                    // 因为getRowDatasByDataKeys()能够筛选mvcc relationFliter是none也要调用
+                    if self.getRowDatasByDataKeys(&[relationDataKey],
+                                                  relation,
+                                                  relDesc.relationFliter.as_ref(),
+                                                  None)?.len() > 0 {
+                        return Result::<bool>::Ok(true);
                     }
                 }
 
-                Ok(true)
+                let mut found = false;
+
+                // 到了这边说明上边都未通过,需要看看mutations上有没有的
+                if let Some(tableMutations) = tableMutations {
+                    self.searchUncommittedPointerKeys(tableMutations, &pointerKeyPrefix, &mut buffer,
+                                                      |addedPointerKey| {
+                                                          // 不要忘了对rel的data本身筛选
+                                                          let relationDataKey = extractTargetDataKeyFromPointerKey!(addedPointerKey);
+                                                          if self.getRowDatasByDataKeys(&[relationDataKey],
+                                                                                        relation,
+                                                                                        relDesc.relationFliter.as_ref(),
+                                                                                        None)?.len() > 0 {
+                                                              found = true;
+                                                              Ok(false) // 让外边的循环不要继续了
+                                                          } else {
+                                                              Ok(true)
+                                                          }
+                                                      })?;
+                }
+
+                anyhow::Result::<bool>::Ok(found)
             };
+
+        // 确认当前的data是不是满足在各个rel上的位置
+        let rowChecker =
+            |columnFamily: &ColumnFamily, dataKey: DataKey| {
+                'loopRelDesc:
+                // 遍历relDesc,看data是不是都能满足
+                for relDesc in &selectTableUnderRels.relDescVec {
+                    let relation = self.getTableRefByName(relDesc.relationName.as_str())?;
+
+                    // 是不是能满足当前relDesc要求
+                    let satisfyRelDesc =
+                        match relDesc.endPointType {
+                            // 闭包里边镶嵌闭包
+                            EndPointType::Start => processRelDesc(dataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relDesc, relation.value())?,
+                            EndPointType::End => processRelDesc(dataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relDesc, relation.value())?,
+                            EndPointType::Either => {
+                                processRelDesc(dataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relDesc, relation.value())? ||
+                                    processRelDesc(dataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relDesc, relation.value())?
+                            }
+                        };
+
+                    if satisfyRelDesc == false {
+                        return Result::<bool>::Ok(false);
+                    }
+                }
+
+                Result::<bool>::Ok(true)
+            };
+
+        let scanHooks = ScanHooks {
+            scanCommittedPreProcessor: Some(rowChecker),
+            scanCommittedPostProcessor: Option::<Box<dyn ScanCommittedPostProcessor>>::None,
+            scanUncommittedPreProcessor: Option::<Box<dyn ScanUncommittedPreProcessor>>::None,
+            scanUncommittedPostProcessor: Option::<Box<dyn ScanUncommittedPostProcessor>>::None,
+        };
 
         let rowDatas =
             self.scanSatisfiedRows(table.value(),
                                    selectTableUnderRels.selectTable.tableFilterExpr.as_ref(),
                                    selectTableUnderRels.selectTable.selectedColNames.as_ref(),
-                                   true,
-                                   Some(rowChecker))?;
+                                   true, scanHooks)?;
 
-        panic!()
+        let values = self.processRowDatasToDisplay(rowDatas);
+
+        Ok(CommandExecResult::SelectResult(values))
+    }
+
+    /// 闭包要是返回false 是 return
+    fn searchUncommittedPointerKeys<F>(&self,
+                                       tableMutations: &TableMutations,
+                                       prefix: &Vec<Byte>,
+                                       buffer: &mut BytesMut,
+                                       mut action: F) -> Result<()> where F: FnMut(&Vec<Byte>) -> Result<bool> {
+        let addedPointerKeyRange = tableMutations.range::<Vec<Byte>, RangeFrom<&Vec<Byte>>>(prefix..);
+
+        for (addedPointerKey, _) in addedPointerKeyRange {
+            // 因为右边的是未限制的 需要手动
+            if addedPointerKey.starts_with(prefix) == false {
+                break;
+            }
+
+            // todo mutation要去掉delete的提升速度
+            if self.checkUncommittedPointerVisi(&tableMutations, buffer, addedPointerKey)? {
+                if action(addedPointerKey)? == false {
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn processRowDatasToDisplay(&self, rowDatas: Vec<(DataKey, RowData)>) -> Vec<Value> {
+        let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(_, rowData)| rowData).collect();
+        JSON_ENUM_UNTAGGED!(rowDatas.into_iter().map(|rowData| serde_json::to_value(&rowData).unwrap()).collect())
     }
 }

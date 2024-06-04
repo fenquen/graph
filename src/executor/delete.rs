@@ -2,7 +2,8 @@ use bytes::BytesMut;
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::{meta, types};
 use crate::parser::command::delete::Delete;
-use types::RowChecker;
+use types::ScanCommittedPreProcessor;
+use crate::executor::store::ScanHooks;
 
 impl<'session> CommandExecutor<'session> {
     // todo rel不能直接delete 应该先把rel上的点全都取消 rel不存在src和dest的点 然后
@@ -10,7 +11,10 @@ impl<'session> CommandExecutor<'session> {
     pub(super) fn delete(&self, delete: &Delete) -> anyhow::Result<CommandExecResult> {
         let pairs = {
             let table = self.getTableRefByName(delete.tableName.as_str())?;
-            self.scanSatisfiedRows::<Box<dyn RowChecker>>(table.value(), delete.filterExpr.as_ref(), None, true, None)?
+            self.scanSatisfiedRows(table.value(),
+                                   delete.filterExpr.as_ref(),
+                                   None, true,
+                                   ScanHooks::default())?
         };
 
         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);

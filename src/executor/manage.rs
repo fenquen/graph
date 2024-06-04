@@ -14,9 +14,9 @@ impl<'session> CommandExecutor<'session> {
         Ok(CommandExecResult::None)
     }
 
-    pub(in crate::executor) fn set(&mut self, set: Set) -> Result<CommandExecResult> {
+    pub(in crate::executor) fn set(&mut self, set: &Set) -> Result<CommandExecResult> {
         match set {
-            Set::SetAutoCommit(b) => self.session.setAutoCommit(b)?,
+            Set::SetAutoCommit(b) => self.session.setAutoCommit(*b)?,
             _ => throw!(&format!("{:?} not supported", set))
         }
 

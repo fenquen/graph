@@ -4,13 +4,38 @@ use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, global, meta, throw, u64ToByteArrRef};
+use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, global, meta, throw, types, u64ToByteArrRef};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, RowChecker};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData,
+                   ScanCommittedPreProcessor, ScanCommittedPostProcessor,
+                   ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
+use anyhow::Result;
+
+pub(super) struct ScanHooks<A, B, C, D> where A: ScanCommittedPreProcessor,
+                                              B: ScanCommittedPostProcessor,
+                                              C: ScanUncommittedPreProcessor,
+                                              D: ScanUncommittedPostProcessor {
+    pub(super) scanCommittedPreProcessor: Option<A>,
+    pub(super) scanCommittedPostProcessor: Option<B>,
+    pub(super) scanUncommittedPreProcessor: Option<C>,
+    pub(super) scanUncommittedPostProcessor: Option<D>,
+}
+
+impl  Default for ScanHooks<Box<dyn ScanCommittedPreProcessor>, Box<dyn ScanCommittedPostProcessor>, Box<dyn ScanUncommittedPreProcessor>, Box<dyn ScanUncommittedPostProcessor>> {
+    fn default() -> Self {
+        ScanHooks {
+            scanCommittedPreProcessor: None,
+            scanCommittedPostProcessor: None,
+            scanUncommittedPreProcessor: None,
+            scanUncommittedPostProcessor: None,
+        }
+    }
+}
+
 
 impl<'session> CommandExecutor<'session> {
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
@@ -18,7 +43,7 @@ impl<'session> CommandExecutor<'session> {
                                         dataKeys: &[DataKey],
                                         table: &Table,
                                         tableFilter: Option<&Expr>,
-                                        selectedColNames: Option<&Vec<String>>) -> anyhow::Result<Vec<(DataKey, RowData)>> {
+                                        selectedColNames: Option<&Vec<String>>) -> Result<Vec<(DataKey, RowData)>> {
         let mut rowDatas = Vec::with_capacity(dataKeys.len());
 
         let columnFamily = self.session.getColFamily(&table.name)?;
@@ -30,7 +55,7 @@ impl<'session> CommandExecutor<'session> {
         let mutationsRawCurrentTx = tableName_mutationsOnTable.get(&table.name);
 
         let mut process =
-            |dataKey: DataKey| -> anyhow::Result<()> {
+            |dataKey: DataKey| -> Result<()> {
                 // todo getRowDatasByDataKeys() 也要mvcc筛选 完成
                 // mvcc的visibility筛选
                 if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
@@ -75,13 +100,18 @@ impl<'session> CommandExecutor<'session> {
     }
 
     // todo 实现 index
-    pub(super) fn scanSatisfiedRows<F: RowChecker>(&self,
-                                                   table: &Table,
-                                                   tableFilter: Option<&Expr>,
-                                                   selectedColumnNames: Option<&Vec<String>>,
-                                                   select: bool,
-                                                   // 如果传递的是fn()的话(不是Fn)是函数指针而不是闭包 不能和上下文有联系
-                                                   mut rowChecker: Option<F>) -> anyhow::Result<Vec<(DataKey, RowData)>> {
+    // 如果传递的是fn()的话(不是Fn)是函数指针而不是闭包 不能和上下文有联系
+    /// 闭包返回false 是 continue
+    pub(super) fn scanSatisfiedRows<A, B, C, D>(&self, table: &Table,
+                                                tableFilter: Option<&Expr>,
+                                                selectedColumnNames: Option<&Vec<String>>,
+                                                select: bool,
+                                                mut scanHooks: ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
+        where A: ScanCommittedPreProcessor,
+              B: ScanCommittedPostProcessor,
+              C: ScanUncommittedPreProcessor,
+              D: ScanUncommittedPostProcessor {
+
         // todo 使用table id 为 column family 标识
         let columnFamily = self.session.getColFamily(&table.name)?;
 
@@ -110,11 +140,6 @@ impl<'session> CommandExecutor<'session> {
 
                     let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
 
-                    if let Some(ref mut rowChecker) = rowChecker {
-                        if rowChecker(self, &columnFamily, dataKey)? == false {
-                            continue;
-                        }
-                    }
 
                     // mvcc的visibility筛选
                     if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
@@ -134,8 +159,20 @@ impl<'session> CommandExecutor<'session> {
                         }
                     }
 
+                    if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
+                        if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
+                            continue;
+                        }
+                    }
+
                     // mvcc筛选过了 对rowData本身的筛选
                     if let Some(rowData) = self.readRowDataBinary(table, &*rowDataBinary, tableFilter, selectedColumnNames)? {
+                        if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
+                            if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
+                                continue;
+                            }
+                        }
+
                         satisfiedRows.push((dataKey, rowData));
                     }
                 }
@@ -168,6 +205,7 @@ impl<'session> CommandExecutor<'session> {
             };
 
         // todo scan的时候要是当前tx有add的话 也要收录 完成
+        // todo scan的时候也要设置pre和after的钩子函数
         if let Some(tableMutationsCurrentTx) = tableMutationsCurrentTx {
             let addedDataCurrentTxRange =
                 tableMutationsCurrentTx.range::<Vec<Byte>, Range<&Vec<Byte>>>(&*meta::DATA_KEY_PATTERN_VEC..&*meta::POINTER_KEY_PATTERN_VEC);
@@ -179,7 +217,19 @@ impl<'session> CommandExecutor<'session> {
                     continue;
                 }
 
+                if let Some(ref mut scanUncommittedPreProcessor) = scanHooks.scanUncommittedPreProcessor {
+                    if scanUncommittedPreProcessor(tableMutationsCurrentTx, addedDataKeyCurrentTx)? == false {
+                        continue;
+                    }
+                }
+
                 if let Some(rowData) = self.readRowDataBinary(table, addRowDataBinaryCurrentTx, tableFilter, selectedColumnNames)? {
+                    if let Some(ref mut scanUncommittedPostProcessor) = scanHooks.scanUncommittedPostProcessor {
+                        if scanUncommittedPostProcessor(tableMutationsCurrentTx, addedDataKeyCurrentTx, &rowData)? == false {
+                            continue;
+                        }
+                    }
+
                     satisfiedRows.push((addedDataKeyCurrentTx, rowData));
                 }
             }
@@ -271,7 +321,10 @@ impl<'session> CommandExecutor<'session> {
             // 说明column未写全 需要确认absent的是不是都是nullable
             if insert.columnNames.len() != table.columns.len() {
                 let columnNames = insert.columnNames.clone();
-                let absentColumns: Vec<&Column> = collectionMinus0(&table.columns, &columnNames, |column, columnName| { &column.name == columnName });
+                let absentColumns: Vec<&Column> =
+                    collectionMinus0(&table.columns,
+                                     &columnNames,
+                                     |column, columnName| { &column.name == columnName });
                 for absentColumn in absentColumns {
                     if absentColumn.nullable {
                         insert.columnNames.push(absentColumn.name.clone());
@@ -347,11 +400,11 @@ impl<'session> CommandExecutor<'session> {
                                   filterWithoutMutation: Option<fn(&CommandExecutor<'session>,
                                                                    pointerKeyBuffer: &mut BytesMut,
                                                                    rawIterator: &mut DBRawIterator,
-                                                                   pointerKey: &[Byte]) -> anyhow::Result<bool>>,
+                                                                   pointerKey: &[Byte]) -> Result<bool>>,
                                   filterWithMutation: Option<fn(&CommandExecutor<'session>,
                                                                 mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
                                                                 pointerKeyBuffer: &mut BytesMut,
-                                                                pointerKey: &[Byte]) -> anyhow::Result<bool>>) -> anyhow::Result<Vec<Box<[Byte]>>> {
+                                                                pointerKey: &[Byte]) -> Result<bool>>) -> Result<Vec<Box<[Byte]>>> {
         let mut keys = Vec::new();
 
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
@@ -388,3 +441,8 @@ impl<'session> CommandExecutor<'session> {
         Ok(keys)
     }
 }
+
+
+
+
+

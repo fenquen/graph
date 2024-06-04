@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use rocksdb::{BoundColumnFamily, DBIteratorWithThreadMode, DBRawIteratorWithThreadMode,
               DBWithThreadMode, MultiThreaded, SnapshotWithThreadMode};
@@ -32,4 +32,9 @@ pub type KV = (Vec<Byte>, Vec<Byte>);
 
 pub type RowData = HashMap<String, GraphValue>;
 
-pub trait RowChecker = FnMut(&CommandExecutor, &ColumnFamily, DataKey) -> anyhow::Result<bool>;
+pub trait ScanCommittedPreProcessor = FnMut(&ColumnFamily, DataKey) -> anyhow::Result<bool>;
+pub trait ScanCommittedPostProcessor = FnMut(&ColumnFamily, DataKey, &RowData) -> anyhow::Result<bool>;
+pub trait ScanUncommittedPreProcessor = FnMut(&TableMutations, DataKey) -> anyhow::Result<bool>;
+pub trait ScanUncommittedPostProcessor = FnMut(&TableMutations, DataKey, &RowData) -> anyhow::Result<bool>;
+
+pub type TableMutations = BTreeMap<Vec<Byte>, Vec<Byte>>;

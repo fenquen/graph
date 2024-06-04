@@ -403,20 +403,24 @@ pub fn init() -> Result<()> {
         // 到last条目而不是末尾 不用去调用prev()
         rawIterator.seek_to_last();
 
-        if let Some(key) = rawIterator.key() {
-            // todo latest的txId需要还原 完成
-            // 应对的记录txId的column family
-            // 读取last的key对应的latest的tx id
-            if tableName == COLUMN_FAMILY_NAME_TX_ID {
+        // todo latest的txId需要还原 完成
+        match (rawIterator.key(), tableName.as_str()) {
+            (Some(key), COLUMN_FAMILY_NAME_TX_ID) => {
                 let lastTxId = byte_slice_to_u64!(key);
 
                 TX_ID_START_UP.set(lastTxId);
                 TX_ID_COUNTER.store(lastTxId + 1, Ordering::Release);
-            } else {
-                // 严格意义上应该只要dataKey的部分
-                // 不过现在这样的话也是可以的,因为不管是什么key它的后60bit都是rowId
-                let lastRowId = byte_slice_to_u64!(key);
+            }
+            (Some(key), _) => {
+                let lastRowId = extractRowIdFromKeySlice!(key);
                 TABLE_NAME_TABLE.get_mut(tableName.as_str()).unwrap().rowIdCounter.store(lastRowId + 1, Ordering::Release);
+            }
+            (None, COLUMN_FAMILY_NAME_TX_ID) => {
+                TX_ID_START_UP.set(TX_ID_MIN - 1);
+                TX_ID_COUNTER.store(TX_ID_MIN, Ordering::Release);
+            }
+            (None, _) => {
+                TABLE_NAME_TABLE.get_mut(tableName.as_str()).unwrap().rowIdCounter.store(ROW_ID_MIN, Ordering::Release);
             }
         }
     }
