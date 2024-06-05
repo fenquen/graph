@@ -81,7 +81,6 @@ impl<'session> CommandExecutor<'session> {
                 Command::Commit => self.commit()?,
                 Command::Rollback => self.rollback()?,
                 Command::Set(set) => self.set(set)?,
-                _ => panic!()
             };
 
             // 如何应对多个的select
@@ -112,6 +111,12 @@ impl<'session> CommandExecutor<'session> {
     }
 }
 
+
+pub enum IterationCmd {
+    Break,
+    Continue,
+    Return,
+}
 
 #[cfg(test)]
 mod test {

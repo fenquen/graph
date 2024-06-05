@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
-use std::ops::Range;
+use std::ops::{Range, RangeFrom};
 use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
-use crate::executor::{CommandExecutor};
+use crate::executor::{CommandExecutor, IterationCmd};
 use crate::expr::Expr;
 use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, global, meta, throw, types, u64ToByteArrRef};
 use crate::codec::{BinaryCodec, MyBytes};
@@ -10,22 +10,26 @@ use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData,
-                   ScanCommittedPreProcessor, ScanCommittedPostProcessor,
-                   ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations,
+                   ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
 use anyhow::Result;
+use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
 pub(super) struct ScanHooks<A, B, C, D> where A: ScanCommittedPreProcessor,
                                               B: ScanCommittedPostProcessor,
                                               C: ScanUncommittedPreProcessor,
                                               D: ScanUncommittedPostProcessor {
+    /// 融合filter读取到committed RowData 前
     pub(super) scanCommittedPreProcessor: Option<A>,
+    /// 融合filter读取到committed RowData 后
     pub(super) scanCommittedPostProcessor: Option<B>,
+    /// 融合filter读取到uncommitted RowData 前
     pub(super) scanUncommittedPreProcessor: Option<C>,
+    /// 融合filter读取到uncommitted RowData 后
     pub(super) scanUncommittedPostProcessor: Option<D>,
 }
 
-impl  Default for ScanHooks<Box<dyn ScanCommittedPreProcessor>, Box<dyn ScanCommittedPostProcessor>, Box<dyn ScanUncommittedPreProcessor>, Box<dyn ScanUncommittedPostProcessor>> {
+impl Default for ScanHooks<Box<dyn ScanCommittedPreProcessor>, Box<dyn ScanCommittedPostProcessor>, Box<dyn ScanUncommittedPreProcessor>, Box<dyn ScanUncommittedPostProcessor>> {
     fn default() -> Self {
         ScanHooks {
             scanCommittedPreProcessor: None,
@@ -36,6 +40,20 @@ impl  Default for ScanHooks<Box<dyn ScanCommittedPreProcessor>, Box<dyn ScanComm
     }
 }
 
+pub struct SearchPointerKeyHooks<A, B> where A: CommittedPointerKeyProcessor,
+                                             B: UncommittedPointerKeyProcessor {
+    pub(super) committedPointerKeyProcessor: Option<A>,
+    pub(super) uncommittedPointerKeyProcessor: Option<B>,
+}
+
+impl Default for SearchPointerKeyHooks<Box<dyn CommittedPointerKeyProcessor>, Box<dyn UncommittedPointerKeyProcessor>> {
+    fn default() -> Self {
+        SearchPointerKeyHooks {
+            committedPointerKeyProcessor: None,
+            uncommittedPointerKeyProcessor: None,
+        }
+    }
+}
 
 impl<'session> CommandExecutor<'session> {
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
@@ -52,10 +70,25 @@ impl<'session> CommandExecutor<'session> {
         let mut rawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
 
         let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
-        let mutationsRawCurrentTx = tableName_mutationsOnTable.get(&table.name);
+        let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(&table.name);
 
         let mut process =
             |dataKey: DataKey| -> Result<()> {
+                // todo getRowDatasByDataKeys 增加对uncommitted的区域的搜索
+                // 习惯的套路就和scan函数里边1样 都是先搜索committed然后是uncommitted 这对scan来说是可以的
+                // 对这边的直接通过datakey获取有点不合适了 搜索uncommitted逻辑要到前边,要是有的话可以提前return
+                if let Some(tableMutations) = tableMutations {
+                    if self.checkUncommittedDataVisibility(tableMutations, mvccKeyBuffer, dataKey)? {
+                        // 是不是不会是none
+                        if let Some(addedValueBinary) = tableMutations.get(u64ToByteArrRef!(dataKey).as_ref()) {
+                            if let Some(rowData) = self.readRowDataBinary(table, addedValueBinary.as_slice(), tableFilter, selectedColNames)? {
+                                rowDatas.push((dataKey, rowData));
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+
                 // todo getRowDatasByDataKeys() 也要mvcc筛选 完成
                 // mvcc的visibility筛选
                 if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
@@ -66,8 +99,8 @@ impl<'session> CommandExecutor<'session> {
                     return Ok(());
                 }
 
-                if let Some(mutationsRawCurrentTx) = mutationsRawCurrentTx {
-                    if self.checkCommittedDataVisibilityWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
+                if let Some(tableMutations) = tableMutations {
+                    if self.checkCommittedDataVisibilityWithTxMutations(tableMutations, &mut mvccKeyBuffer, dataKey)? == false {
                         return Ok(());
                     }
                 }
@@ -100,8 +133,8 @@ impl<'session> CommandExecutor<'session> {
     }
 
     // todo 实现 index
-    // 如果传递的是fn()的话(不是Fn)是函数指针而不是闭包 不能和上下文有联系
-    /// 闭包返回false 是 continue
+    // 如果传递的是fn()的话(不是Fn)是函数指针而不是闭包 不能和上下文有联系 闭包返回false 那么 continue
+    /// 目前用到hook的地点有 update selectTableUnderRels
     pub(super) fn scanSatisfiedRows<A, B, C, D>(&self, table: &Table,
                                                 tableFilter: Option<&Expr>,
                                                 selectedColumnNames: Option<&Vec<String>>,
@@ -116,7 +149,7 @@ impl<'session> CommandExecutor<'session> {
         let columnFamily = self.session.getColFamily(&table.name)?;
 
         let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
-        let tableMutationsCurrentTx = tableName_mutationsOnTable.get(&table.name);
+        let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(&table.name);
 
         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
 
@@ -204,8 +237,8 @@ impl<'session> CommandExecutor<'session> {
                 }
             };
 
-        // todo scan的时候要是当前tx有add的话 也要收录 完成
-        // todo scan的时候也要设置pre和after的钩子函数
+        // todo scan的时候要搜索uncommitted 完成
+        // todo scan的时候也要设置pre和after的钩子函数 完成
         if let Some(tableMutationsCurrentTx) = tableMutationsCurrentTx {
             let addedDataCurrentTxRange =
                 tableMutationsCurrentTx.range::<Vec<Byte>, Range<&Vec<Byte>>>(&*meta::DATA_KEY_PATTERN_VEC..&*meta::POINTER_KEY_PATTERN_VEC);
@@ -392,50 +425,76 @@ impl<'session> CommandExecutor<'session> {
         Ok(destByteSlice.freeze())
     }
 
-    pub(super) fn getKeysByPrefix(&self,
-                                  tableName: &str,
-                                  colFamily: &impl AsColumnFamilyRef,
-                                  prefix: &[Byte],
-                                  // 和上下文有联系的闭包不能使用fn来表示 要使用Fn的tarit表示 fn是函数指针只和入参有联系 它可以用Fn的trait表达
-                                  filterWithoutMutation: Option<fn(&CommandExecutor<'session>,
-                                                                   pointerKeyBuffer: &mut BytesMut,
-                                                                   rawIterator: &mut DBRawIterator,
-                                                                   pointerKey: &[Byte]) -> Result<bool>>,
-                                  filterWithMutation: Option<fn(&CommandExecutor<'session>,
-                                                                mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
-                                                                pointerKeyBuffer: &mut BytesMut,
-                                                                pointerKey: &[Byte]) -> Result<bool>>) -> Result<Vec<Box<[Byte]>>> {
+    // todo 如何去应对重复的pointerKey
+    pub(super) fn searchPointerKeyByPrefix<A, B>(&self,
+                                                 tableName: &str,
+                                                 colFamily: &ColumnFamily,
+                                                 prefix: &[Byte],
+                                                 mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
+        where A: CommittedPointerKeyProcessor,
+              B: UncommittedPointerKeyProcessor {
         let mut keys = Vec::new();
 
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
         let mut rawIterator = self.session.getSnapshot()?.raw_iterator_cf(colFamily) as DBRawIterator;
 
         let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
-        let tableMutationsCurrentTx = tableName_mutationsOnTable.get(tableName);
+        let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(tableName);
 
+        // 应对committed
         for iterResult in self.session.getSnapshot()?.iterator_cf(colFamily, IteratorMode::From(prefix, Direction::Forward)) {
-            let (key, _) = iterResult?;
+            let (committedPointerKey, _) = iterResult?;
 
             // 说明越过了
-            if key.starts_with(prefix) == false {
+            if committedPointerKey.starts_with(prefix) == false {
                 break;
             }
 
-            if let Some(filterWithoutMutation) = filterWithoutMutation.as_ref() {
-                if filterWithoutMutation(self, &mut pointerKeyBuffer, &mut rawIterator, key.as_ref())? == false {
+            if self.checkCommittedPointerVisiWithoutTxMutations(&mut pointerKeyBuffer, &mut rawIterator, committedPointerKey.as_ref())? == false {
+                continue;
+            }
+
+            if let Some(tableMutations) = tableMutations {
+                if self.checkCommittedPointerVisiWithTxMutations(tableMutations, &mut pointerKeyBuffer, committedPointerKey.as_ref())? == false {
                     continue;
                 }
             }
 
-            if let Some(filterWithMutation) = filterWithMutation.as_ref() {
-                if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
-                    if filterWithMutation(self, mutationsRawCurrentTx, &mut pointerKeyBuffer, key.as_ref())? == false {
-                        continue;
-                    }
+            if let Some(ref mut committedPointerKeyProcessor) = searchPointerKeyHooks.committedPointerKeyProcessor {
+                match committedPointerKeyProcessor(colFamily, committedPointerKey.as_ref())? {
+                    IterationCmd::Break => break,
+                    IterationCmd::Continue => continue,
+                    IterationCmd::Return => return Ok(keys),
                 }
             }
 
-            keys.push(key);
+            keys.push(committedPointerKey);
+        }
+
+        // 应对uncommitted
+        if let Some(tableMutations) = tableMutations {
+            let addedPointerKeyRange = tableMutations.range::<Vec<Byte>, RangeFrom<&Vec<Byte>>>(&prefix.to_vec()..);
+
+            for (addedPointerKey, _) in addedPointerKeyRange {
+                // 因为右边的是未限制的 需要手动
+                if addedPointerKey.starts_with(prefix) == false {
+                    break;
+                }
+
+                if self.checkUncommittedPointerVisi(&tableMutations, &mut pointerKeyBuffer, addedPointerKey)? == false {
+                    continue;
+                }
+
+                if let Some(ref mut uncommittedPointerKeyProcessor) = searchPointerKeyHooks.uncommittedPointerKeyProcessor {
+                    match uncommittedPointerKeyProcessor(tableMutations, addedPointerKey)? {
+                        IterationCmd::Break => break,
+                        IterationCmd::Continue => continue,
+                        IterationCmd::Return => return Ok(keys),
+                    }
+                }
+
+                keys.push(addedPointerKey.clone().into_boxed_slice());
+            }
         }
 
         Ok(keys)

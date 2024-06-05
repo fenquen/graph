@@ -12,12 +12,13 @@ use crate::expr::Expr;
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
 use crate::parser::command::update::Update;
-use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, KV, RowData, RowId};
+use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, KV, RowData, RowId, TableMutations};
 use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
+use anyhow::Result;
 
 impl<'session> CommandExecutor<'session> {
     // todo 要是point还有rel的联系不能update 完成
-    pub(super) fn update(&self, update: &Update) -> anyhow::Result<CommandExecResult> {
+    pub(super) fn update(&self, update: &Update) -> Result<CommandExecResult> {
         let table = self.getTableRefByName(update.tableName.as_str())?;
 
         if let TableType::Relation = table.type0 {
@@ -34,28 +35,37 @@ impl<'session> CommandExecutor<'session> {
         };
 
         // 要是data有link的话 通过抛异常来跳出scanSatisfiedRows的循环
-        let testDataHasBeenLinked =
+        let testCommittedDataHasBeenLinked =
             |columnFamily: &ColumnFamily, dataKey: DataKey, rowData: &RowData| {
                 let rowId = extractRowIdFromDataKey!(dataKey);
+
+                // todo pointerKey应该同时到committed和uncommitted去搜索
                 let pointerKeyPrefix = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_POINTER, rowId));
 
                 let mut dbIterator: DBIterator = self.session.getSnapshot()?.iterator_cf(columnFamily, IteratorMode::From(pointerKeyPrefix, Direction::Forward));
                 if let Some(kv) = dbIterator.next() {
                     let (pointerKey, _) = kv?;
-                    // 说明有该data条目对应的pointerKey 应该跳过
+
+                    // 说明有该data条目对应的pointerKey 报错
                     if pointerKey.starts_with(pointerKeyPrefix) {
                         throw!("update can not execute, because data has been linked");
                     }
                 }
 
-                anyhow::Result::<bool>::Ok(true)
+                Result::<bool>::Ok(true)
             };
 
+        let testUncommittedDataHasBeenLinked =
+            |tableMutations: &TableMutations, dataKey: DataKey, rowData: &RowData| {
+                Result::<bool>::Ok(true)
+            };
+
+        // 这里要使用post体系 基于满足普通update的前提
         let scanHooks = ScanHooks {
             scanCommittedPreProcessor: Option::<Box<dyn ScanCommittedPreProcessor>>::None,
-            scanCommittedPostProcessor: Some(testDataHasBeenLinked),
+            scanCommittedPostProcessor: Some(testCommittedDataHasBeenLinked),
             scanUncommittedPreProcessor: Option::<Box<dyn ScanUncommittedPreProcessor>>::None,
-            scanUncommittedPostProcessor: Option::<Box<dyn ScanUncommittedPostProcessor>>::None,
+            scanUncommittedPostProcessor: Some(testUncommittedDataHasBeenLinked),
         };
 
         let mut pairs =
@@ -82,7 +92,7 @@ impl<'session> CommandExecutor<'session> {
                 None => throw!(&format!("table:{} has no column named:{}", update.tableName, columnName)),
             }
 
-            anyhow::Result::<(), GraphError>::Ok(())
+            Result::<(), GraphError>::Ok(())
         };
 
         // todo logical优化

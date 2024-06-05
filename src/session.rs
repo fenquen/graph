@@ -19,13 +19,13 @@ use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
 use tokio::io::AsyncWriteExt;
 use crate::executor::CommandExecutor;
 use crate::parser::command::Command;
-use crate::types::{Byte, ColumnFamily, KV, SelectResultToFront, Snapshot, TxId};
+use crate::types::{Byte, ColumnFamily, KV, SelectResultToFront, Snapshot, TableMutations, TxId};
 
 pub struct Session {
     autoCommit: bool,
     txId: Option<TxId>,
     dataStore: &'static DB,
-    pub tableName_mutations: RefCell<HashMap<String, BTreeMap<Vec<Byte>, Vec<Byte>>>>,
+    pub tableName_mutations: RefCell<HashMap<String, TableMutations>>,
     snapshot: Option<Snapshot<'static>>,
 }
 

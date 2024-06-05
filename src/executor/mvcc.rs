@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::ops::{Index, Range};
 use bytes::{BufMut, BytesMut};
-use crate::{byte_slice_to_u64, extractRowIdFromDataKey, extractTxIdFromMvccKey, extractTxIdFromPointerKey, global,
-            keyPrefixAddRowId, meta, throw, u64ToByteArrRef};
+use crate::{byte_slice_to_u64, extractMvccKeyTagFromPointerKey, extractRowIdFromDataKey, extractTxIdFromMvccKey, extractTxIdFromPointerKey, global, keyPrefixAddRowId, meta, throw, u64ToByteArrRef};
 use crate::executor::CommandExecutor;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, RowId, TableId, TxId};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, RowId, TableId, TableMutations, TxId};
+use anyhow::Result;
 
 impl<'session> CommandExecutor<'session> {
     // 对data对应的mvccKey的visibility筛选
@@ -59,20 +59,20 @@ impl<'session> CommandExecutor<'session> {
     }
 
     pub(super) fn checkCommittedDataVisibilityWithTxMutations(&self,
-                                                              mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                              tableMutations: &TableMutations,
                                                               mvccKeyBuffer: &mut BytesMut,
-                                                              dataKey: DataKey) -> anyhow::Result<bool> {
+                                                              dataKey: DataKey) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 要看落地的有没有被当前的tx上的干掉  只要读取相应的xmax的mvccKey
         // mutationsRawCurrentTx的txId只会是currentTxId
         mvccKeyBuffer.writeDataMvccXmax(dataKey, currentTxId);
 
-        Ok(mutationsRawCurrentTx.get(mvccKeyBuffer.as_ref()).is_none())
+        Ok(tableMutations.get(mvccKeyBuffer.as_ref()).is_none())
     }
 
     pub(super) fn checkUncommittedDataVisibility(&self,
-                                                 mutationsRawCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                 tableMutations: &TableMutations,
                                                  mvccKeyBuffer: &mut BytesMut,
                                                  addedDataKeyCurrentTx: DataKey) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
@@ -81,7 +81,7 @@ impl<'session> CommandExecutor<'session> {
         mvccKeyBuffer.writeDataMvccXmax(addedDataKeyCurrentTx, currentTxId);
 
         // 说明这个当前tx上insert的data 后来又被当前tx的干掉了
-        Ok(mutationsRawCurrentTx.get(mvccKeyBuffer.as_ref()).is_none())
+        Ok(tableMutations.get(mvccKeyBuffer.as_ref()).is_none())
     }
 
     // todo  pointerKey如何应对mvcc 完成
@@ -94,24 +94,12 @@ impl<'session> CommandExecutor<'session> {
 
         const RANGE: Range<usize> = meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET..meta::POINTER_KEY_BYTE_LEN;
 
-        // pointerKey末尾的 mvccKeyTag和txId
-        let pointerKeyTail = committedPointerKey.index(RANGE);
-
         // 读取 mvccKeyTag
-        match *pointerKeyTail.first().unwrap() {
-            // 含有xmin的pointerKey 抛弃掉不要,是没有问题的因为相应的指向信息在xmax的pointerKey也有
-            meta::MVCC_KEY_TAG_XMIN => Ok(false),
-            meta::MVCC_KEY_TAG_XMAX => {
-                let xmax = byte_slice_to_u64!(&pointerKeyTail[1..]) as TxId;
-
-                if currentTxId >= xmax {
-                    if (xmax == meta::TX_ID_INVALID) == false {
-                        return Ok(false);
-                    }
-                }
-
-                // 到了这边说明 满足 xmax == 0 || xmax > currentTxId
-                // 到了这边说明该pointerKey本身单独看是没有问题的 不过还需要联系后边是不是会干掉
+        match extractMvccKeyTagFromPointerKey!(committedPointerKey) {
+            // 含有xmax的pointerKey 抛弃掉不要,是没有问题的因为相应的指向信息在xmin的pointerKey也有,且xmin的只会有1条
+            meta::MVCC_KEY_TAG_XMAX => Ok(false),
+            meta::MVCC_KEY_TAG_XMIN => {
+                // 还需要联系前后后边是不是会干掉
                 // 要是后边还有 currentTxId > xmax 的 就需要应对
 
                 // 生成xmax是currentTxId 的pointerKey
@@ -130,27 +118,35 @@ impl<'session> CommandExecutor<'session> {
     }
 
     pub(super) fn checkCommittedPointerVisiWithTxMutations(&self,
-                                                           tableMutationsCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                                           tableMutations: &TableMutations,
                                                            pointerKeyBuffer: &mut BytesMut,
-                                                           committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
+                                                           committedPointerKey: &[Byte]) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
+
+        // 对committedPointerKey来说,mutations上只可能会有xmax的
+        // 就算有的话也只会有1条
 
         // 要是当前的tx干掉的话会有这样的xmax
         pointerKeyBuffer.replacePointerKeyMcvvTagTxId(committedPointerKey, meta::MVCC_KEY_TAG_XMAX, currentTxId);
 
-        Ok(tableMutationsCurrentTx.get(pointerKeyBuffer.as_ref()).is_none())
+        Ok(tableMutations.get(pointerKeyBuffer.as_ref()).is_none())
     }
 
     pub(super) fn checkUncommittedPointerVisi(&self,
-                                              tableMutationsCurrentTx: &BTreeMap<Vec<Byte>, Vec<Byte>>,
+                                              tableMutations: &TableMutations,
                                               pointerKeyBuffer: &mut BytesMut,
-                                              addedPointerKeyCurrentTx: &[Byte]) -> anyhow::Result<bool> {
+                                              addedPointerKey: &[Byte]) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
-        // 要是当前的tx干掉的话会有这样的xmax
-        pointerKeyBuffer.replacePointerKeyMcvvTagTxId(addedPointerKeyCurrentTx, meta::MVCC_KEY_TAG_XMAX, currentTxId);
+        // 不要xmax的pointerKey
+        if meta::MVCC_KEY_TAG_XMAX == extractMvccKeyTagFromPointerKey!(addedPointerKey) {
+            return Ok(false);
+        }
 
-        Ok(tableMutationsCurrentTx.get(pointerKeyBuffer.as_ref()).is_none())
+        // 要是当前的tx干掉的话会有这样的xmax
+        pointerKeyBuffer.replacePointerKeyMcvvTagTxId(addedPointerKey, meta::MVCC_KEY_TAG_XMAX, currentTxId);
+
+        Ok(tableMutations.get(pointerKeyBuffer.as_ref()).is_none())
     }
 
     /// 当前tx上add时候生成 xmin xmax 对应的mvcc key
