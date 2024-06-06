@@ -198,7 +198,8 @@ select user(id=1 and 0=0) -usage(number > 0) as usage0-> car
 ]
 ```
 
-搜索满足如下的脉络联系: id是1的user && 对car的使用(usage)数量(number) >9 && 相应的car对tyre的拥有(own)数量(number)是1,
+搜索满足如下的脉络联系 <br>
+id是1的user && 对car的使用(usage)数量(number) >9 && 相应的car对tyre的拥有(own)数量(number)是1,
 user只显示id和name
 
 ```text
