@@ -38,6 +38,8 @@ select user(id=1 and 0=0) -usage(number > 0) as usage0-> car
 
 select user(id = 1 ) as user0 ,in usage (number > 7) ,as end in own(number =7)
 
+select user(id = 1) -likes() recursive(1 .. 9]-> user(age > 2)
+
 {
     "requestType": "ExecuteSql",
     "sql": "create table if not exist user (id integer,name string)\ninsert into user values (1,'tom')\ninsert into user values (2,'bob')\ncreate table if not exist car (id integer,color string)\ninsert into car values (34,'red')\ninsert into car values (43,'red')\ncreate table if not exist tyre (id integer, name string)\ninsert into tyre values(7,'stone')\ncreate relation usage (number integer)\ncreate relation own (number integer)\nlink user(id =1) to car(color='red') by usage(number = 12)\nlink user(id =1) to car(id =43) by usage(number = 17)\nlink car (id =34) to tyre(name ='stone') by own(number=1)"
