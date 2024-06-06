@@ -7,13 +7,13 @@ pub struct GraphError {
 
 impl Debug for GraphError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "graph error message:{}", self.message)
+        write!(f, "graph error:{}", self.message)
     }
 }
 
 impl Display for GraphError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "graph error message:{}", self.message)
+        write!(f, "graph error:{}", self.message)
     }
 }
 

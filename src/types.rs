@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound;
 use std::sync::Arc;
 use rocksdb::{BoundColumnFamily, DBIteratorWithThreadMode, DBRawIteratorWithThreadMode,
               DBWithThreadMode, MultiThreaded, SnapshotWithThreadMode};
@@ -37,7 +38,9 @@ pub trait ScanCommittedPostProcessor = FnMut(&ColumnFamily, DataKey, &RowData) -
 pub trait ScanUncommittedPreProcessor = FnMut(&TableMutations, DataKey) -> anyhow::Result<bool>;
 pub trait ScanUncommittedPostProcessor = FnMut(&TableMutations, DataKey, &RowData) -> anyhow::Result<bool>;
 
-pub trait CommittedPointerKeyProcessor = FnMut(&ColumnFamily, &[Byte]) -> anyhow::Result<IterationCmd>;
-pub trait UncommittedPointerKeyProcessor = FnMut(&TableMutations, &[Byte]) -> anyhow::Result<IterationCmd>;
+pub trait CommittedPointerKeyProcessor = FnMut(&ColumnFamily, &[Byte], &[Byte]) -> anyhow::Result<IterationCmd>;
+pub trait UncommittedPointerKeyProcessor = FnMut(&TableMutations, &[Byte], &[Byte]) -> anyhow::Result<IterationCmd>;
 
 pub type TableMutations = BTreeMap<Vec<Byte>, Vec<Byte>>;
+
+pub type RelationDepth = (Bound<usize>, Bound<usize>);

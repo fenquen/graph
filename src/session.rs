@@ -44,7 +44,7 @@ impl Session {
 
         // todo set autocommit 是不需要tx的 如果sql只包含set如何应对
         let mut isPureSetSql = false;
-        for  command in &commands {
+        for command in &commands {
             if let Command::Set(_) = command {
                 isPureSetSql = true;
                 break;
@@ -110,10 +110,13 @@ impl Session {
 
         Ok(())
     }
-    // todo rollback()不要求inTx
+
+    // todo rollback()不要求inTx 完成
     pub fn rollback(&mut self) -> Result<()> {
-        self.needInTx()?;
-        self.clean();
+        if self.notInTx() == false {
+            self.clean();
+        }
+
         Ok(())
     }
 

@@ -10,7 +10,7 @@ pub enum Set {
     SetAutoCommit(bool),
 }
 
-// todo manage体系的命令要通过sql实现
+// todo manage体系的命令要通过sql实现 完成
 impl Parser {
     pub(in crate::parser) fn parseCommit(&self) -> Result<Command> {
         // 只能有commit 后边不能有什么了

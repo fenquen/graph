@@ -30,18 +30,12 @@ impl<'session> CommandExecutor<'session> {
     fn selectTable(&self, selectTable: &SelectTable) -> Result<CommandExecResult> {
         let table = self.getTableRefByName(selectTable.tableName.as_str())?;
 
-        let rowDatas = {
+        let rowDatas =
             self.scanSatisfiedRows(table.value(),
                                    selectTable.tableFilterExpr.as_ref(),
                                    selectTable.selectedColNames.as_ref(),
                                    true,
-                                   ScanHooks {
-                                       scanCommittedPreProcessor: Option::<Box<dyn ScanCommittedPreProcessor>>::None,
-                                       scanCommittedPostProcessor: Option::<Box<dyn crate::types::ScanCommittedPostProcessor>>::None,
-                                       scanUncommittedPreProcessor: Option::<Box<dyn crate::types::ScanUncommittedPreProcessor>>::None,
-                                       scanUncommittedPostProcessor: Option::<Box<dyn crate::types::ScanUncommittedPostProcessor>>::None,
-                                   })?
-        };
+                                   ScanHooks::default())?;
 
         let values: Vec<Value> = self.processRowDatasToDisplay(rowDatas);
         // JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
@@ -50,7 +44,8 @@ impl<'session> CommandExecutor<'session> {
     }
 
     /// graph特色的 rel select
-    fn selectRels(&self, selectVec: &Vec<SelectRel>) -> anyhow::Result<CommandExecResult> {
+    /// ```select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre```
+    fn selectRels(&self, selectVec: &Vec<SelectRel>) -> Result<CommandExecResult> {
         // 对应1个realtion的query的多个条目的1个
         #[derive(Debug)]
         struct SelectResult {
@@ -92,7 +87,6 @@ impl<'session> CommandExecutor<'session> {
             let srcTable = self.getTableRefByName(&select.srcTableName)?;
             let destTable = self.getTableRefByName(select.destTableName.as_ref().unwrap())?;
 
-            let relColFamily = self.session.getColFamily(select.relationName.as_ref().unwrap())?;
 
             // 遍历当前的select的多个relation
             'loopRelationData:
@@ -102,9 +96,8 @@ impl<'session> CommandExecutor<'session> {
                         pointerKeyPrefixBuffer.writePointerKeyLeadingPart(relationDataKey, keyTag, targetTable.tableId);
 
                         // todo selectRels时候如何应对pointerKey的mvcc 完成
-                        let mut pointerKeys =
+                        let pointerKeys =
                             self.searchPointerKeyByPrefix(select.relationName.as_ref().unwrap(),
-                                                          &relColFamily,
                                                           pointerKeyPrefixBuffer.as_ref(),
                                                           SearchPointerKeyHooks::default())?;
 
@@ -268,13 +261,12 @@ impl<'session> CommandExecutor<'session> {
     /// select user(id = 1 ) as user0 ,in usage (number = 7) ,end in own(number =7) <br>
     /// 逻辑如下 <br>
     /// scan(committed uncommitted)满足要求的node数据 <br>
-    /// 搜索(committed uncommitted)属于node的,满足位置要求的,指向relation的pointerKey <br>
+    /// searchPointerKeys得到(committed uncommitted)属于node的,满足位置要求的,指向relation的pointerKey <br>
     /// 到pointerKey提取relation的dataKey <br>
     /// 调用getByDataKeys(committed uncommitted) 融合 对relarion的过滤条件 确定 relation是不是满足
     fn selectTableUnderRels(&self, selectTableUnderRels: &SelectTableUnderRels) -> Result<CommandExecResult> {
         // 先要以普通select table体系筛选 然后对pointerKey筛选
         let table = self.getTableRefByName(selectTableUnderRels.selectTable.tableName.as_str())?;
-        let columnFamily = self.session.getColFamily(table.name.as_str())?;
 
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
 
@@ -291,7 +283,9 @@ impl<'session> CommandExecutor<'session> {
                 let mut found = false;
 
                 // 钩子
-                let pointerKeyProcessor = RefCell::new(
+                // checkTargetRelSatisfy 改变环境变量found 是FnMut 而且下边的searchPointerKeyHooks的会重复使用
+                // 不使用RefCell的话会报错 可变引用不能同时有多个
+                let checkTargetRelSatisfy = RefCell::new(
                     |pointerKey: &[Byte]| {
                         // 对rel的data本身筛选
                         // todo 只是提示 已提交的pointerKey指向的对象必然只是在已提交的区域
@@ -307,19 +301,20 @@ impl<'session> CommandExecutor<'session> {
                             return Result::<IterationCmd>::Ok(IterationCmd::Return);
                         }
 
+                        // 因为调用searchPointerKeyByPrefix不是收集而是看看有没有 使用continue
                         Result::<IterationCmd>::Ok(IterationCmd::Continue)
                     }
                 );
 
-                let serchPointerKeyHooks = SearchPointerKeyHooks {
+                let searchPointerKeyHooks = SearchPointerKeyHooks {
                     committedPointerKeyProcessor: Some(
-                        |columnFamily: &ColumnFamily, committedPointerKey: &[Byte]| {
-                            pointerKeyProcessor.borrow_mut()(committedPointerKey)
+                        |_: &ColumnFamily, committedPointerKey: &[Byte], _: &[Byte]| {
+                            checkTargetRelSatisfy.borrow_mut()(committedPointerKey)
                         }
                     ),
                     uncommittedPointerKeyProcessor: Some(
-                        |tableMutations: &TableMutations, addedPointerKey: &[Byte]| {
-                            pointerKeyProcessor.borrow_mut()(addedPointerKey)
+                        |_: &TableMutations, addedPointerKey: &[Byte], _: &[Byte]| {
+                            checkTargetRelSatisfy.borrow_mut()(addedPointerKey)
                         }
                     ),
                 };
@@ -327,7 +322,7 @@ impl<'session> CommandExecutor<'session> {
                 // 遍历这个node上的通过了测试的指向rel的pointerKey
                 // 通过调用getRowDatasByDataKeys得到pointerKey指向的relation数据
                 // 融合relationFliter确定relation数据是不是满足要求
-                self.searchPointerKeyByPrefix(table.name.as_str(), &columnFamily, &pointerKeyPrefix, serchPointerKeyHooks)?;
+                self.searchPointerKeyByPrefix(table.name.as_str(), &pointerKeyPrefix, searchPointerKeyHooks)?;
 
                 Result::<bool>::Ok(found)
             };
@@ -360,23 +355,21 @@ impl<'session> CommandExecutor<'session> {
             }
         );
 
-        // 确认当前的data是不是满足在各个rel上的位置
-        let scanCommittedPreProcessor =
-            |columnFamily: &ColumnFamily, committedDataKey: DataKey| {
-                processNodeDataKey.borrow_mut()(committedDataKey)
-            };
-
-        // todo uncommitted也要照顾到
-        // 到mutations上去搜索相应的pointerKey的
-        let scanUncommittedPreProcessor =
-            |tableMutations: &TableMutations, addedDatakey: DataKey| {
-                processNodeDataKey.borrow_mut()(addedDatakey)
-            };
-
         let scanHooks = ScanHooks {
-            scanCommittedPreProcessor: Some(scanCommittedPreProcessor),
+            // 确认当前的data是不是满足在各个rel上的位置
+            scanCommittedPreProcessor: Some(
+                |_: &ColumnFamily, committedDataKey: DataKey| {
+                    processNodeDataKey.borrow_mut()(committedDataKey)
+                }
+            ),
             scanCommittedPostProcessor: Option::<Box<dyn ScanCommittedPostProcessor>>::None,
-            scanUncommittedPreProcessor: Some(scanUncommittedPreProcessor),
+            // todo uncommitted也要照顾到 完成
+            // 到mutations上去搜索相应的pointerKey的
+            scanUncommittedPreProcessor: Some(
+                |_: &TableMutations, addedDatakey: DataKey| {
+                    processNodeDataKey.borrow_mut()(addedDatakey)
+                }
+            ),
             scanUncommittedPostProcessor: Option::<Box<dyn ScanUncommittedPostProcessor>>::None,
         };
 

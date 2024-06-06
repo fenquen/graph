@@ -157,12 +157,14 @@ impl<'session> CommandExecutor<'session> {
             if tableFilter.is_some() || select {
                 let mut satisfiedRows = Vec::new();
 
+                let snapshot = self.session.getSnapshot()?;
+
                 // mvcc的visibility筛选
-                let mut rawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
+                let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
 
                 // todo scan遍历能不能concurrent
                 // 对data条目而不是pointer条目遍历
-                for iterResult in self.session.getSnapshot()?.iterator_cf(&columnFamily, IteratorMode::From(meta::DATA_KEY_PATTERN, Direction::Forward)) {
+                for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(meta::DATA_KEY_PATTERN, Direction::Forward)) {
                     let (dataKeyBinary, rowDataBinary) = iterResult?;
 
                     // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
@@ -426,23 +428,24 @@ impl<'session> CommandExecutor<'session> {
     }
 
     // todo 如何去应对重复的pointerKey
-    pub(super) fn searchPointerKeyByPrefix<A, B>(&self,
-                                                 tableName: &str,
-                                                 colFamily: &ColumnFamily,
-                                                 prefix: &[Byte],
+    // todo pointerKey应该同时到committed和uncommitted去搜索
+    pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
         where A: CommittedPointerKeyProcessor,
               B: UncommittedPointerKeyProcessor {
         let mut keys = Vec::new();
 
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
-        let mut rawIterator = self.session.getSnapshot()?.raw_iterator_cf(colFamily) as DBRawIterator;
+
+        let columnFamily = self.session.getColFamily(tableName)?;
+
+        let mut rawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily) as DBRawIterator;
 
         let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
         let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(tableName);
 
         // 应对committed
-        for iterResult in self.session.getSnapshot()?.iterator_cf(colFamily, IteratorMode::From(prefix, Direction::Forward)) {
+        for iterResult in self.session.getSnapshot()?.iterator_cf(&columnFamily, IteratorMode::From(prefix, Direction::Forward)) {
             let (committedPointerKey, _) = iterResult?;
 
             // 说明越过了
@@ -461,7 +464,7 @@ impl<'session> CommandExecutor<'session> {
             }
 
             if let Some(ref mut committedPointerKeyProcessor) = searchPointerKeyHooks.committedPointerKeyProcessor {
-                match committedPointerKeyProcessor(colFamily, committedPointerKey.as_ref())? {
+                match committedPointerKeyProcessor(&columnFamily, committedPointerKey.as_ref(), prefix)? {
                     IterationCmd::Break => break,
                     IterationCmd::Continue => continue,
                     IterationCmd::Return => return Ok(keys),
@@ -486,7 +489,7 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 if let Some(ref mut uncommittedPointerKeyProcessor) = searchPointerKeyHooks.uncommittedPointerKeyProcessor {
-                    match uncommittedPointerKeyProcessor(tableMutations, addedPointerKey)? {
+                    match uncommittedPointerKeyProcessor(tableMutations, addedPointerKey, prefix)? {
                         IterationCmd::Break => break,
                         IterationCmd::Continue => continue,
                         IterationCmd::Return => return Ok(keys),

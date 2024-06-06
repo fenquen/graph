@@ -1,13 +1,14 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use bytes::BytesMut;
 use rocksdb::{Direction, IteratorMode};
-use crate::executor::{CommandExecResult, CommandExecutor};
+use crate::executor::{CommandExecResult, CommandExecutor, IterationCmd};
 use crate::meta::TableType;
 use crate::{extractRowIdFromDataKey, extractRowIdFromKeySlice,
             keyPrefixAddRowId, meta, throw, u64ToByteArrRef, byte_slice_to_u64};
 use crate::codec::BinaryCodec;
-use crate::executor::store::ScanHooks;
+use crate::executor::store::{ScanHooks, SearchPointerKeyHooks};
 use crate::expr::Expr;
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
@@ -34,46 +35,62 @@ impl<'session> CommandExecutor<'session> {
             columnName_column
         };
 
-        // 要是data有link的话 通过抛异常来跳出scanSatisfiedRows的循环
-        let testCommittedDataHasBeenLinked =
-            |columnFamily: &ColumnFamily, dataKey: DataKey, rowData: &RowData| {
-                let rowId = extractRowIdFromDataKey!(dataKey);
 
-                // todo pointerKey应该同时到committed和uncommitted去搜索
-                let pointerKeyPrefix = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_POINTER, rowId));
-
-                let mut dbIterator: DBIterator = self.session.getSnapshot()?.iterator_cf(columnFamily, IteratorMode::From(pointerKeyPrefix, Direction::Forward));
-                if let Some(kv) = dbIterator.next() {
-                    let (pointerKey, _) = kv?;
-
-                    // 说明有该data条目对应的pointerKey 报错
-                    if pointerKey.starts_with(pointerKeyPrefix) {
-                        throw!("update can not execute, because data has been linked");
-                    }
+        // 因不会改变环境的变量 故而是Fn不是FnMut 不需要像selectUnderRels()那样使用 RefCell
+        let checkPointerKeyPrefixedBy =
+            |pointerKey: &[Byte], pointerKeyPrefix: &[Byte]| { // pointerKey是通过了visibility的 包含committed  uncommitted
+                if pointerKey.starts_with(pointerKeyPrefix) {
+                    throw!("update can not execute, because data has been linked");
                 }
 
-                Result::<bool>::Ok(true)
+                // 因为目的不是收集data 故而使用了continue
+                Result::<IterationCmd>::Ok(IterationCmd::Continue)
             };
 
-        let testUncommittedDataHasBeenLinked =
-            |tableMutations: &TableMutations, dataKey: DataKey, rowData: &RowData| {
+        // 要是data有link的话 通过抛异常来跳出scanSatisfiedRows的循环
+        let checkNodeHasBeenLinked =
+            // dataKey 涵盖 committed uncommitted
+            |dataKey: DataKey| {
+                let rowId = extractRowIdFromDataKey!(dataKey);
+                let pointerKeyPrefix = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_POINTER, rowId));
+
+                let searchPointerKeyHooks = SearchPointerKeyHooks {
+                    committedPointerKeyProcessor: Some(
+                        |_: &ColumnFamily, committedPointerKey: &[Byte], pointerKeyPrefix: &[Byte]| {
+                            checkPointerKeyPrefixedBy(committedPointerKey, pointerKeyPrefix)
+                        }
+                    ),
+                    uncommittedPointerKeyProcessor: Some(
+                        |_: &TableMutations, addedPointerKey: &[Byte], pointerKeyPrefix: &[Byte]| {
+                            checkPointerKeyPrefixedBy(addedPointerKey, pointerKeyPrefix)
+                        }
+                    ),
+                };
+
+                self.searchPointerKeyByPrefix(table.name.as_str(), pointerKeyPrefix, searchPointerKeyHooks)?;
+
                 Result::<bool>::Ok(true)
             };
 
         // 这里要使用post体系 基于满足普通update的前提
         let scanHooks = ScanHooks {
             scanCommittedPreProcessor: Option::<Box<dyn ScanCommittedPreProcessor>>::None,
-            scanCommittedPostProcessor: Some(testCommittedDataHasBeenLinked),
+            scanCommittedPostProcessor: Some(
+                |_: &ColumnFamily, committedDataKey: DataKey, _: &RowData| {
+                    checkNodeHasBeenLinked(committedDataKey)
+                }
+            ),
             scanUncommittedPreProcessor: Option::<Box<dyn ScanUncommittedPreProcessor>>::None,
-            scanUncommittedPostProcessor: Some(testUncommittedDataHasBeenLinked),
+            scanUncommittedPostProcessor: Some(
+                |_: &TableMutations, addedDataKey: DataKey, _: &RowData| {
+                    checkNodeHasBeenLinked(addedDataKey)
+                }
+            ),
         };
 
         let mut pairs =
-            self.scanSatisfiedRows(table.value(),
-                                   update.filterExpr.as_ref(),
-                                   None,
-                                   true,
-                                   scanHooks)?;
+            self.scanSatisfiedRows(table.value(), update.filterExpr.as_ref(),
+                                   None, true, scanHooks)?;
 
         enum A<'a> {
             DirectValue(GraphValue),

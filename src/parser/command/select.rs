@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ops::Bound;
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use crate::expr::Expr;
@@ -8,6 +9,8 @@ use crate::parser::command::Command;
 use crate::parser::element::Element;
 use crate::parser::op::{MathCalcOp, Op, SqlOp};
 use crate::parser::Parser;
+use crate::types::RelationDepth;
+use anyhow::Result;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Select {
@@ -35,6 +38,7 @@ pub struct SelectRel {
     pub relationName: Option<String>,
     pub relationColumnNames: Option<Vec<String>>,
     pub relationFliterExpr: Option<Expr>,
+    pub relationDepth: Option<RelationDepth>,
     pub relationAlias: Option<String>,
 
     pub destTableName: Option<String>,
@@ -95,6 +99,7 @@ impl Parser {
             ReadRelationName, // 可选
             ReadRelationColumnNames,// 可选
             ReadRelationFilterExpr,// 可选
+            ReadRelationDepth,
             ReadRelationAlias,// 可选
 
             ReadDestName,// 可选
@@ -105,7 +110,7 @@ impl Parser {
             TryNextRound,
         }
 
-        fn parseSelectedColumnNames(parser: &mut Parser) -> anyhow::Result<Vec<String>> {
+        fn parseSelectedColumnNames(parser: &mut Parser) -> Result<Vec<String>> {
             let mut columnNames = Vec::default();
 
             loop {
@@ -129,8 +134,8 @@ impl Parser {
         // getCurrentElement可不可是None
         let mut force = true;
 
-        let mut selectVec = Vec::default();
-        let mut select = SelectRel::default();
+        let mut selectRelVec = Vec::default();
+        let mut selectRel = SelectRel::default();
 
         loop {
             let currentElement =
@@ -146,14 +151,14 @@ impl Parser {
 
             match state {
                 State::ReadSrcName => {
-                    select.srcTableName = currentElement.expectTextLiteral("expect src table name")?;
+                    selectRel.srcTableName = currentElement.expectTextLiteral("expect src table name")?;
 
                     state = State::ReadSrcColumnNames;
                     force = false;
                 }
                 State::ReadSrcColumnNames => {
                     if currentElement.expectTextLiteralContentBool(global::方括号_STR) {
-                        select.srcColumnNames = Some(parseSelectedColumnNames(self)?);
+                        selectRel.srcColumnNames = Some(parseSelectedColumnNames(self)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -164,7 +169,7 @@ impl Parser {
                 State::ReadSrcFilterExpr => {
                     if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
-                        select.srcFilterExpr = Some(self.parseExpr(false)?);
+                        selectRel.srcFilterExpr = Some(self.parseExpr(false)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -174,7 +179,7 @@ impl Parser {
                 }
                 State::ReadSrcAlias => {
                     if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
-                        select.srcAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by src alias")?);
+                        selectRel.srcAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by src alias")?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -184,7 +189,7 @@ impl Parser {
                 }
                 State::ReadRelationName => {
                     if let Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) = currentElement {
-                        select.relationName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
+                        selectRel.relationName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
                     } else { // 未写 realition 那么后边的全部都不会有了
                         break;
                     }
@@ -194,7 +199,7 @@ impl Parser {
                 }
                 State::ReadRelationColumnNames => {
                     if currentElement.expectTextLiteralContentBool(global::方括号_STR) {
-                        select.relationColumnNames = Some(parseSelectedColumnNames(self)?);
+                        selectRel.relationColumnNames = Some(parseSelectedColumnNames(self)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -205,7 +210,39 @@ impl Parser {
                 State::ReadRelationFilterExpr => {
                     if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
-                        select.relationFliterExpr = Some(self.parseExpr(false)?);
+                        selectRel.relationFliterExpr = Some(self.parseExpr(false)?);
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+
+                    state = State::ReadRelationDepth;
+                    force = false;
+                }
+                //  todo 实现递归搜索
+                State::ReadRelationDepth => {
+                    if currentElement.expectTextLiteralContentIgnoreCaseBool("recursive") {
+                        // 使用独立的mini模式
+                        let mut parseMini = Parser::default();
+
+                        let mut elementVec = vec![];
+
+                        // 收集需要的元素
+                        loop {
+                            // a
+                            let element = self.getCurrentElementAdvance()?;
+                            elementVec.push(element.clone());
+
+                            if let Element::TextLiteral(text) = element {
+                                match text.as_str() {
+                                    global::方括号1_STR | global::圆括号1_STR => break,
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        parseMini.elementVecVec.push(elementVec);
+
+                        selectRel.relationDepth = Some(parseMini.parseRelationDepth()?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -215,7 +252,7 @@ impl Parser {
                 }
                 State::ReadRelationAlias => {
                     if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
-                        select.relationAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by relation alias")?);
+                        selectRel.relationAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by relation alias")?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -225,7 +262,14 @@ impl Parser {
                 }
                 State::ReadDestName => {
                     if let Element::To = currentElement {
-                        select.destTableName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
+                        selectRel.destTableName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
+
+                        // 如果对relation使用recursive的话 起点和终点都要是相同的table
+                        if let Some(_) = selectRel.relationDepth {
+                            if selectRel.srcTableName.as_str() != selectRel.destTableName.as_ref().unwrap() {
+                                self.throwSyntaxErrorDetail("when use relation recursive query, start,end node should belong to same table")?;
+                            }
+                        }
                     } else {
                         break;
                     }
@@ -235,7 +279,7 @@ impl Parser {
                 }
                 State::ReadDestColumnNames => {
                     if currentElement.expectTextLiteralContentBool(global::方括号_STR) {
-                        select.destColumnNames = Some(parseSelectedColumnNames(self)?);
+                        selectRel.destColumnNames = Some(parseSelectedColumnNames(self)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -246,7 +290,7 @@ impl Parser {
                 State::ReadDestFilterExpr => {
                     if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
-                        select.destFilterExpr = Some(self.parseExpr(false)?);
+                        selectRel.destFilterExpr = Some(self.parseExpr(false)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -256,7 +300,7 @@ impl Parser {
                 }
                 State::ReadDestAlias => {
                     if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
-                        select.destAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by dest alias")?);
+                        selectRel.destAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by dest alias")?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -270,16 +314,16 @@ impl Parser {
 
                         // https://qastack.cn/programming/19650265/is-there-a-faster-shorter-way-to-initialize-variables-in-a-rust-struct
                         let select0 = SelectRel {
-                            srcTableName: select.destTableName.as_ref().unwrap().clone(),
-                            srcColumnNames: select.destColumnNames.clone(),
-                            srcFilterExpr: select.destFilterExpr.clone(),
-                            srcAlias: select.destAlias.clone(),
+                            srcTableName: selectRel.destTableName.as_ref().unwrap().clone(),
+                            srcColumnNames: selectRel.destColumnNames.clone(),
+                            srcFilterExpr: selectRel.destFilterExpr.clone(),
+                            srcAlias: selectRel.destAlias.clone(),
                             ..Default::default()
                         };
 
-                        selectVec.push(select);
+                        selectRelVec.push(selectRel);
 
-                        select = select0;
+                        selectRel = select0;
 
                         state = State::ReadRelationName;
                         force = false;
@@ -293,10 +337,10 @@ impl Parser {
         // 说明只是读个table而已
         if (State::ReadSrcName..=State::ReadRelationName).contains(&state) {
             let selectTable = SelectTable {
-                tableName: select.srcTableName,
-                selectedColNames: select.srcColumnNames,
-                tableFilterExpr: select.srcFilterExpr,
-                tableAlias: select.srcAlias,
+                tableName: selectRel.srcTableName,
+                selectedColNames: selectRel.srcColumnNames,
+                tableFilterExpr: selectRel.srcFilterExpr,
+                tableAlias: selectRel.srcAlias,
             };
 
             // 还要区分
@@ -312,28 +356,29 @@ impl Parser {
             }
         }
 
-        selectVec.push(select);
+        selectRelVec.push(selectRel);
 
         // 确保alias不能重复
         let mut existAlias: HashSet<String> = HashSet::new();
 
-        let mut testDuplicatedAlias = |alias: Option<&String>| {
-            if alias.is_some() {
-                if existAlias.insert(alias.unwrap().to_string()) == false {
-                    self.throwSyntaxErrorDetail(&format!("duplicated alias:{}", alias.unwrap()))?;
+        let mut testDuplicatedAlias =
+            |alias: Option<&String>| {
+                if alias.is_some() {
+                    if existAlias.insert(alias.unwrap().to_string()) == false {
+                        self.throwSyntaxErrorDetail(&format!("duplicated alias:{}", alias.unwrap()))?;
+                    }
                 }
-            }
 
-            anyhow::Result::<(), anyhow::Error>::Ok(())
-        };
+                Result::<(), anyhow::Error>::Ok(())
+            };
 
-        for select in &selectVec {
+        for select in &selectRelVec {
             testDuplicatedAlias(select.srcAlias.as_ref())?;
             testDuplicatedAlias(select.relationAlias.as_ref())?;
             testDuplicatedAlias(select.destAlias.as_ref())?;
         }
 
-        Ok(Command::Select(Select::SelectRels(selectVec)))
+        Ok(Command::Select(Select::SelectRels(selectRelVec)))
     }
 
     /// ```select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)```
@@ -415,5 +460,160 @@ impl Parser {
 
             selectTableUnderRels.relDescVec.push(relDesc);
         }
+    }
+
+    ///  ```(..1) [1..2] (1..2] [1..2)```
+    fn parseRelationDepth(&mut self) -> Result<RelationDepth> {
+        let mut elementVec = Vec::new();
+
+        for element in &self.elementVecVec[self.currentElementVecIndex] {
+            if let Element::TextLiteral(text) = element {
+                match text.as_str() {
+                    global::方括号1_STR | global::方括号1_STR | global::圆括号_STR | global::圆括号1_STR => elementVec.push(element.clone()),
+                    _ => {
+                        let mut pendingChars = Vec::new();
+
+                        let mut readingNumber = None;
+
+                        let mut chars = text.chars();
+                        loop {
+                            match chars.next() {
+                                Some(char) => {
+                                    match char {
+                                        '0'..='9' => {
+                                            if let Some(false) = readingNumber {
+                                                if pendingChars.is_empty() == false {
+                                                    elementVec.push(Element::TextLiteral(pendingChars.iter().collect::<String>()));
+                                                    pendingChars.clear();
+                                                }
+                                            }
+
+                                            pendingChars.push(char);
+                                            readingNumber = Some(true);
+                                        }
+                                        _ => {
+                                            if let Some(true) = readingNumber {
+                                                if pendingChars.is_empty() == false {
+                                                    elementVec.push(Element::IntegerLiteral(pendingChars.iter().collect::<String>().as_str().parse::<i64>()?));
+                                                    pendingChars.clear();
+                                                }
+                                            }
+
+                                            pendingChars.push(char);
+                                            readingNumber = Some(false);
+                                        }
+                                    }
+                                }
+                                None => {
+                                    if let Some(readingNumber) = readingNumber {
+                                        if pendingChars.is_empty() == false {
+                                            if readingNumber {
+                                                elementVec.push(Element::IntegerLiteral(pendingChars.iter().collect::<String>().as_str().parse::<i64>()?));
+                                            } else {
+                                                elementVec.push(Element::TextLiteral(pendingChars.iter().collect::<String>()));
+                                            }
+                                        }
+                                    }
+
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                elementVec.push(element.clone());
+            }
+        }
+
+        self.elementVecVec[self.currentElementVecIndex] = elementVec;
+
+
+        let startBound =
+            match self.getCurrentElementAdvance()? {
+                Element::TextLiteral(s) => {
+                    let exclusive = match s.as_str() {
+                        global::方括号_STR => false,
+                        global::圆括号_STR => true,
+                        _ => self.throwSyntaxError()?,
+                    };
+
+                    // getCurrentElement() 已然是next了
+                    // 说明写了显式的depth 而且的话是这样写的 (1 .. 6) depth和后边的两个dot是有分隔的
+                    //
+                    // 如果没有分隔的话 会连成1起变为textLiteral
+                    if let Some(startDepth) = self.getCurrentElement()?.expectIntegerLiteralOpt() {
+                        if 0 >= startDepth {
+                            self.throwSyntaxErrorDetail("relation start depth should > 0")?;
+                        }
+
+                        self.skipElement(1)?;
+
+                        match (exclusive, startDepth) {
+                            (false, _) => Bound::Included(startDepth as usize),
+                            (true, _) => Bound::Excluded(startDepth as usize),
+                        }
+                    } else {
+                        Bound::Unbounded
+                    }
+                }
+                _ => self.throwSyntaxError()?
+            };
+
+        // 后边要是2个的dot
+        self.getCurrentElementAdvance()?.expectTextLiteralContent("..")?;
+
+        let endBound = {
+            let endDepth =
+                if let Some(endDepth) = self.getCurrentElement()?.expectIntegerLiteralOpt() {
+                    if 0 >= endDepth {
+                        self.throwSyntaxErrorDetail("relation end depth should > 0")?;
+                    }
+
+                    self.skipElement(1)?;
+
+                    Some(endDepth)
+                } else {
+                    None
+                };
+
+            match self.getCurrentElementAdvance()? {
+                Element::TextLiteral(s) => {
+                    match (endDepth, s.as_str()) {
+                        (Some(endDepth), global::方括号1_STR) => Bound::Included(endDepth as usize),
+                        (Some(endDepth), global::圆括号1_STR) => Bound::Excluded(endDepth as usize),
+                        (None, global::方括号1_STR | global::圆括号1_STR) => Bound::Unbounded,
+                        (_, _) => self.throwSyntaxErrorDetail("")?,
+                    }
+                }
+                _ => self.throwSyntaxError()?,
+            }
+        };
+
+        match (startBound, endBound) {
+            (Bound::Included(startDepth), Bound::Included(endDepth)) => {
+                if startDepth > endDepth {
+                    self.throwSyntaxErrorDetail(&format!("[{},{}] is not allowed", startDepth, endDepth))?;
+                }
+            }
+            (Bound::Included(startDepth), Bound::Excluded(endDepth)) => {
+                if startDepth >= endDepth {
+                    self.throwSyntaxErrorDetail(&format!("[{},{}) is not allowed", startDepth, endDepth))?;
+                }
+            }
+            (Bound::Excluded(startDepth), Bound::Included(endDepth)) => {
+                if startDepth >= endDepth {
+                    self.throwSyntaxErrorDetail(&format!("({},{}] is not allowed", startDepth, endDepth))?;
+                }
+            }
+            (Bound::Excluded(startDepth), Bound::Excluded(endDepth)) => {
+                if startDepth >= endDepth || endDepth - startDepth == 1 {
+                    self.throwSyntaxErrorDetail(&format!("({},{}) is not allowed", startDepth, endDepth))?;
+                }
+            }
+            _ => {}
+        }
+
+        Ok((startBound, endBound))
     }
 }
