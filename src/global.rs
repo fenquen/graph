@@ -76,4 +76,7 @@ pub const 方括号1_STR: &str = "]";
 pub const 回车_CHAR: char = '\r';
 pub const 换行_CHAR: char = '\n';
 
+pub const DOT_CHAR: char = '.';
+pub const DOT_STR: &str = ".";
+
 pub const EMPTY_BINARY: Vec<Byte> = vec![];

@@ -4,6 +4,7 @@ use crate::{global, suffix_plus_plus, throw};
 use crate::graph_value::PointDesc;
 use crate::parser::op::{LogicalOp, MathCalcOp, Op, SqlOp};
 use crate::parser::Parser;
+use anyhow::Result;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Element {
@@ -71,6 +72,22 @@ impl Element {
             Ok(())
         } else {
             throw!(errorStr)
+        }
+    }
+
+    pub(super) fn expectIntegerLiteralOpt(&self) -> Option<i64> {
+        if let Element::IntegerLiteral(number) = self {
+            Some(*number)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn expectIntegerLiteral(&self) -> anyhow::Result<i64> {
+        if let Some(number) = self.expectIntegerLiteralOpt() {
+            Ok(number)
+        } else {
+            throw!(&format!("expect integer literal however got: {:?}", self))
         }
     }
 }
@@ -391,7 +408,10 @@ impl Parser {
                         "OR" => Element::Op(Op::LogicalOp(LogicalOp::Or)),
                         "AND" => Element::Op(Op::LogicalOp(LogicalOp::And)),
                         "IN" => Element::Op(Op::SqlOp(SqlOp::In)),
-                        _ => Element::TextLiteral(text),
+                        // todo 应对 recusive 查询
+                        _ => {
+                            Element::TextLiteral(text)
+                        }
                     }
                 }
             };
@@ -409,7 +429,7 @@ impl Parser {
             return (false, false);
         }
 
-        if text == "." {
+        if text == global::DOT_STR {
             return (false, false);
         }
 
@@ -421,7 +441,7 @@ impl Parser {
         for char in text.chars() {
             match char {
                 '0'..='9' => continue,
-                '.' => {
+                global::DOT_CHAR => {
                     // 可以是打头和末尾 不能有多个的
                     if hasMetDot { // 说明有多个的
                         return (false, false);
@@ -468,10 +488,9 @@ impl Parser {
 
     /// 得到current element 然后 advance
     pub(super) fn getCurrentElementAdvance(&mut self) -> anyhow::Result<&Element> {
-        let option = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex);
-        if option.is_some() {
+        if let Some(element) = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex) {
             suffix_plus_plus!(self.currentElementIndex);
-            Ok(option.unwrap())
+            Ok(element)
         } else {
             self.throwSyntaxErrorDetail("unexpected end of sql")?
         }

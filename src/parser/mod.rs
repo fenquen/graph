@@ -47,7 +47,7 @@ pub fn parse(sql: &str) -> anyhow::Result<Vec<Command>> {
 impl Parser {
     pub fn new(sql: &str) -> Self {
         let mut parser = Parser::default();
-        parser.sql = sql.to_string();
+        parser.sql = sql.trim().to_string();
         parser.chars = parser.sql.chars().collect::<Vec<char>>();
 
         parser
@@ -127,7 +127,8 @@ mod test {
     #[test]
     pub fn testParseSelect() {
         // parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> wheel").unwrap();
-        parser::parse("select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)").unwrap();
+        // parser::parse("select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)").unwrap();
+        parser::parse("select user(id = 1) -likes recursive(3..]-> user(age > 2)").unwrap();
     }
 
     #[test]
