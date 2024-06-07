@@ -1,18 +1,19 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::{Range, RangeFrom};
 use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, IterationCmd};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, global, meta, throw, types, u64ToByteArrRef};
+use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey, global, meta, throw, types, u64ToByteArrRef};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations,
-                   ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor, KeyTag};
 use anyhow::Result;
+use crate::executor::mvcc::BytesMutExt;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
 pub(super) struct ScanHooks<A, B, C, D> where A: ScanCommittedPreProcessor,
@@ -427,6 +428,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(destByteSlice.freeze())
     }
 
+    /// 当前对relation本身的数据的筛选是通过注入闭包实现的
     // todo 如何去应对重复的pointerKey
     // todo pointerKey应该同时到committed和uncommitted去搜索
     pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
@@ -439,13 +441,14 @@ impl<'session> CommandExecutor<'session> {
 
         let columnFamily = self.session.getColFamily(tableName)?;
 
-        let mut rawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily) as DBRawIterator;
+        let snapshot = self.session.getSnapshot()?;
+        let mut rawIterator = snapshot.raw_iterator_cf(&columnFamily) as DBRawIterator;
 
         let tableName_mutationsOnTable = self.session.tableName_mutations.borrow();
         let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(tableName);
 
         // 应对committed
-        for iterResult in self.session.getSnapshot()?.iterator_cf(&columnFamily, IteratorMode::From(prefix, Direction::Forward)) {
+        for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(prefix, Direction::Forward)) {
             let (committedPointerKey, _) = iterResult?;
 
             // 说明越过了
@@ -453,12 +456,16 @@ impl<'session> CommandExecutor<'session> {
                 break;
             }
 
-            if self.checkCommittedPointerVisiWithoutTxMutations(&mut pointerKeyBuffer, &mut rawIterator, committedPointerKey.as_ref())? == false {
+            if self.checkCommittedPointerVisiWithoutTxMutations(&mut pointerKeyBuffer,
+                                                                &mut rawIterator,
+                                                                committedPointerKey.as_ref())? == false {
                 continue;
             }
 
             if let Some(tableMutations) = tableMutations {
-                if self.checkCommittedPointerVisiWithTxMutations(tableMutations, &mut pointerKeyBuffer, committedPointerKey.as_ref())? == false {
+                if self.checkCommittedPointerVisiWithTxMutations(tableMutations,
+                                                                 &mut pointerKeyBuffer,
+                                                                 committedPointerKey.as_ref())? == false {
                     continue;
                 }
             }
@@ -468,6 +475,7 @@ impl<'session> CommandExecutor<'session> {
                     IterationCmd::Break => break,
                     IterationCmd::Continue => continue,
                     IterationCmd::Return => return Ok(keys),
+                    IterationCmd::Nothing => {}
                 }
             }
 
@@ -493,6 +501,7 @@ impl<'session> CommandExecutor<'session> {
                         IterationCmd::Break => break,
                         IterationCmd::Continue => continue,
                         IterationCmd::Return => return Ok(keys),
+                        IterationCmd::Nothing => {}
                     }
                 }
 
@@ -501,6 +510,47 @@ impl<'session> CommandExecutor<'session> {
         }
 
         Ok(keys)
+    }
+
+    /// 以node的pointerKey入手 搜索相应的满足条件的relation
+    pub(super) fn searchRelationByNodePointerKey(&self,
+                                                 nodeTable: &Table, nodeDataKey: DataKey,
+                                                 positionKeyTag: KeyTag,
+                                                 targetRelation: &Table, relationFilter: Option<&Expr>) -> Result<Vec<(DataKey, RowData)>> {
+        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+        pointerKeyBuffer.writePointerKeyLeadingPart(nodeDataKey, positionKeyTag, targetRelation.tableId);
+
+        let mut targetRelationDataKeys = Vec::new();
+
+        // 是FnMut 改动了targetRelationDataKeys
+        let pointerKeyProcessor = RefCell::new(
+            |pointerKey: &[Byte]| {
+                let targetRelationDataKey = extractTargetDataKeyFromPointerKey!(pointerKey);
+                targetRelationDataKeys.push(targetRelationDataKey);
+            }
+        );
+
+        let searchPointerKeyHooks = SearchPointerKeyHooks {
+            committedPointerKeyProcessor: Some(
+                |_: &ColumnFamily, committedPointerKey: &[Byte], _: &[Byte]| {
+                    pointerKeyProcessor.borrow_mut()(committedPointerKey);
+                    Result::<IterationCmd>::Ok(IterationCmd::Nothing)
+                }
+            ),
+            uncommittedPointerKeyProcessor: Some(
+                |_: &TableMutations, addedPointerKey: &[Byte], _: &[Byte]| {
+                    pointerKeyProcessor.borrow_mut()(addedPointerKey);
+                    Result::<IterationCmd>::Ok(IterationCmd::Nothing)
+                }
+            ),
+        };
+
+        self.searchPointerKeyByPrefix(nodeTable.name.as_str(), pointerKeyBuffer.as_ref(), searchPointerKeyHooks)?;
+
+        let relationDatas
+            = self.getRowDatasByDataKeys(targetRelationDataKeys.as_slice(), targetRelation, relationFilter, None)?;
+
+        Ok(relationDatas)
     }
 }
 

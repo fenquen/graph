@@ -38,7 +38,9 @@ pub trait ScanCommittedPostProcessor = FnMut(&ColumnFamily, DataKey, &RowData) -
 pub trait ScanUncommittedPreProcessor = FnMut(&TableMutations, DataKey) -> anyhow::Result<bool>;
 pub trait ScanUncommittedPostProcessor = FnMut(&TableMutations, DataKey, &RowData) -> anyhow::Result<bool>;
 
+/// columnFamily committedPointerKey(会随着变化) prefix(不会变化)
 pub trait CommittedPointerKeyProcessor = FnMut(&ColumnFamily, &[Byte], &[Byte]) -> anyhow::Result<IterationCmd>;
+/// tableMutations addedPointerKey(会随着变化) prefix(不会变化)
 pub trait UncommittedPointerKeyProcessor = FnMut(&TableMutations, &[Byte], &[Byte]) -> anyhow::Result<IterationCmd>;
 
 pub type TableMutations = BTreeMap<Vec<Byte>, Vec<Byte>>;

@@ -5,8 +5,11 @@
 ## 项目动机
 
 日常使用的传统关系数据库在面对对象之间的关联关系的时候显得相当的力不从心，通常需要通过大量冗余的表关联join来达到效果<br>
+<br>
 显然使用图数据是不错的解决方式，市面上相应的产品也有不少，例如neo4j、nebula等<br>
+<br>
 rust是门相当特别的编程语言，使用独特的内存体系实现了不需程序员手动管理内存的无gc，大大降低了像c/c++的内存泄漏的风险<br>
+<br>
 使用rust编写1个自己的图数据库是个相当有趣和有挑战的项目
 
 ## 开发环境
@@ -147,6 +150,8 @@ select user(id=1 and 0=0)
 
 #### 关系查询
 
+##### 单关系查询
+
 搜索 id是1的user 对 car的 使用(usage)数量(number)满足>0的情况, 提取它们的全部column
 
 ```text
@@ -198,9 +203,10 @@ select user(id=1 and 0=0) -usage(number > 0) as usage0-> car
 ]
 ```
 
+##### 多关系查询
+
 搜索满足如下的脉络联系 <br>
-id是1的user && 对car的使用(usage)数量(number) >9 && 相应的car对tyre的拥有(own)数量(number)是1,
-user只显示id和name
+id是1的user && 对car的使用(usage)数量(number) >9 && 相应的car对tyre的拥有(own)数量(number)是1,user只显示id和name
 
 ```text
 select user[id, name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre
@@ -239,6 +245,26 @@ select user[id, name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car 
 ]
 ```
 
+##### 通过关系筛选数据
+
+筛选满足如下条件的user <br>
+id是1 <br>
+拥有属性number大于7的usage关系，是start和end都可以 <br>
+拥有属性number=7的own关系，是end端
+
+```text
+select user(id = 1 ) as user0 ,in usage (number > 7) ,as end in own(number =7)
+```
+
+```json
+[
+  {
+    "name": "tom",
+    "id": 1
+  }
+]
+```
+
 ### 删除普通表的数据
 
 删掉id是1的user
@@ -255,8 +281,7 @@ update id是1的user，将name设为'tom0'
 update user[name ='tom0'](id=1)
 ```
 
-如果满足条件的user之前已经被关联到了某个关系上(例如调用了上述的 link user(id =1) to car(color='red') by usage(number =
-12)) <br>
+如满足条件的user已经被关联到了某个关系上(调用上述 link user(id =1) to car(color='red') by usage( number = 12)) <br>
 那么update是不被允许的，会产生如下的错误，因为用户对数据的更改会违背关联关系设立的意义
 
 ```json

@@ -32,18 +32,18 @@ pub struct SelectTable {
 pub struct SelectRel {
     pub srcTableName: String,
     pub srcColumnNames: Option<Vec<String>>,
-    pub srcFilterExpr: Option<Expr>,
+    pub srcFilter: Option<Expr>,
     pub srcAlias: Option<String>,
 
     pub relationName: Option<String>,
     pub relationColumnNames: Option<Vec<String>>,
-    pub relationFliterExpr: Option<Expr>,
+    pub relationFilter: Option<Expr>,
     pub relationDepth: Option<RelationDepth>,
     pub relationAlias: Option<String>,
 
     pub destTableName: Option<String>,
     pub destColumnNames: Option<Vec<String>>,
-    pub destFilterExpr: Option<Expr>,
+    pub destFilter: Option<Expr>,
     pub destAlias: Option<String>,
 }
 
@@ -81,7 +81,6 @@ impl FromStr for EndPointType {
         }
     }
 }
-
 
 impl Parser {
     // todo 实现 select user(id >1 ) as user0 ,in usage (number = 7) ,end in own(number =7)
@@ -134,7 +133,7 @@ impl Parser {
         // getCurrentElement可不可是None
         let mut force = true;
 
-        let mut selectRelVec = Vec::default();
+        let mut selectRelVec = Vec::new();
         let mut selectRel = SelectRel::default();
 
         loop {
@@ -169,7 +168,7 @@ impl Parser {
                 State::ReadSrcFilterExpr => {
                     if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
-                        selectRel.srcFilterExpr = Some(self.parseExpr(false)?);
+                        selectRel.srcFilter = Some(self.parseExpr(false)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -210,7 +209,7 @@ impl Parser {
                 State::ReadRelationFilterExpr => {
                     if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
-                        selectRel.relationFliterExpr = Some(self.parseExpr(false)?);
+                        selectRel.relationFilter = Some(self.parseExpr(false)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -224,7 +223,7 @@ impl Parser {
                         // 使用独立的mini模式
                         let mut parseMini = Parser::default();
 
-                        let mut elementVec = vec![];
+                        let mut elementVec = Vec::new();
 
                         // 收集需要的元素
                         loop {
@@ -290,7 +289,7 @@ impl Parser {
                 State::ReadDestFilterExpr => {
                     if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
-                        selectRel.destFilterExpr = Some(self.parseExpr(false)?);
+                        selectRel.destFilter = Some(self.parseExpr(false)?);
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -313,17 +312,17 @@ impl Parser {
                         self.skipElement(-1)?;
 
                         // https://qastack.cn/programming/19650265/is-there-a-faster-shorter-way-to-initialize-variables-in-a-rust-struct
-                        let select0 = SelectRel {
+                        let selectRel0 = SelectRel {
                             srcTableName: selectRel.destTableName.as_ref().unwrap().clone(),
                             srcColumnNames: selectRel.destColumnNames.clone(),
-                            srcFilterExpr: selectRel.destFilterExpr.clone(),
+                            srcFilter: selectRel.destFilter.clone(),
                             srcAlias: selectRel.destAlias.clone(),
                             ..Default::default()
                         };
 
                         selectRelVec.push(selectRel);
 
-                        selectRel = select0;
+                        selectRel = selectRel0;
 
                         state = State::ReadRelationName;
                         force = false;
@@ -339,7 +338,7 @@ impl Parser {
             let selectTable = SelectTable {
                 tableName: selectRel.srcTableName,
                 selectedColNames: selectRel.srcColumnNames,
-                tableFilterExpr: selectRel.srcFilterExpr,
+                tableFilterExpr: selectRel.srcFilter,
                 tableAlias: selectRel.srcAlias,
             };
 
@@ -382,7 +381,7 @@ impl Parser {
     }
 
     /// ```select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)```
-    fn parseSelectTableUnderRels(&mut self, selectTable: SelectTable) -> anyhow::Result<Command> {
+    fn parseSelectTableUnderRels(&mut self, selectTable: SelectTable) -> Result<Command> {
         let mut selectTableUnderRels = SelectTableUnderRels::default();
 
         // 复用成果
@@ -462,15 +461,21 @@ impl Parser {
         }
     }
 
+    /// 使用的是mini模式 <br>
     ///  ```(..1) [1..2] (1..2] [1..2)```
     fn parseRelationDepth(&mut self) -> Result<RelationDepth> {
         let mut elementVec = Vec::new();
 
+        // 之前的parseElement时候像 1..2 和 7.. 和 ..3 和 .. 都会当成1个全体成为textLiteral
+        // 需要在这边对其内容进行进1步的拆分 把这个textLiteral变为 integerLiteral textLiteral integerLiteral
         for element in &self.elementVecVec[self.currentElementVecIndex] {
             if let Element::TextLiteral(text) = element {
                 match text.as_str() {
-                    global::方括号1_STR | global::方括号1_STR | global::圆括号_STR | global::圆括号1_STR => elementVec.push(element.clone()),
-                    _ => {
+                    global::方括号1_STR |
+                    global::方括号1_STR |
+                    global::圆括号_STR |
+                    global::圆括号1_STR => elementVec.push(element.clone()),
+                    _ => { // 具体拆分
                         let mut pendingChars = Vec::new();
 
                         let mut readingNumber = None;
@@ -481,6 +486,7 @@ impl Parser {
                                 Some(char) => {
                                     match char {
                                         '0'..='9' => {
+                                            // 之前读的都是非数字 需要收集了
                                             if let Some(false) = readingNumber {
                                                 if pendingChars.is_empty() == false {
                                                     elementVec.push(Element::TextLiteral(pendingChars.iter().collect::<String>()));
@@ -492,6 +498,7 @@ impl Parser {
                                             readingNumber = Some(true);
                                         }
                                         _ => {
+                                            // 之前读的都是数字 需要收集
                                             if let Some(true) = readingNumber {
                                                 if pendingChars.is_empty() == false {
                                                     elementVec.push(Element::IntegerLiteral(pendingChars.iter().collect::<String>().as_str().parse::<i64>()?));
@@ -504,7 +511,7 @@ impl Parser {
                                         }
                                     }
                                 }
-                                None => {
+                                None => { // 读到末尾了 要将残留的收拢
                                     if let Some(readingNumber) = readingNumber {
                                         if pendingChars.is_empty() == false {
                                             if readingNumber {
@@ -526,39 +533,38 @@ impl Parser {
             }
         }
 
+        // 重新组织
         self.elementVecVec[self.currentElementVecIndex] = elementVec;
 
+        let startBound = {
+            let currentElement = self.getCurrentElementAdvance()?;
 
-        let startBound =
-            match self.getCurrentElementAdvance()? {
-                Element::TextLiteral(s) => {
-                    let exclusive = match s.as_str() {
-                        global::方括号_STR => false,
-                        global::圆括号_STR => true,
-                        _ => self.throwSyntaxError()?,
-                    };
+            let exclusive =
+                match currentElement.expectTextLiteral(&format!("expect a text literal however got a {:?}", currentElement))?.as_str() {
+                    global::方括号_STR => false,
+                    global::圆括号_STR => true,
+                    _ => self.throwSyntaxError()?,
+                };
 
-                    // getCurrentElement() 已然是next了
-                    // 说明写了显式的depth 而且的话是这样写的 (1 .. 6) depth和后边的两个dot是有分隔的
-                    //
-                    // 如果没有分隔的话 会连成1起变为textLiteral
-                    if let Some(startDepth) = self.getCurrentElement()?.expectIntegerLiteralOpt() {
-                        if 0 >= startDepth {
-                            self.throwSyntaxErrorDetail("relation start depth should > 0")?;
-                        }
-
-                        self.skipElement(1)?;
-
-                        match (exclusive, startDepth) {
-                            (false, _) => Bound::Included(startDepth as usize),
-                            (true, _) => Bound::Excluded(startDepth as usize),
-                        }
-                    } else {
-                        Bound::Unbounded
-                    }
+            // getCurrentElement() 已然是next了
+            // 说明写了显式的depth 而且的话是这样写的 (1 .. 6) depth和后边的两个dot是有分隔的
+            //
+            // 如果没有分隔的话 会连成1起变为textLiteral
+            if let Some(startDepth) = self.getCurrentElement()?.expectIntegerLiteralOpt() {
+                if 0 >= startDepth {
+                    self.throwSyntaxErrorDetail("relation start depth should > 0")?;
                 }
-                _ => self.throwSyntaxError()?
-            };
+
+                self.skipElement(1)?;
+
+                match (exclusive, startDepth) {
+                    (false, _) => Bound::Included(startDepth as usize),
+                    (true, _) => Bound::Excluded(startDepth as usize),
+                }
+            } else {
+                Bound::Unbounded
+            }
+        };
 
         // 后边要是2个的dot
         self.getCurrentElementAdvance()?.expectTextLiteralContent("..")?;
@@ -577,16 +583,13 @@ impl Parser {
                     None
                 };
 
-            match self.getCurrentElementAdvance()? {
-                Element::TextLiteral(s) => {
-                    match (endDepth, s.as_str()) {
-                        (Some(endDepth), global::方括号1_STR) => Bound::Included(endDepth as usize),
-                        (Some(endDepth), global::圆括号1_STR) => Bound::Excluded(endDepth as usize),
-                        (None, global::方括号1_STR | global::圆括号1_STR) => Bound::Unbounded,
-                        (_, _) => self.throwSyntaxErrorDetail("")?,
-                    }
-                }
-                _ => self.throwSyntaxError()?,
+            // 读取了末尾的
+            let currentElement = self.getCurrentElementAdvance()?;
+            match (endDepth, currentElement.expectTextLiteral(&format!("expect a text literal however got a {:?}", currentElement))?.as_str()) {
+                (Some(endDepth), global::方括号1_STR) => Bound::Included(endDepth as usize),
+                (Some(endDepth), global::圆括号1_STR) => Bound::Excluded(endDepth as usize),
+                (None, global::方括号1_STR | global::圆括号1_STR) => Bound::Unbounded,
+                (_, _) => self.throwSyntaxErrorDetail("")?,
             }
         };
 
@@ -607,6 +610,7 @@ impl Parser {
                 }
             }
             (Bound::Excluded(startDepth), Bound::Excluded(endDepth)) => {
+                // 两边都是exculde的话
                 if startDepth >= endDepth || endDepth - startDepth == 1 {
                     self.throwSyntaxErrorDetail(&format!("({},{}) is not allowed", startDepth, endDepth))?;
                 }

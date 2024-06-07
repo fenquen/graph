@@ -116,6 +116,7 @@ pub enum IterationCmd {
     Break,
     Continue,
     Return,
+    Nothing,
 }
 
 #[cfg(test)]

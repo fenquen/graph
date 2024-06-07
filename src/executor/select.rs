@@ -45,7 +45,7 @@ impl<'session> CommandExecutor<'session> {
 
     /// graph特色的 rel select
     /// ```select user[id,name](id=1 and 0=0) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre```
-    fn selectRels(&self, selectVec: &Vec<SelectRel>) -> Result<CommandExecResult> {
+    fn selectRels(&self, selectRels: &Vec<SelectRel>) -> Result<CommandExecResult> {
         // 对应1个realtion的query的多个条目的1个
         #[derive(Debug)]
         struct SelectResult {
@@ -61,19 +61,19 @@ impl<'session> CommandExecutor<'session> {
         let mut destDataKeysInPrevSelect: Option<Vec<DataKey>> = None;
 
         // 1个select对应Vec<SelectResult> 多个select对应Vec<Vec<SelectResult>>
-        let mut selectResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectVec.len());
+        let mut selectResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectRels.len());
 
         let mut pointerKeyPrefixBuffer = BytesMut::with_capacity(meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET);
 
         'loopSelectVec:
-        for select in selectVec {
+        for select in selectRels {
             // 为什么要使用{} 不然的话有概率死锁
             // https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
             let relationDatas: Vec<(DataKey, RowData)> = {
                 let relation = self.getTableRefByName(select.relationName.as_ref().unwrap())?;
                 let relationDatas =
                     self.scanSatisfiedRows(relation.value(),
-                                           select.relationFliterExpr.as_ref(),
+                                           select.relationFilter.as_ref(),
                                            select.relationColumnNames.as_ref(),
                                            true, ScanHooks::default())?;
                 relationDatas.into_iter().map(|(dataKey, rowData)| (dataKey, rowData)).collect()
@@ -156,10 +156,10 @@ impl<'session> CommandExecutor<'session> {
                             }
 
                             // 当前的使用intersect为源头
-                            self.getRowDatasByDataKeys(&intersectDataKeys, &*srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref())?
+                            self.getRowDatasByDataKeys(&intersectDataKeys, srcTable.value(), select.srcFilter.as_ref(), select.srcColumnNames.as_ref())?
                         }
                         // 只会在首轮的
-                        None => self.getRowDatasByDataKeys(&srcDataKeys, &*srcTable, select.srcFilterExpr.as_ref(), select.srcColumnNames.as_ref())?,
+                        None => self.getRowDatasByDataKeys(&srcDataKeys, srcTable.value(), select.srcFilter.as_ref(), select.srcColumnNames.as_ref())?,
                     }
                 };
                 if srcRowDatas.is_empty() {
@@ -168,7 +168,7 @@ impl<'session> CommandExecutor<'session> {
 
                 let destRowDatas = {
                     let destTable = self.getTableRefByName(select.destTableName.as_ref().unwrap())?;
-                    self.getRowDatasByDataKeys(&destDataKeys, &*destTable, select.destFilterExpr.as_ref(), select.destColumnNames.as_ref())?
+                    self.getRowDatasByDataKeys(&destDataKeys, &*destTable, select.destFilter.as_ref(), select.destColumnNames.as_ref())?
                 };
                 if destRowDatas.is_empty() {
                     continue;
@@ -273,13 +273,6 @@ impl<'session> CommandExecutor<'session> {
         // 应对对当前的data条目的 对某个relDesc的相应要求
         let mut processRelDesc =
             |nodeDataKey: DataKey, pointerKeyTag: KeyTag, relDesc: &RelDesc, relation: &Table| {
-                // 如果是起点的话 那么rel便是它的downstream
-                // 搜寻满足和当前table data的相互地位的rel的data 遍历的是rel
-                pointerKeyBuffer.writePointerKeyLeadingPart(nodeDataKey, pointerKeyTag, relation.tableId);
-
-                // 本node指向rel的pointerKey的前缀
-                let pointerKeyPrefix = pointerKeyBuffer.to_vec();
-
                 let mut found = false;
 
                 // 钩子
@@ -318,6 +311,13 @@ impl<'session> CommandExecutor<'session> {
                         }
                     ),
                 };
+
+                // 如果是起点的话 那么rel便是它的downstream
+                // 搜寻满足和当前table data的相互地位的rel的data 遍历的是rel
+                pointerKeyBuffer.writePointerKeyLeadingPart(nodeDataKey, pointerKeyTag, relation.tableId);
+
+                // 本node指向rel的pointerKey的前缀
+                let pointerKeyPrefix = pointerKeyBuffer.to_vec();
 
                 // 遍历这个node上的通过了测试的指向rel的pointerKey
                 // 通过调用getRowDatasByDataKeys得到pointerKey指向的relation数据
@@ -382,6 +382,45 @@ impl<'session> CommandExecutor<'session> {
         let values = self.processRowDatasToDisplay(rowDatas);
 
         Ok(CommandExecResult::SelectResult(values))
+    }
+
+    /// 使用 由端点不断下钻的套路
+    pub(super) fn selectRelRecursive(&self, selectRels: Vec<SelectRel>) -> Result<()> {
+        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+
+        for selectRel in selectRels {
+            // 得到src上的满足条件的
+            let srcTable = self.getTableRefByName(&selectRel.srcTableName)?;
+
+            let srcRowDatas =
+                self.scanSatisfiedRows(srcTable.value(),
+                                       selectRel.srcFilter.as_ref(),
+                                       selectRel.srcColumnNames.as_ref(),
+                                       true,
+                                       ScanHooks::default())?;
+
+            let downstreamRelation = self.getTableRefByName(selectRel.relationName.as_ref().unwrap())?;
+
+            let mut nodeDataKey_downstreamRelDataKeys = Vec::new();
+
+            // 遍历了各个src 向下顺路寻找相应的且满足筛选的relation
+            for (srcDataKey, _) in srcRowDatas {
+                pointerKeyBuffer.writePointerKeyLeadingPart(srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, downstreamRelation.tableId);
+
+                let downstreamRelDatas =
+                    self.searchRelationByNodePointerKey(srcTable.value(), srcDataKey,
+                                                        meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID,
+                                                        downstreamRelation.value(), selectRel.relationFilter.as_ref())?;
+
+                // 1个src的data可能对应多个满足条件的relation data
+                let downstreamRelDataKeys: Vec<DataKey> =
+                    downstreamRelDatas.into_iter().map(|(downstreamRelDataKey, _)| { downstreamRelDataKey }).collect();
+
+                nodeDataKey_downstreamRelDataKeys.push((srcDataKey, downstreamRelDataKeys))
+            }
+        }
+
+        Ok(())
     }
 
     fn processRowDatasToDisplay(&self, rowDatas: Vec<(DataKey, RowData)>) -> Vec<Value> {
