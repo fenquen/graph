@@ -45,7 +45,32 @@ select user(id = 1) -likes() recursive(1 .. 9]-> user(age > 2)
     "sql": "create table if not exist user (id integer,name string)\ninsert into user values (1,'tom')\ninsert into user values (2,'bob')\ncreate table if not exist car (id integer,color string)\ninsert into car values (34,'red')\ninsert into car values (43,'red')\ncreate table if not exist tyre (id integer, name string)\ninsert into tyre values(7,'stone')\ncreate relation usage (number integer)\ncreate relation own (number integer)\nlink user(id =1) to car(color='red') by usage(number = 12)\nlink user(id =1) to car(id =43) by usage(number = 17)\nlink car (id =34) to tyre(name ='stone') by own(number=1)"
 }
 
+create table if not exist user (id integer,name string)
+insert into user values (1,'tom0')
+insert into user values (2,'tom2')
+insert into user values (3,'tom3')
+insert into user values (4,'tom4')
+insert into user values (5,'tom5')
+insert into user values (6,'tom6')
+insert into user values (7,'tom7')
+
+create relation likes(level integer)
+
+link user(id =1) to user(id=2) by likes(level =0)
+link user(id =2) to user(id=3) by likes(level =0)
+link user(id =3) to user(id=4) by likes(level =0)
+link user(id =4) to user(id=5) by likes(level =0)
+link user(id =5) to user(id=6) by likes(level =0)
+link user(id= 6) to user(id=7) by likes(level =0)
+
 {
     "requestType": "ExecuteSql",
-    "sql": ""
+    "sql": "create table if not exist user (id integer,name string)\ninsert into user values (1,'tom0')\ninsert into user values (2,'tom2')\ninsert into user values (3,'tom3')\ninsert into user values (4,'tom4')\ninsert into user values (5,'tom5')\ninsert into user values (6,'tom6')\ninsert into user values (7,'tom7')\ncreate relation likes(level integer)\nlink user(id =1) to user(id=2) by likes(level =0)\nlink user(id =2) to user(id=3) by likes(level =0)\nlink user(id =3) to user(id=4) by likes(level =0)\nlink user(id =4) to user(id=5) by likes(level =0)\nlink user(id =5) to user(id=6) by likes(level =0)\nlink user(id= 6) to user(id=7) by likes(level =0)"
 }
+
+{
+    "requestType": "ExecuteSql",
+    "sql":"select user as user0 -likes recursive[6..6]-> user as user1"
+}
+
+select user as user0 -likes recursive[6..6]-> user user1

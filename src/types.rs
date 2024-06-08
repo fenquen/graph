@@ -45,4 +45,5 @@ pub trait UncommittedPointerKeyProcessor = FnMut(&TableMutations, &[Byte], &[Byt
 
 pub type TableMutations = BTreeMap<Vec<Byte>, Vec<Byte>>;
 
+/// 起点只会是indclude 终点只会是include unbound
 pub type RelationDepth = (Bound<usize>, Bound<usize>);

@@ -64,6 +64,11 @@ impl<T> TrickyContainer<T> {
     }
 }
 
+/// 交集
+pub fn intersect<T: Clone + PartialEq>(a: &[T], b: &[T]) -> Vec<T> {
+    a.iter().filter(|&t| b.contains(t)).map(|destDataKey| destDataKey.clone()).collect()
+}
+
 impl<T> Deref for TrickyContainer<T> {
     type Target = T;
 

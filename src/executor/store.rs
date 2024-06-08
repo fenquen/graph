@@ -63,6 +63,10 @@ impl<'session> CommandExecutor<'session> {
                                         table: &Table,
                                         tableFilter: Option<&Expr>,
                                         selectedColNames: Option<&Vec<String>>) -> Result<Vec<(DataKey, RowData)>> {
+        if dataKeys.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut rowDatas = Vec::with_capacity(dataKeys.len());
 
         let columnFamily = self.session.getColFamily(&table.name)?;
@@ -513,12 +517,12 @@ impl<'session> CommandExecutor<'session> {
     }
 
     /// 以node的pointerKey入手 搜索相应的满足条件的relation
-    pub(super) fn searchRelationByNodePointerKey(&self,
-                                                 nodeTable: &Table, nodeDataKey: DataKey,
-                                                 positionKeyTag: KeyTag,
-                                                 targetRelation: &Table, relationFilter: Option<&Expr>) -> Result<Vec<(DataKey, RowData)>> {
+    pub(super) fn searchDataByPointerKey(&self,
+                                         src: &Table, srcDataKey: DataKey,
+                                         pointerKeyTag: KeyTag,
+                                         dest: &Table, destFilter: Option<&Expr>) -> Result<Vec<(DataKey, RowData)>> {
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
-        pointerKeyBuffer.writePointerKeyLeadingPart(nodeDataKey, positionKeyTag, targetRelation.tableId);
+        pointerKeyBuffer.writePointerKeyLeadingPart(srcDataKey, pointerKeyTag, dest.tableId);
 
         let mut targetRelationDataKeys = Vec::new();
 
@@ -545,10 +549,10 @@ impl<'session> CommandExecutor<'session> {
             ),
         };
 
-        self.searchPointerKeyByPrefix(nodeTable.name.as_str(), pointerKeyBuffer.as_ref(), searchPointerKeyHooks)?;
+        self.searchPointerKeyByPrefix(src.name.as_str(), pointerKeyBuffer.as_ref(), searchPointerKeyHooks)?;
 
         let relationDatas
-            = self.getRowDatasByDataKeys(targetRelationDataKeys.as_slice(), targetRelation, relationFilter, None)?;
+            = self.getRowDatasByDataKeys(targetRelationDataKeys.as_slice(), dest, destFilter, None)?;
 
         Ok(relationDatas)
     }

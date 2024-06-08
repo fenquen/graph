@@ -1,6 +1,8 @@
 #![allow(non_snake_case, unused_imports)]
 #![feature(trait_alias)]
 
+extern crate core;
+
 mod config;
 mod command_line;
 mod macros;

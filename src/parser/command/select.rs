@@ -241,7 +241,7 @@ impl Parser {
 
                         parseMini.elementVecVec.push(elementVec);
 
-                        selectRel.relationDepth = Some(parseMini.parseRelationDepth()?);
+                        selectRel.relationDepth = parseMini.parseRelationDepth()?;
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -463,7 +463,7 @@ impl Parser {
 
     /// 使用的是mini模式 <br>
     ///  ```(..1) [1..2] (1..2] [1..2)```
-    fn parseRelationDepth(&mut self) -> Result<RelationDepth> {
+    fn parseRelationDepth(&mut self) -> Result<Option<RelationDepth>> {
         let mut elementVec = Vec::new();
 
         // 之前的parseElement时候像 1..2 和 7.. 和 ..3 和 .. 都会当成1个全体成为textLiteral
@@ -579,17 +579,18 @@ impl Parser {
 
                     self.skipElement(1)?;
 
-                    Some(endDepth)
+                    endDepth
                 } else {
-                    None
+                    // 未写endDepth的话,使用 i64::Max
+                    i64::MAX
                 };
 
             // 读取了末尾的
             let currentElement = self.getCurrentElementAdvance()?;
             match (endDepth, currentElement.expectTextLiteral(&format!("expect a text literal however got a {:?}", currentElement))?.as_str()) {
-                (Some(endDepth), global::方括号1_STR) => Bound::Included(endDepth as usize),
-                (Some(endDepth), global::圆括号1_STR) => Bound::Included((endDepth - 1) as usize),
-                (None, global::方括号1_STR | global::圆括号1_STR) => Bound::Unbounded,
+                (i64::MAX, global::方括号1_STR | global::圆括号1_STR) => Bound::Included(i64::MAX as usize),
+                (_, global::方括号1_STR) => Bound::Included(endDepth as usize),
+                (_, global::圆括号1_STR) => Bound::Included((endDepth - 1) as usize),
                 (_, _) => self.throwSyntaxErrorDetail("")?,
             }
         };
@@ -619,6 +620,14 @@ impl Parser {
             _ => {}
         }
 
-        Ok((startBound, endBound))
+        if let (Bound::Included(startDepth), Bound::Included(endDepth)) = (startBound, endBound) {
+            if startDepth == endDepth {
+                if startDepth == 1 {
+                    return Ok(None);
+                }
+            }
+        }
+
+        Ok(Some((startBound, endBound)))
     }
 }

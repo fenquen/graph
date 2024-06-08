@@ -1,18 +1,19 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::ops::RangeFrom;
+use std::collections::{HashMap, HashSet};
+use std::ops::{Bound, RangeFrom};
 use bytes::BytesMut;
 use serde_json::{json, Value};
 use crate::executor::{CommandExecResult, CommandExecutor, IterationCmd};
-use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED, meta, suffix_plus_plus, byte_slice_to_u64, types};
+use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED, meta, suffix_plus_plus, byte_slice_to_u64, types, utils, throw, prefix_minus_minus};
 use crate::executor::mvcc::BytesMutExt;
 use crate::graph_value::{GraphValue, PointDesc};
 use crate::meta::Table;
-use crate::types::{Byte, ColumnFamily, DataKey, KeyTag, RowData, DBRawIterator, TableMutations};
+use crate::types::{Byte, ColumnFamily, DataKey, KeyTag, RowData, DBRawIterator, TableMutations, RelationDepth};
 use crate::global;
 use crate::parser::command::select::{EndPointType, RelDesc, Select, SelectRel, SelectTable, SelectTableUnderRels};
 use anyhow::{anyhow, Result};
 use crate::executor::store::{ScanHooks, SearchPointerKeyHooks};
+use crate::expr::Expr;
 use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
 
 impl<'session> CommandExecutor<'session> {
@@ -58,12 +59,10 @@ impl<'session> CommandExecutor<'session> {
         }
 
         // 给next轮用的
-        let mut destDataKeysInPrevSelect: Option<Vec<DataKey>> = None;
+        let mut destDataKeysInPrevSelectRel: Option<HashSet<DataKey>> = None;
 
         // 1个select对应Vec<SelectResult> 多个select对应Vec<Vec<SelectResult>>
         let mut selectResultVecVec: Vec<Vec<SelectResult>> = Vec::with_capacity(selectRels.len());
-
-        let mut pointerKeyPrefixBuffer = BytesMut::with_capacity(meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET);
 
         'loopSelectVec:
         for selectRel in selectRels {
@@ -80,58 +79,68 @@ impl<'session> CommandExecutor<'session> {
                                        ScanHooks::default())?
             };
 
-            let mut selectResultVecInCurrentSelect = Vec::with_capacity(relationDatas.len());
+            let mut selectResultVecInSelectRel = Vec::with_capacity(relationDatas.len());
 
-            // 融合了当前的select的relationDatas的全部的dest的dataKey
-            let mut destKeysInCurrentSelect = Vec::new();
+            // 融合了当前的selectRel的满足条件的全部的relationDatas的全部的destDataKey
+            let mut destDataKeysInSelectRel = HashSet::new();
+
+            //  如果使用了recursive 需要用到
+            let mut srcDataKeysInSelectRel = HashSet::new();
 
             let srcTable = self.getTableRefByName(&selectRel.srcTableName)?;
             let destTable = self.getTableRefByName(selectRel.destTableName.as_ref().unwrap())?;
 
-            // 遍历当前的select的多个relation
+            let relation = self.getTableRefByName(selectRel.relationName.as_ref().unwrap())?;
+
+            // 遍历当前的selectRel的多条relationData
             'loopRelationData:
             for (relationDataKey, relationData) in relationDatas {
-                let mut gatherTargetDataKeys =
-                    |keyTag: KeyTag, targetTable: &Table| {
-                        pointerKeyPrefixBuffer.writePointerKeyLeadingPart(relationDataKey, keyTag, targetTable.tableId);
+                let mut gatherTargetDatas =
+                    |keyTag: KeyTag, targetTable: &Table, targetFilter: Option<&Expr>| {
+                        //  pointerKeyPrefixBuffer.writePointerKeyLeadingPart(relationDataKey, keyTag, targetTable.tableId);
 
                         // todo selectRels时候如何应对pointerKey的mvcc 完成
-                        let pointerKeys =
-                            self.searchPointerKeyByPrefix(selectRel.relationName.as_ref().unwrap(),
-                                                          pointerKeyPrefixBuffer.as_ref(),
-                                                          SearchPointerKeyHooks::default())?;
 
-                        let targetDataKeys: Vec<DataKey> = pointerKeys.into_iter().map(|pointerKey| extractTargetDataKeyFromPointerKey!(&*pointerKey)).collect();
+                        //  let pointerKeys =
+                        //      self.searchPointerKeyByPrefix(selectRel.relationName.as_ref().unwrap(),
+                        //                                    pointerKeyPrefixBuffer.as_ref(),
+                        //                                    SearchPointerKeyHooks::default())?;
+
+                        let targetDatas = self.searchDataByPointerKey(relation.value(), relationDataKey, keyTag, targetTable, targetFilter)?;
+
+                        //  let targetDataKeys: Vec<DataKey> = pointerKeys.into_iter().map(|pointerKey| extractTargetDataKeyFromPointerKey!(&*pointerKey)).collect();
 
                         // todo 不知道要不要dedup
-                        Result::<Vec<DataKey>>::Ok(targetDataKeys)
+                        Result::<Vec<(DataKey, RowData)>>::Ok(targetDatas)
                     };
 
                 // 收罗该rel上的全部的src的dataKey
-                let srcDataKeys = {
-                    let srcDataKeys = gatherTargetDataKeys(meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.value())?;
-                    if srcDataKeys.is_empty() {
+                let mut srcRowDatas = {
+                    let srcRowDatas = gatherTargetDatas(meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.value(), selectRel.srcFilter.as_ref())?;
+                    if srcRowDatas.is_empty() {
                         continue;
                     }
-                    srcDataKeys
+                    srcRowDatas
                 };
 
                 // 收罗该rel上的全部的dest的dataKey
-                let destDataKeys = {
-                    let destDataKeys = gatherTargetDataKeys(meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable.value())?;
-                    if destDataKeys.is_empty() {
+                let mut destRowDatas = {
+                    let destRowDatas = gatherTargetDatas(meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable.value(), selectRel.destFilter.as_ref())?;
+                    if destRowDatas.is_empty() {
                         continue;
                     }
-                    destDataKeys
+                    destRowDatas
                 };
 
                 let srcRowDatas = {
-                    // 上轮的全部的多个条目里边的dest的position 和 当前条目的src的position的交集
+                    // 上轮的全部的各个条目里边的destDataKeys 和 当前条目的srcDataKeys的交集
                     let srcRowDatas =
-                        match destDataKeysInPrevSelect {
-                            Some(ref destPositionsInPrevSelect) => {
+                        match destDataKeysInPrevSelectRel {
+                            Some(ref destDataKeysInPrevSelect) => {
+                                let srcDataKeys: Vec<DataKey> = srcRowDatas.iter().map(|(srcDataKey, _)| *srcDataKey).collect();
+
                                 let intersectDataKeys: Vec<DataKey> =
-                                    destPositionsInPrevSelect.iter().filter(|&&destDataKeyInPrevSelect| srcDataKeys.contains(&destDataKeyInPrevSelect)).map(|destDataKey| *destDataKey).collect();
+                                    destDataKeysInPrevSelect.iter().filter(|&&destDataKeyPrevSelect| srcDataKeys.contains(&destDataKeyPrevSelect)).map(|destDataKeyInPrevSelect| *destDataKeyInPrevSelect).collect();
 
                                 // 说明 当前的这个relation的src和上轮的dest没有重合的
                                 if intersectDataKeys.is_empty() {
@@ -140,7 +149,6 @@ impl<'session> CommandExecutor<'session> {
 
                                 // 当前的select的src确定了 还要回去修改上轮的dest
                                 if let Some(prevSelectResultVec) = selectResultVecVec.last_mut() {
-
                                     // 遍历上轮的各个result的dest,把intersect之外的去掉
                                     for prevSelectResult in &mut *prevSelectResultVec {
                                         // https://blog.csdn.net/u011528645/article/details/123117829
@@ -156,17 +164,18 @@ impl<'session> CommandExecutor<'session> {
                                     }
                                 }
 
+                                srcRowDatas.retain(|(srcDataKey, _)| intersectDataKeys.contains(srcDataKey));
+
                                 // 当前的使用intersect为源头
-                                self.getRowDatasByDataKeys(&intersectDataKeys,
-                                                           srcTable.value(),
-                                                           selectRel.srcFilter.as_ref(),
-                                                           selectRel.srcColumnNames.as_ref())?
+                                // self.getRowDatasByDataKeys(&intersectDataKeys,
+                                //                            srcTable.value(),
+                                //                            selectRel.srcFilter.as_ref(),
+                                //                            selectRel.srcColumnNames.as_ref())?
+
+                                srcRowDatas
                             }
-                            // 只会在首轮的
-                            None => self.getRowDatasByDataKeys(&srcDataKeys,
-                                                               srcTable.value(),
-                                                               selectRel.srcFilter.as_ref(),
-                                                               selectRel.srcColumnNames.as_ref())?,
+                            // 第1 round
+                            None => srcRowDatas,
                         };
 
                     if srcRowDatas.is_empty() {
@@ -176,24 +185,77 @@ impl<'session> CommandExecutor<'session> {
                     srcRowDatas
                 };
 
-                let destRowDatas = {
-                    let destRowDatas =
-                        self.getRowDatasByDataKeys(&destDataKeys,
-                                                   &*destTable,
-                                                   selectRel.destFilter.as_ref(),
-                                                   selectRel.destColumnNames.as_ref())?;
-                    if destRowDatas.is_empty() {
-                        continue;
+                // let destRowDatas = {
+                //     let destRowDatas =
+                //         self.getRowDatasByDataKeys(&destRowDatas,
+                //                                    &*destTable,
+                //                                    selectRel.destFilter.as_ref(),
+                //                                   selectRel.destColumnNames.as_ref())?;
+                //    if destRowDatas.is_empty() {
+                //        continue;
+                //    }
+
+                //    destRowDatas
+                // };
+
+                // 收集了当前的relationData的destDataKeys到
+                if selectRel.relationDepth.is_none() {
+                    for (destDataKey, _) in &destRowDatas {
+                        destDataKeysInSelectRel.insert(*destDataKey);
                     }
-
-                    destRowDatas
-                };
-
-                for destPosition in &destDataKeys {
-                    destKeysInCurrentSelect.push(*destPosition);
                 }
 
-                selectResultVecInCurrentSelect.push(
+                // 使用了recursive 需要收集srcDataKey
+                if selectRel.relationDepth.is_some() {
+                    for (srcDataKey, _) in &srcRowDatas {
+                        srcDataKeysInSelectRel.insert(*srcDataKey);
+                    }
+                }
+
+                // parse的时候已经限制了 要是recursive 是 [1..2) 之类的本质和没有recusive相同 会直接拦掉
+                if let Some(relationDepth) = selectRel.relationDepth {
+                    destDataKeysInSelectRel.clear();
+                    let mut a = HashMap::new();
+
+                    match relationDepth {
+                        (Bound::Included(startDepth), Bound::Included(endDepth)) => {
+                            let mut initial: Vec<DataKey> = srcRowDatas.iter().map(|(srcDataKey, _)| *srcDataKey).collect();
+
+                            for depth in startDepth..=endDepth {
+                                let depth =
+                                    if depth == startDepth {  // 第1趟的时候
+                                        depth
+                                    } else {
+                                        1
+                                    };
+
+                                let destRowDatasRecursive =
+                                    self.selectRelRecursive(initial, srcTable.value(), selectRel.srcFilter.as_ref(),
+                                                            meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID,
+                                                            relation.value(), selectRel.relationFilter.as_ref(),
+                                                            meta::POINTER_KEY_TAG_DEST_TABLE_ID,
+                                                            depth)?;
+
+                                if destRowDatasRecursive.is_empty() {
+                                    initial = Vec::new();
+                                    break;
+                                }
+
+                                initial = destRowDatasRecursive.iter().map(|(destDataKeyRecursive, _)| *destDataKeyRecursive).collect();
+
+                                for destDataKeyRecursive in destRowDatasRecursive {
+                                    destDataKeysInSelectRel.insert(destDataKeyRecursive.0);
+                                    a.insert(destDataKeyRecursive.0, destDataKeyRecursive.1);
+                                }
+                            }
+                        }
+                        _ => throw!(""),
+                    };
+
+                    destRowDatas = a.into_iter().map(|entry| { entry }).collect();
+                }
+
+                selectResultVecInSelectRel.push(
                     SelectResult {
                         srcName: selectRel.srcAlias.as_ref().unwrap_or_else(|| &selectRel.srcTableName).clone(),
                         srcRowDatas,
@@ -205,20 +267,19 @@ impl<'session> CommandExecutor<'session> {
                 );
             }
 
-            destDataKeysInPrevSelect = {
-                // 当前的relation select 的多个realtion对应dest全都是empty的
-                if destKeysInCurrentSelect.is_empty() {
+            // 到了这边遍历relationData结束
+
+            destDataKeysInPrevSelectRel = {
+                // 当前的relation select 的多个realtion对应destDataKey全都是empty的
+                if destDataKeysInSelectRel.is_empty() {
+                    // todo 是不是应该全都没有了
                     break 'loopSelectVec;
                 }
 
-                // rust的这个去重有点不同只能去掉连续的重复的 故而需要先排序让重复的连续起来
-                destKeysInCurrentSelect.sort();
-                destKeysInCurrentSelect.dedup();
-
-                Some(destKeysInCurrentSelect)
+                Some(destDataKeysInSelectRel)
             };
 
-            selectResultVecVec.push(selectResultVecInCurrentSelect);
+            selectResultVecVec.push(selectResultVecInSelectRel);
         }
 
         /// ```[[[第1个select的第1行data],[第1个select的第2行data]],[[第2个select的第1行data],[第2个select的第2行data]]]```
@@ -400,42 +461,58 @@ impl<'session> CommandExecutor<'session> {
     }
 
     /// 使用 由端点不断下钻的套路
-    pub(super) fn selectRelRecursive(&self, selectRels: Vec<SelectRel>) -> Result<()> {
-        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+    pub(super) fn selectRelRecursive(&self,
+                                     srcDataKeys: Vec<DataKey>, table: &Table, filter: Option<&Expr>,
+                                     pointerKeyTagNode: KeyTag,
+                                     relation: &Table, relationFilter: Option<&Expr>,
+                                     pointerKeyTagRelation: KeyTag,
+                                     mut depthRemaining: usize) -> Result<Vec<(DataKey, RowData)>> {
+        let last = depthRemaining == 1;
 
-        for selectRel in selectRels {
-            // 得到src上的满足条件的
-            let srcTable = self.getTableRefByName(&selectRel.srcTableName)?;
+        // 和 srcDataKeys 对应的 融合1起的 destDataKeys
+        let mut destRowDataKeysTotal = Vec::new();
+        let mut destRowDataTotal = Vec::new();
 
-            let srcRowDatas =
-                self.scanSatisfiedRows(srcTable.value(),
-                                       selectRel.srcFilter.as_ref(),
-                                       selectRel.srcColumnNames.as_ref(),
-                                       true,
-                                       ScanHooks::default())?;
+        // 多个srcDataKey -> 多个relationData -> 多个destDatas
+        for srcDataKey in srcDataKeys {
+            // 得到对应的relation
+            // relationFilter在过程中是都要的
+            let relationDatas =
+                self.searchDataByPointerKey(table, srcDataKey, pointerKeyTagNode, relation, relationFilter)?;
 
-            let downstreamRelation = self.getTableRefByName(selectRel.relationName.as_ref().unwrap())?;
+            // 遍历各个relationData
+            for (relationDataKey, _) in &relationDatas {
+                // 得到这个relationDataKey上的destDataKeys,在过程中对dest没有过滤需要
+                let destRowDatas =
+                    if last == false {
+                        self.searchDataByPointerKey(relation, *relationDataKey, pointerKeyTagRelation, table, None)?
+                    } else {  // 说明已到了最后了,需要对destDataKeys使用filter
+                        self.searchDataByPointerKey(relation, *relationDataKey, pointerKeyTagRelation, table, filter)?
+                    };
 
-            let mut nodeDataKey_downstreamRelDataKeys = Vec::new();
+                for (destDataKey, destRowData) in destRowDatas {
+                    destRowDataKeysTotal.push(destDataKey);
 
-            // 遍历了各个src 向下顺路寻找相应的且满足筛选的relation
-            for (srcDataKey, _) in srcRowDatas {
-                pointerKeyBuffer.writePointerKeyLeadingPart(srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, downstreamRelation.tableId);
-
-                let downstreamRelDatas =
-                    self.searchRelationByNodePointerKey(srcTable.value(), srcDataKey,
-                                                        meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID,
-                                                        downstreamRelation.value(), selectRel.relationFilter.as_ref())?;
-
-                // 1个src的data可能对应多个满足条件的relation data
-                let downstreamRelDataKeys: Vec<DataKey> =
-                    downstreamRelDatas.into_iter().map(|(downstreamRelDataKey, _)| { downstreamRelDataKey }).collect();
-
-                nodeDataKey_downstreamRelDataKeys.push((srcDataKey, downstreamRelDataKeys))
+                    if last {
+                        destRowDataTotal.push((destDataKey, destRowData));
+                    }
+                }
             }
         }
 
-        Ok(())
+        if destRowDataKeysTotal.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if last {
+            return Ok(destRowDataTotal);
+        }
+
+        self.selectRelRecursive(destRowDataKeysTotal, table, filter,
+                                pointerKeyTagNode,
+                                relation, relationFilter,
+                                pointerKeyTagRelation,
+                                prefix_minus_minus!(depthRemaining))
     }
 
     fn processRowDatasToDisplay(&self, rowDatas: Vec<(DataKey, RowData)>) -> Vec<Value> {
