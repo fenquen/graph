@@ -559,10 +559,11 @@ impl Parser {
 
                 match (exclusive, startDepth) {
                     (false, _) => Bound::Included(startDepth as usize),
-                    (true, _) => Bound::Excluded(startDepth as usize),
+                    (true, _) => Bound::Included((startDepth + 1) as usize), // depth是整数可以转换到Include
                 }
             } else {
-                Bound::Unbounded
+                // 原来的话写的是unbound 要是起点的话和include 1 相同
+                Bound::Included(1)
             }
         };
 
@@ -587,7 +588,7 @@ impl Parser {
             let currentElement = self.getCurrentElementAdvance()?;
             match (endDepth, currentElement.expectTextLiteral(&format!("expect a text literal however got a {:?}", currentElement))?.as_str()) {
                 (Some(endDepth), global::方括号1_STR) => Bound::Included(endDepth as usize),
-                (Some(endDepth), global::圆括号1_STR) => Bound::Excluded(endDepth as usize),
+                (Some(endDepth), global::圆括号1_STR) => Bound::Included((endDepth - 1) as usize),
                 (None, global::方括号1_STR | global::圆括号1_STR) => Bound::Unbounded,
                 (_, _) => self.throwSyntaxErrorDetail("")?,
             }
