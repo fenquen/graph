@@ -66,27 +66,27 @@ impl<'session> CommandExecutor<'session> {
         let mut pointerKeyPrefixBuffer = BytesMut::with_capacity(meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET);
 
         'loopSelectVec:
-        for select in selectRels {
+        for selectRel in selectRels {
             // 为什么要使用{} 不然的话有概率死锁
             // https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
             let relationDatas: Vec<(DataKey, RowData)> = {
-                let relation = self.getTableRefByName(select.relationName.as_ref().unwrap())?;
-                let relationDatas =
-                    self.scanSatisfiedRows(relation.value(),
-                                           select.relationFilter.as_ref(),
-                                           select.relationColumnNames.as_ref(),
-                                           true, ScanHooks::default())?;
-                relationDatas.into_iter().map(|(dataKey, rowData)| (dataKey, rowData)).collect()
+                let relation = self.getTableRefByName(selectRel.relationName.as_ref().unwrap())?;
+
+                // 就像是普通表的搜索,得到满足搜索条件的relation data
+                self.scanSatisfiedRows(relation.value(),
+                                       selectRel.relationFilter.as_ref(),
+                                       selectRel.relationColumnNames.as_ref(),
+                                       true,
+                                       ScanHooks::default())?
             };
 
             let mut selectResultVecInCurrentSelect = Vec::with_capacity(relationDatas.len());
 
             // 融合了当前的select的relationDatas的全部的dest的dataKey
-            let mut destKeysInCurrentSelect = vec![];
+            let mut destKeysInCurrentSelect = Vec::new();
 
-            let srcTable = self.getTableRefByName(&select.srcTableName)?;
-            let destTable = self.getTableRefByName(select.destTableName.as_ref().unwrap())?;
-
+            let srcTable = self.getTableRefByName(&selectRel.srcTableName)?;
+            let destTable = self.getTableRefByName(selectRel.destTableName.as_ref().unwrap())?;
 
             // 遍历当前的select的多个relation
             'loopRelationData:
@@ -97,11 +97,11 @@ impl<'session> CommandExecutor<'session> {
 
                         // todo selectRels时候如何应对pointerKey的mvcc 完成
                         let pointerKeys =
-                            self.searchPointerKeyByPrefix(select.relationName.as_ref().unwrap(),
+                            self.searchPointerKeyByPrefix(selectRel.relationName.as_ref().unwrap(),
                                                           pointerKeyPrefixBuffer.as_ref(),
                                                           SearchPointerKeyHooks::default())?;
 
-                        let targetDataKeys = pointerKeys.into_iter().map(|pointerKey| extractTargetDataKeyFromPointerKey!(&*pointerKey)).collect::<Vec<DataKey>>();
+                        let targetDataKeys: Vec<DataKey> = pointerKeys.into_iter().map(|pointerKey| extractTargetDataKeyFromPointerKey!(&*pointerKey)).collect();
 
                         // todo 不知道要不要dedup
                         Result::<Vec<DataKey>>::Ok(targetDataKeys)
@@ -127,52 +127,67 @@ impl<'session> CommandExecutor<'session> {
 
                 let srcRowDatas = {
                     // 上轮的全部的多个条目里边的dest的position 和 当前条目的src的position的交集
-                    match destDataKeysInPrevSelect {
-                        Some(ref destPositionsInPrevSelect) => {
-                            let intersectDataKeys =
-                                destPositionsInPrevSelect.iter().filter(|&&destDataKeyInPrevSelect| srcDataKeys.contains(&destDataKeyInPrevSelect)).map(|destDataKey| *destDataKey).collect::<Vec<_>>();
+                    let srcRowDatas =
+                        match destDataKeysInPrevSelect {
+                            Some(ref destPositionsInPrevSelect) => {
+                                let intersectDataKeys: Vec<DataKey> =
+                                    destPositionsInPrevSelect.iter().filter(|&&destDataKeyInPrevSelect| srcDataKeys.contains(&destDataKeyInPrevSelect)).map(|destDataKey| *destDataKey).collect();
 
-                            // 说明 当前的这个relation的src和上轮的dest没有重合的
-                            if intersectDataKeys.is_empty() {
-                                continue 'loopRelationData;
-                            }
-
-                            // 当前的select的src确定了 还要回去修改上轮的dest
-                            if let Some(prevSelectResultVec) = selectResultVecVec.last_mut() {
-
-                                // 遍历上轮的各个result的dest,把intersect之外的去掉
-                                for prevSelectResult in &mut *prevSelectResultVec {
-                                    // https://blog.csdn.net/u011528645/article/details/123117829
-                                    prevSelectResult.destRowDatas.retain(|(dataKey, _)| intersectDataKeys.contains(dataKey));
+                                // 说明 当前的这个relation的src和上轮的dest没有重合的
+                                if intersectDataKeys.is_empty() {
+                                    continue 'loopRelationData;
                                 }
 
-                                // destRowDatas是空的话那么把selectResult去掉
-                                prevSelectResultVec.retain(|prevSelectResult| prevSelectResult.destRowDatas.len() > 0);
+                                // 当前的select的src确定了 还要回去修改上轮的dest
+                                if let Some(prevSelectResultVec) = selectResultVecVec.last_mut() {
 
-                                // 连线断掉
-                                if prevSelectResultVec.is_empty() {
-                                    break 'loopSelectVec;
+                                    // 遍历上轮的各个result的dest,把intersect之外的去掉
+                                    for prevSelectResult in &mut *prevSelectResultVec {
+                                        // https://blog.csdn.net/u011528645/article/details/123117829
+                                        prevSelectResult.destRowDatas.retain(|(dataKey, _)| intersectDataKeys.contains(dataKey));
+                                    }
+
+                                    // destRowDatas是空的话那么把selectResult去掉
+                                    prevSelectResultVec.retain(|prevSelectResult| prevSelectResult.destRowDatas.len() > 0);
+
+                                    // 连线断掉
+                                    if prevSelectResultVec.is_empty() {
+                                        break 'loopSelectVec;
+                                    }
                                 }
-                            }
 
-                            // 当前的使用intersect为源头
-                            self.getRowDatasByDataKeys(&intersectDataKeys, srcTable.value(), select.srcFilter.as_ref(), select.srcColumnNames.as_ref())?
-                        }
-                        // 只会在首轮的
-                        None => self.getRowDatasByDataKeys(&srcDataKeys, srcTable.value(), select.srcFilter.as_ref(), select.srcColumnNames.as_ref())?,
+                                // 当前的使用intersect为源头
+                                self.getRowDatasByDataKeys(&intersectDataKeys,
+                                                           srcTable.value(),
+                                                           selectRel.srcFilter.as_ref(),
+                                                           selectRel.srcColumnNames.as_ref())?
+                            }
+                            // 只会在首轮的
+                            None => self.getRowDatasByDataKeys(&srcDataKeys,
+                                                               srcTable.value(),
+                                                               selectRel.srcFilter.as_ref(),
+                                                               selectRel.srcColumnNames.as_ref())?,
+                        };
+
+                    if srcRowDatas.is_empty() {
+                        continue;
                     }
+
+                    srcRowDatas
                 };
-                if srcRowDatas.is_empty() {
-                    continue;
-                }
 
                 let destRowDatas = {
-                    let destTable = self.getTableRefByName(select.destTableName.as_ref().unwrap())?;
-                    self.getRowDatasByDataKeys(&destDataKeys, &*destTable, select.destFilter.as_ref(), select.destColumnNames.as_ref())?
+                    let destRowDatas =
+                        self.getRowDatasByDataKeys(&destDataKeys,
+                                                   &*destTable,
+                                                   selectRel.destFilter.as_ref(),
+                                                   selectRel.destColumnNames.as_ref())?;
+                    if destRowDatas.is_empty() {
+                        continue;
+                    }
+
+                    destRowDatas
                 };
-                if destRowDatas.is_empty() {
-                    continue;
-                }
 
                 for destPosition in &destDataKeys {
                     destKeysInCurrentSelect.push(*destPosition);
@@ -180,11 +195,11 @@ impl<'session> CommandExecutor<'session> {
 
                 selectResultVecInCurrentSelect.push(
                     SelectResult {
-                        srcName: select.srcAlias.as_ref().unwrap_or_else(|| &select.srcTableName).to_string(),
+                        srcName: selectRel.srcAlias.as_ref().unwrap_or_else(|| &selectRel.srcTableName).clone(),
                         srcRowDatas,
-                        relationName: select.relationAlias.as_ref().unwrap_or_else(|| select.relationName.as_ref().unwrap()).to_string(),
+                        relationName: selectRel.relationAlias.as_ref().unwrap_or_else(|| selectRel.relationName.as_ref().unwrap()).clone(),
                         relationData,
-                        destName: select.destAlias.as_ref().unwrap_or_else(|| select.destTableName.as_ref().unwrap()).to_string(),
+                        destName: selectRel.destAlias.as_ref().unwrap_or_else(|| selectRel.destTableName.as_ref().unwrap()).clone(),
                         destRowDatas,
                     }
                 );
@@ -209,7 +224,7 @@ impl<'session> CommandExecutor<'session> {
         /// ```[[[第1个select的第1行data],[第1个select的第2行data]],[[第2个select的第1行data],[第2个select的第2行data]]]```
         /// 到时候要生成4条脉络
         fn handleResult(selectResultVecVec: Vec<Vec<SelectResult>>) -> Vec<Value> {
-            let mut valueVec = Vec::default();
+            let mut valueVec = Vec::new();
 
             if selectResultVecVec.is_empty() {
                 return valueVec;
