@@ -30,7 +30,12 @@ pub(super) struct ScanHooks<A, B, C, D> where A: ScanCommittedPreProcessor,
     pub(super) scanUncommittedPostProcessor: Option<D>,
 }
 
-impl Default for ScanHooks<Box<dyn ScanCommittedPreProcessor>, Box<dyn ScanCommittedPostProcessor>, Box<dyn ScanUncommittedPreProcessor>, Box<dyn ScanUncommittedPostProcessor>> {
+impl Default for ScanHooks<
+    Box<dyn ScanCommittedPreProcessor>,
+    Box<dyn ScanCommittedPostProcessor>,
+    Box<dyn ScanUncommittedPreProcessor>,
+    Box<dyn ScanUncommittedPostProcessor>
+> {
     fn default() -> Self {
         ScanHooks {
             scanCommittedPreProcessor: None,
@@ -80,7 +85,7 @@ impl<'session> CommandExecutor<'session> {
 
         let mut process =
             |dataKey: DataKey| -> Result<()> {
-                // todo getRowDatasByDataKeys 增加对uncommitted的区域的搜索
+                // todo getRowDatasByDataKeys 增加对uncommitted的区域的搜索 完成
                 // 习惯的套路就和scan函数里边1样 都是先搜索committed然后是uncommitted 这对scan来说是可以的
                 // 对这边的直接通过datakey获取有点不合适了 搜索uncommitted逻辑要到前边,要是有的话可以提前return
                 if let Some(tableMutations) = tableMutations {
@@ -130,6 +135,7 @@ impl<'session> CommandExecutor<'session> {
                 process(dataKey)?;
             }
         } else {
+            // todo 使用rayon 遍历
             for dataKey in dataKeys {
                 process(*dataKey)?;
             }
@@ -180,7 +186,6 @@ impl<'session> CommandExecutor<'session> {
                     }
 
                     let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
-
 
                     // mvcc的visibility筛选
                     if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
