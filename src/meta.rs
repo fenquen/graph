@@ -287,7 +287,6 @@ impl ColumnType {
             (ColumnType::String, GraphValue::String(_)) => true,
             (ColumnType::Integer, GraphValue::Integer(_)) => true,
             (ColumnType::Decimal, GraphValue::Decimal(_)) => true,
-            (ColumnType::PointDesc, GraphValue::PointDesc(_)) => true,
             (_, GraphValue::Null) => true,
             _ => false
         }

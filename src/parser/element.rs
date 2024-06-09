@@ -1,7 +1,6 @@
 use std::fmt::{Debug, Display, Formatter};
 use serde::{Deserialize, Serialize};
 use crate::{global, suffix_plus_plus, throw};
-use crate::graph_value::PointDesc;
 use crate::parser::op::{LogicalOp, MathCalcOp, Op, SqlOp};
 use crate::parser::Parser;
 use anyhow::Result;
@@ -18,8 +17,6 @@ pub enum Element {
     Boolean(bool),
     /// 对应"->"
     To,
-    /// parse时候用不到的 link用到
-    PointDesc(PointDesc),
     Null,
 }
 

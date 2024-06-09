@@ -57,6 +57,7 @@ impl Default for SearchPointerKeyHooks<Box<dyn CommittedPointerKeyProcessor>, Bo
 }
 
 impl<'session> CommandExecutor<'session> {
+    // todo 实现不实际捞取数据的
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
     pub(super) fn getRowDatasByDataKeys(&self,
                                         dataKeys: &[DataKey],
@@ -516,11 +517,11 @@ impl<'session> CommandExecutor<'session> {
         Ok(keys)
     }
 
-    /// 以node的pointerKey入手 搜索相应的满足条件的relation
-    pub(super) fn searchDataByPointerKey(&self,
-                                         src: &Table, srcDataKey: DataKey,
-                                         pointerKeyTag: KeyTag,
-                                         dest: &Table, destFilter: Option<&Expr>) -> Result<Vec<(DataKey, RowData)>> {
+    /// 以某个pointerKeyPrefix入手(限定打动了targetTableId) 搜索相应的满足条件的
+    pub(super) fn searchDataByPointerKeyPrefix(&self,
+                                               src: &Table, srcDataKey: DataKey,
+                                               pointerKeyTag: KeyTag,
+                                               dest: &Table, destFilter: Option<&Expr>) -> Result<Vec<(DataKey, RowData)>> {
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
         pointerKeyBuffer.writePointerKeyLeadingPart(srcDataKey, pointerKeyTag, dest.tableId);
 

@@ -21,7 +21,6 @@ pub enum GraphValue {
     Integer(i64),
     Decimal(f64),
     Null,
-    PointDesc(PointDesc),
 }
 
 /// type标识(u8) + 内容长度(u32,对应的是变长的 Pending String PoinstDesc) + 内容
@@ -33,7 +32,7 @@ impl BinaryCodec for GraphValue {
         let typeTag = srcByteSlice.bytes.get_u8();
 
         match typeTag {
-            GraphValue::PENDING | GraphValue::STRING | GraphValue::POINT_DESC => {
+            GraphValue::PENDING | GraphValue::STRING=> {
                 let contentLen = srcByteSlice.bytes.get_u32() as usize;
                 // let currentPos = srcByteSlice.position();
                 // 不需要绝对的position 需要相对的 上边的绝对的currentPos用不到了
@@ -44,7 +43,6 @@ impl BinaryCodec for GraphValue {
                 match typeTag {
                     GraphValue::PENDING => Ok(GraphValue::Pending(String::from_utf8_lossy(slice).to_string())),
                     GraphValue::STRING => Ok(GraphValue::String(String::from_utf8_lossy(slice).to_string())),
-                    GraphValue::POINT_DESC => Ok(GraphValue::PointDesc(serde_json::from_slice(slice)?)),
                     _ => panic!("impossible")
                 }
             }
@@ -80,12 +78,6 @@ impl BinaryCodec for GraphValue {
                 destByteSlice.put_u8(GraphValue::DECIMAL);
                 destByteSlice.put_f64(*s);
             }
-            GraphValue::PointDesc(pointDesc) => {
-                destByteSlice.put_u8(GraphValue::POINT_DESC);
-                let jsonString = serde_json::to_string(pointDesc)?;
-                destByteSlice.put_u32(jsonString.as_bytes().len() as u32);
-                destByteSlice.put_slice(jsonString.as_bytes());
-            }
             GraphValue::Null => destByteSlice.put_u8(GraphValue::NULL),
         }
 
@@ -103,7 +95,6 @@ impl Serialize for GraphValue {
                 GraphValue::Boolean(s) => s.serialize(serializer),
                 GraphValue::Integer(s) => s.serialize(serializer),
                 GraphValue::Decimal(s) => s.serialize(serializer),
-                GraphValue::PointDesc(s) => s.serialize(serializer),
                 GraphValue::Null => serializer.serialize_none(),
             }
         } else {
@@ -128,10 +119,6 @@ impl Serialize for GraphValue {
                 }
                 GraphValue::Decimal(s) => {
                     serialMap.serialize_key("Decimal")?;
-                    serialMap.serialize_value(s)?;
-                }
-                GraphValue::PointDesc(s) => {
-                    serialMap.serialize_key("PointDesc")?;
                     serialMap.serialize_value(s)?;
                 }
                 GraphValue::Null => {
@@ -168,7 +155,6 @@ impl TryFrom<&Element> for GraphValue {
             Element::IntegerLiteral(integer) => Ok(GraphValue::Integer(*integer)),
             Element::DecimalLiteral(decimal) => Ok(GraphValue::Decimal(*decimal)),
             Element::TextLiteral(columnName) => Ok(GraphValue::Pending(columnName.clone())),
-            Element::PointDesc(pointDesc) => Ok(GraphValue::PointDesc(pointDesc.clone())),
             Element::Null => Ok(GraphValue::Null),
             _ => throw!(&format!("element:{element:?} can not be transform to GraphValue")),
         }
@@ -202,14 +188,6 @@ impl GraphValue {
             Ok(*bool)
         } else {
             throw!(&format!("not boolean, is {self:?}"))
-        }
-    }
-
-    pub fn asPointDesc(&self) -> Result<&PointDesc> {
-        if let GraphValue::PointDesc(pointDesc) = self {
-            Ok(pointDesc)
-        } else {
-            throw!(&format!("not PointDEsc, is {self:?}"))
         }
     }
 
@@ -367,18 +345,6 @@ impl GraphValue {
 
         Ok(GraphValue::Boolean(true))
     }
-}
-
-/// relation data的用来描述两边的
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PointDesc {
-    pub tableName: String,
-    pub positions: Vec<DataKey>,
-}
-
-impl PointDesc {
-    pub const SRC: &'static str = "src";
-    pub const DEST: &'static str = "dest";
 }
 
 #[cfg(test)]
