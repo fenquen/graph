@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::{Range, RangeFrom};
+use std::sync::atomic::Ordering;
 use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, IterationCmd};
@@ -173,6 +174,8 @@ impl<'session> CommandExecutor<'session> {
 
                 // mvcc的visibility筛选
                 let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
+
+                let latestRowId = table.rowIdCounter.load(Ordering::Acquire);
 
                 // todo scan遍历能不能concurrent
                 // 对data条目而不是pointer条目遍历

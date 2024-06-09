@@ -27,6 +27,7 @@ pub struct Session {
     dataStore: &'static DB,
     pub tableName_mutations: RefCell<HashMap<String, TableMutations>>,
     snapshot: Option<Snapshot<'static>>,
+    scanConcurrency: usize,
 }
 
 impl Session {
@@ -146,22 +147,6 @@ impl Session {
         Ok(())
     }
 
-    fn needInTx(&self) -> Result<()> {
-        if self.notInTx() {
-            throw!("not in a transaction")
-        } else {
-            Ok(())
-        }
-    }
-
-    fn needNotInTx(&self) -> Result<()> {
-        if self.notInTx() == false {
-            throw!("you have not commit a previous tx")
-        } else {
-            Ok(())
-        }
-    }
-
     fn notInTx(&self) -> bool {
         self.txId.is_none() || self.snapshot.is_none()
     }
@@ -174,6 +159,11 @@ impl Session {
 
         self.autoCommit = autoCommit;
 
+        Ok(())
+    }
+
+    pub fn setScanConcurrency(&mut self, scanConcurrency: usize) -> Result<()> {
+        self.scanConcurrency = scanConcurrency;
         Ok(())
     }
 
@@ -298,6 +288,7 @@ impl Default for Session {
             txId: None,
             tableName_mutations: Default::default(),
             snapshot: None,
+            scanConcurrency: 1,
         }
     }
 }

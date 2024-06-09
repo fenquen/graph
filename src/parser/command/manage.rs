@@ -8,6 +8,7 @@ use crate::parser::element::Element;
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Set {
     SetAutoCommit(bool),
+    SetScanConcurrency(usize),
 }
 
 // todo manage体系的命令要通过sql实现 完成
@@ -46,6 +47,19 @@ impl Parser {
                         }
                     }
                     _ => self.throwSyntaxErrorDetail("set autocommit should use true/false ,0/not 0, on/off")?,
+                }
+            }
+            "scan concurrency" => {
+                if let Element::IntegerLiteral(scanConcurrency) = self.getCurrentElementAdvance()? {
+                    let scanConcurrency = *scanConcurrency;
+
+                    if 0 >= scanConcurrency {
+                        self.throwSyntaxErrorDetail("scan concurrency should be positive")?;
+                    }
+
+                    Ok(Command::Set(Set::SetScanConcurrency(scanConcurrency as usize)))
+                } else {
+                    self.throwSyntaxErrorDetail("scan concurrency should be integer")?
                 }
             }
             _ => self.throwSyntaxErrorDetail(&format!("set {} not supported", targetName))?,

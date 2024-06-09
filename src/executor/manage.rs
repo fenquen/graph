@@ -17,6 +17,7 @@ impl<'session> CommandExecutor<'session> {
     pub(in crate::executor) fn set(&mut self, set: &Set) -> Result<CommandExecResult> {
         match set {
             Set::SetAutoCommit(b) => self.session.setAutoCommit(*b)?,
+            Set::SetScanConcurrency(scanConcurrency) => self.session.setScanConcurrency(*scanConcurrency)?,
             _ => throw!(&format!("{:?} not supported", set))
         }
 
