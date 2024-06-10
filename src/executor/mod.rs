@@ -65,7 +65,8 @@ impl<'session> CommandExecutor<'session> {
                         name: table.name.clone(),
                         columns: table.columns.clone(),
                         type0: table.type0.clone(),
-                        rowIdCounter: AtomicU64::default(),
+                        // todo rowId 要从1起 完成
+                        rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
                         tableId: TableId::default(),
                         createIfNotExist: table.createIfNotExist,
                     };
