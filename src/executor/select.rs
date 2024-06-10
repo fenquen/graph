@@ -180,7 +180,6 @@ impl<'session> CommandExecutor<'session> {
                 };
 
 
-
                 // 收集了当前的relationData的destDataKeys到
                 if selectRel.relationDepth.is_none() {
                     for (destDataKey, _) in &destRowDatas {
@@ -335,6 +334,8 @@ impl<'session> CommandExecutor<'session> {
     /// searchPointerKeys得到(committed uncommitted)属于node的,满足位置要求的,指向relation的pointerKey <br>
     /// 到pointerKey提取relation的dataKey <br>
     /// 调用getByDataKeys(committed uncommitted) 融合 对relarion的过滤条件 确定 relation是不是满足
+    /// <br>
+    /// 相当是在原来基础上再加上对data指向的rel的筛选
     fn selectTableUnderRels(&self, selectTableUnderRels: &SelectTableUnderRels) -> Result<CommandExecResult> {
         // 先要以普通select table体系筛选 然后对pointerKey筛选
         let table = self.getTableRefByName(selectTableUnderRels.selectTable.tableName.as_str())?;

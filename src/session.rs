@@ -6,7 +6,7 @@ use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::sleep;
@@ -25,9 +25,9 @@ pub struct Session {
     autoCommit: bool,
     txId: Option<TxId>,
     dataStore: &'static DB,
-    pub tableName_mutations: RefCell<HashMap<String, TableMutations>>,
+    pub tableName_mutations: RwLock<HashMap<String, TableMutations>>,
     snapshot: Option<Snapshot<'static>>,
-    scanConcurrency: usize,
+    pub scanConcurrency: usize,
 }
 
 impl Session {
@@ -75,8 +75,8 @@ impl Session {
 
         let mut batch = WriteBatchWithTransaction::<false>::default();
 
-        for (tableName, mutations) in self.tableName_mutations.borrow().iter() {
-            let colFamily = self.getColFamily(tableName)?;
+        for (tableName, mutations) in self.tableName_mutations.read().unwrap().iter() {
+            let colFamily = Session::getColFamily(tableName)?;
             for (key, value) in mutations {
                 batch.put_cf(&colFamily, key, value);
             }
@@ -86,7 +86,7 @@ impl Session {
         {
             let currentTxId = self.txId.unwrap();
             // cf需要现用现取 内部使用的是read 而create cf会用到write
-            let cf = self.getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
+            let cf = Session::getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
 
             if (currentTxId - *meta::TX_ID_START_UP.getRef()) % meta::TX_UNDERGOING_MAX_COUNT as u64 == 0 {
                 // TX_CONCURRENCY_MAX
@@ -124,7 +124,7 @@ impl Session {
     fn clean(&mut self) {
         self.txId = None;
         self.snapshot = None;
-        self.tableName_mutations.borrow_mut().clear();
+        self.tableName_mutations.write().unwrap().clear();
     }
 
     fn generateTx(&mut self) -> Result<()> {
@@ -142,7 +142,7 @@ impl Session {
         }
         self.txId = Some(meta::TX_ID_COUNTER.fetch_add(1, Ordering::AcqRel));
         self.snapshot = Some(self.dataStore.snapshot());
-        self.tableName_mutations.borrow_mut().clear();
+        self.tableName_mutations.write().unwrap().clear();
 
         Ok(())
     }
@@ -174,7 +174,7 @@ impl Session {
         }
     }
 
-    pub fn getColFamily(&self, colFamilyName: &str) -> Result<ColumnFamily> {
+    pub fn getColFamily(colFamilyName: &str) -> Result<ColumnFamily> {
         match meta::STORE.dataStore.cf_handle(colFamilyName) {
             Some(cf) => Ok(cf),
             None => throw!(&format!("column family:{} not exist", colFamilyName))
@@ -249,7 +249,7 @@ impl Session {
     }
 
     fn writeMutation(&self, tableName: &String, mutation: Mutation) {
-        let mut tableName_mutationsOnTable = self.tableName_mutations.borrow_mut();
+        let mut tableName_mutationsOnTable = self.tableName_mutations.write().unwrap();
         let mutationsOnTable = tableName_mutationsOnTable.getMutWithDefault(tableName);
 
         match mutation {

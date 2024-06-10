@@ -5,6 +5,7 @@ use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::executor::mvcc::BytesMutExt;
 use crate::executor::store::ScanHooks;
 use crate::parser::command::unlink::{Unlink, UnlinkLinkStyle, UnlinkSelfStyle};
+use crate::session::Session;
 use crate::types::{ColumnFamily, DataKey, ScanCommittedPreProcessor};
 
 impl<'session> CommandExecutor<'session> {
@@ -23,7 +24,7 @@ impl<'session> CommandExecutor<'session> {
         let destTable = self.getTableRefByName(&unlinkLinkStyle.destTableName)?;
         let srcTable = self.getTableRefByName(&unlinkLinkStyle.srcTableName)?;
 
-        let relationColumnFamily = self.session.getColFamily(unlinkLinkStyle.relationName.as_str())?;
+        let relationColumnFamily = Session::getColFamily(unlinkLinkStyle.relationName.as_str())?;
 
         // 得到rel 干掉指向src和dest的pointer key
         let relationRowDatas =

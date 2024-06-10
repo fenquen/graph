@@ -85,9 +85,9 @@ impl<'session> CommandExecutor<'session> {
             };
 
             // 如何应对多个的select
-            if let CommandExecResult::SelectResult(values) = executionResult {
-                println!("{}\n", serde_json::to_string(&values)?);
-                valueVecVec.push(values);
+            if let CommandExecResult::SelectResult(valueVec) = executionResult {
+                println!("{}\n", serde_json::to_string(&valueVec)?);
+                valueVecVec.push(valueVec);
             }
         }
 

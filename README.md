@@ -172,7 +172,7 @@ select user(id=1 and 0=0) -usage(number > 0) as usage0-> car
     "usage0": {
       "number": 12
     },
-     "car": [
+    "car": [
       {
         "color": "red",
         "id": 34
@@ -265,6 +265,55 @@ select user(id = 1 ) as user0 ,in usage (number > 7) ,as end in own(number =7)
 ]
 ```
 
+##### 关系的深度查询
+
+例如user之间存在likes关系如下
+
+```text
+create table if not exist user (id integer,name string)
+
+insert into user values (1,'tom0')
+insert into user values (2,'tom2')
+insert into user values (3,'tom3')
+insert into user values (4,'tom4')
+insert into user values (5,'tom5')
+insert into user values (6,'tom6')
+insert into user values (7,'tom7')
+
+create relation likes(level integer)
+
+link user(id =1) to user(id=2) by likes(level =0)
+link user(id =2) to user(id=3) by likes(level =0)
+link user(id =3) to user(id=4) by likes(level =0)
+link user(id =4) to user(id=5) by likes(level =0)
+link user(id =5) to user(id=6) by likes(level =0)
+link user(id= 6) to user(id=7) by likes(level =0)
+```
+
+现要查询likes深度是6层的user
+
+```text
+select user as user0 -likes recursive[6..6]-> user as user1
+```
+
+```json
+[
+  {
+    "user0": [
+      {
+        "id": 1,
+        "name": "tom0"
+      }
+    ],
+    "user1": [
+      {
+        "id": 7,
+        "name": "tom7"
+      }
+    ]
+  }
+]
+```
 ### 删除普通表的数据
 
 删掉id是1的user
@@ -286,8 +335,8 @@ update user[name ='tom0'](id=1)
 
 ```json
 {
-    "success": false,
-    "errorMsg": "graph error message:update can not execute, because data has been linked",
-    "data": null
+  "success": false,
+  "errorMsg": "graph error message:update can not execute, because data has been linked",
+  "data": null
 }
 ```

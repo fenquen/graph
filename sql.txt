@@ -46,6 +46,7 @@ select user(id = 1) -likes() recursive(1 .. 9]-> user(age > 2)
 }
 
 create table if not exist user (id integer,name string)
+
 insert into user values (1,'tom0')
 insert into user values (2,'tom2')
 insert into user values (3,'tom3')

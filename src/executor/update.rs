@@ -35,7 +35,6 @@ impl<'session> CommandExecutor<'session> {
             columnName_column
         };
 
-
         // 因不会改变环境的变量 故而是Fn不是FnMut 不需要像selectUnderRels()那样使用 RefCell
         let checkPointerKeyPrefixedBy =
             |pointerKey: &[Byte], pointerKeyPrefix: &[Byte]| { // pointerKey是通过了visibility的 包含committed  uncommitted
@@ -89,8 +88,11 @@ impl<'session> CommandExecutor<'session> {
         };
 
         let mut pairs =
-            self.scanSatisfiedRows(table.value(), update.filterExpr.as_ref(),
-                                   None, true, scanHooks)?;
+            self.scanSatisfiedRows(table.value(),
+                                   update.filterExpr.as_ref(),
+                                   None,
+                                   true,
+                                   scanHooks)?;
 
         enum A<'a> {
             DirectValue(GraphValue),
