@@ -2,17 +2,18 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::{Range, RangeFrom};
 use std::sync::atomic::Ordering;
+use std::thread;
 use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, IterationCmd};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey, global, meta, throw, types, u64ToByteArrRef};
+use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey, global, keyPrefixAddRowId, meta, suffix_plus_plus, throw, types, u64ToByteArrRef};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor, KeyTag};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor, KeyTag, RowId};
 use anyhow::Result;
 use crate::executor::mvcc::BytesMutExt;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
@@ -176,6 +177,44 @@ impl<'session> CommandExecutor<'session> {
                 let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
 
                 let latestRowId = table.rowIdCounter.load(Ordering::Acquire);
+                let scanConcurrency = 2;
+                let distance = latestRowId - meta::ROW_ID_INVALID;
+                const COUNT_PER_THREAD: u64 = 100000;
+                let tail = distance % COUNT_PER_THREAD;
+                let mut concurrencyNeed = distance / COUNT_PER_THREAD;
+                if concurrencyNeed > 0 {
+                    if tail >= COUNT_PER_THREAD / 2 {
+                        suffix_plus_plus!(concurrencyNeed);
+                    }
+
+                    if concurrencyNeed > scanConcurrency {
+                        concurrencyNeed = scanConcurrency;
+                    }
+
+                    let interval = distance / concurrencyNeed;
+
+                    let mut ranges: Vec<(DataKey, DataKey)> = Vec::new();
+
+                    let mut lastRoundEnd = meta::ROW_ID_INVALID;
+
+                    for a in 0..concurrencyNeed {
+                        let start: RowId = lastRoundEnd + 1 + a * interval;
+                        let end: RowId = start + (a + 1) * interval;
+
+                        ranges.push((keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, start), keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, end)));
+                    }
+
+
+                    for (dataKeyStart, dataKeyEnd) in ranges {
+                        let tableName = table.name.clone();
+                        thread::spawn(move || {
+                            let c = self.session.getColFamily(&table.name)?;
+                            snapshot.iterator_cf(&c, IteratorMode::From(u64ToByteArrRef!(dataKeyStart), Direction::Forward));
+
+                            Result::<()>::Ok(())
+                        });
+                    }
+                }
 
                 // todo scan遍历能不能concurrent
                 // 对data条目而不是pointer条目遍历

@@ -21,6 +21,7 @@ futures = { version = "0.3.30",features = ["default"] }
 tokio-tungstenite = "0.21.0"
 futures-channel = "0.3.30"
 futures-util = "0.3.30"
+num_cpus = "1.16.0"
 
 
 # https://course.rs/cargo/reference/profiles.html
