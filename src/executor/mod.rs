@@ -44,7 +44,7 @@ enum CommandExecResult {
 }
 
 pub struct CommandExecutor<'session> {
-    pub session: &'session mut Session,
+    session: &'session mut Session,
 }
 
 impl<'session> CommandExecutor<'session> {
