@@ -149,7 +149,7 @@ impl<'session> CommandExecutor<'session> {
 
     // todo 实现 index
     // 如果传递的是fn()的话(不是Fn)是函数指针而不是闭包 不能和上下文有联系 闭包返回false 那么 continue
-    /// 目前用到hook的地点有 update selectTableUnderRels
+    /// 目前用到hook的地点有 update() selectTableUnderRels()
     pub(super) fn scanSatisfiedRows<A, B, C, D>(&self, table: &Table,
                                                 tableFilter: Option<&Expr>,
                                                 selectedColumnNames: Option<&Vec<String>>,
@@ -174,53 +174,76 @@ impl<'session> CommandExecutor<'session> {
 
                 let mut serialScan = true;
 
+                // 如果设置 scanConcurrency >1 说明是有 concurrent可能,到底是不是还要看下边的
                 if self.session.scanConcurrency > 1 {
                     const COUNT_PER_THREAD: u64 = 2;
+
+                    // 计算需要多少 concurrency
                     let latestRowId = table.rowIdCounter.load(Ordering::Acquire) - 1;
                     let distance = latestRowId - meta::ROW_ID_INVALID;
-                    let mut concurrencyNeed = distance / COUNT_PER_THREAD;
+                    let mut concurrency = distance / COUNT_PER_THREAD;
 
-                    if concurrencyNeed > 1 {
+                    if concurrency > 1 {
                         serialScan = false;
 
-                        if concurrencyNeed > self.session.scanConcurrency as u64 {
-                            concurrencyNeed = self.session.scanConcurrency as u64;
+                        if concurrency > self.session.scanConcurrency as u64 {
+                            concurrency = self.session.scanConcurrency as u64;
                         }
 
-                        let interval = distance / concurrencyNeed;
-                        let mut ranges: Vec<(DataKey, DataKey)> = Vec::new();
+                        let rowCountPerThread = distance / concurrency;
+
+                        // range的两边都是闭区间
+                        // 以下是给各个thread使用itetate的range
+                        let mut ranges: Vec<(DataKey, DataKey)> = Vec::with_capacity(concurrency as usize + 1);
                         let mut lastRoundEnd = meta::ROW_ID_INVALID;
-                        for a in 0..concurrencyNeed {
-                            let start: RowId = lastRoundEnd + 1 + a * interval;
-                            let end: RowId = start + (a + 1) * interval;
+                        for _ in 0..concurrency {
+                            let start: RowId = lastRoundEnd + 1;
+                            let end: RowId = start + rowCountPerThread;
 
                             ranges.push((keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, start), keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, end)));
+
+                            lastRoundEnd = end;
                         }
+                        // 不要忘了到末尾的tail
                         ranges.push((keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, lastRoundEnd + 1), keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, meta::ROW_ID_MAX)));
 
                         let mut threadList = Vec::with_capacity(ranges.len());
 
+                        // 以下是相当危险的,rust的引用直接转换成指针对应的数字,然后跨thread传递
+                        // 能这么干的原因是,知道concurrent scan的涉及范围 会限制在当前函数之内 不会逃逸 因为后边要等待它们都结束
+                        // 然而编译器是不知道这么细的细节的 只能1棒杀掉报错
+                        let commandExecutorPointer = self as *const CommandExecutor as u64;
+                        let scanHooksPointer = &mut scanHooks as *mut ScanHooks<A, B, C, D> as u64;
+                        let tableFilterPointer = match tableFilter {
+                            Some(expr) => Some(expr as *const Expr as u64),
+                            None => None
+                        };
+                        let selectedColumnNamesPointer = match selectedColumnNames {
+                            Some(selectedColumnNames) => Some(selectedColumnNames as *const Vec<String> as u64),
+                            None => None
+                        };
                         for (dataKeyStart, dataKeyEnd) in ranges {
                             let tableName = table.name.clone();
-                            let scanHooksPointer = &mut scanHooks as *mut ScanHooks<A, B, C, D> as u64;
-                            let commandExecutorPointer = self as *const CommandExecutor as u64;
 
-                            let a = thread::spawn(move || unsafe {
+                            let thread = thread::spawn(move || unsafe {
+                                // 还原变为
                                 let commandExecutor: &CommandExecutor<'session> = mem::transmute(commandExecutorPointer as *const CommandExecutor);
+                                let tableFilter: Option<&Expr> = tableFilterPointer.map(|tableFilterPointer| mem::transmute(tableFilterPointer as *const Expr));
+                                let selectedColumnNames: Option<&Vec<String>> = selectedColumnNamesPointer.map(|selectedColumnNamesPointer| mem::transmute(selectedColumnNamesPointer as *const Vec<String>));
                                 let scanHooks: &mut ScanHooks<A, B, C, D> = mem::transmute(scanHooksPointer as *mut ScanHooks<A, B, C, D>);
 
                                 let table = commandExecutor.getTableRefByName(tableName.as_str())?;
                                 let snapshot = commandExecutor.session.getSnapshot()?;
+                                // column不是sync的 只能到thread上建立的
                                 let columnFamily = Session::getColFamily(tableName.as_str())?;
 
                                 let tableName_mutationsOnTable = commandExecutor.session.tableName_mutations.read().unwrap();
-                                let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(&table.name);
-
-                                let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
+                                let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(table.name.as_str());
 
                                 let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+                                let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
 
-                                let mut rows = Vec::new();
+                                let mut rowDatas = Vec::new();
 
                                 for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(u64ToByteArrRef!(dataKeyStart), Direction::Forward)) {
                                     let (dataKeyBinary, rowDataBinary) = iterResult?;
@@ -254,21 +277,21 @@ impl<'session> CommandExecutor<'session> {
                                         }
                                     }
 
-                                    if let Some(rowData) = commandExecutor.readRowDataBinary(table.value(), &*rowDataBinary, None, None)? {
+                                    if let Some(rowData) = commandExecutor.readRowDataBinary(table.value(), &*rowDataBinary, tableFilter, selectedColumnNames)? {
                                         // committed post
                                         if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
                                             if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
                                                 continue;
                                             }
                                         }
-                                        rows.push((dataKey, rowData));
+                                        rowDatas.push((dataKey, rowData));
                                     }
                                 }
 
-                                Result::<Vec<(DataKey, RowData)>>::Ok(rows)
+                                Result::<Vec<(DataKey, RowData)>>::Ok(rowDatas)
                             });
 
-                            threadList.push(a);
+                            threadList.push(thread);
                         }
 
                         for thread in threadList {
@@ -337,7 +360,7 @@ impl<'session> CommandExecutor<'session> {
 
                 satisfiedRows
             } else { // 说明是link 且尚未写filter
-                let mut rawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily) as DBRawIterator;
+                let mut rawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
                 rawIterator.seek(meta::DATA_KEY_PATTERN);
 
                 if rawIterator.valid() == false {
@@ -349,7 +372,7 @@ impl<'session> CommandExecutor<'session> {
 
                     // end include
                     // seek_for_prev 意思是 定位到目标 要是目标没有的话 那么定位到它前个
-                    rawIterator.seek_for_prev(u64ToByteArrRef!(((meta::KEY_PREFIX_DATA + 1) as u64)  << meta::ROW_ID_BIT_LEN));
+                    rawIterator.seek_for_prev(u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, meta::ROW_ID_MAX)));
                     let endKeyBinInclude = rawIterator.key().unwrap();
                     let endKeyInclude = byte_slice_to_u64!(endKeyBinInclude);
 

@@ -144,7 +144,7 @@ impl Parser {
                                 let mut parser = Parser::default();
                                 parser.elementVecVec.push(exprElementVec);
                                 link.relationColumnExprs.push(parser.parseExpr(false)?);
-                                exprElementVec = Default::default();
+                                // exprElementVec = Default::default();
                                 break;
                             }
                         }

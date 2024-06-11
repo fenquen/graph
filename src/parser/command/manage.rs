@@ -49,7 +49,7 @@ impl Parser {
                     _ => self.throwSyntaxErrorDetail("set autocommit should use true/false ,0/not 0, on/off")?,
                 }
             }
-            "scan concurrency" => {
+            "scanconcurrency" => {
                 if let Element::IntegerLiteral(scanConcurrency) = self.getCurrentElementAdvance()? {
                     let scanConcurrency = *scanConcurrency;
 

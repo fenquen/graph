@@ -252,7 +252,7 @@ impl Parser {
                                     let mut exprParser = Parser::default();
                                     exprParser.elementVecVec.push(pendingElementVec);
                                     exprParserVec.push(exprParser);
-                                    pendingElementVec = Vec::new();
+                                    // pendingElementVec = Vec::new();
                                 }
                                 break;
                             } else {

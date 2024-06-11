@@ -21,6 +21,7 @@ impl<'session> CommandExecutor<'session> {
     /// 如果不是含有relation的select 便是普通的select
     pub(super) fn select(&self, selectFamily: &Select) -> Result<CommandExecResult> {
         match selectFamily {
+            // todo 实现对普通select的 offset limit
             // 普通模式不含有relation
             Select::SelectTable(selectTable) => self.selectTable(selectTable),
             Select::SelectRels(selectVec) => self.selectRels(selectVec),
@@ -94,7 +95,7 @@ impl<'session> CommandExecutor<'session> {
             // 遍历当前的selectRel的多条relationData
             'loopRelationData:
             for (relationDataKey, relationData) in relationDatas {
-                let mut gatherTargetDatas =
+                let gatherTargetDatas =
                     |pointerKeyTag: KeyTag, targetTable: &Table, targetFilter: Option<&Expr>| {
                         // todo selectRels时候如何应对pointerKey的mvcc 完成
                         let targetDatas = self.searchDataByPointerKeyPrefix(relation.value(), relationDataKey, pointerKeyTag, targetTable, targetFilter)?;
@@ -235,6 +236,7 @@ impl<'session> CommandExecutor<'session> {
                     continue 'loopRelationData;
                 }
 
+                // 当前使用递归的话不显示relation 因为尚未的想好如何显示
                 let selectResult =
                     if selectRel.relationDepth.is_some() {
                         SelectResult {
@@ -351,7 +353,7 @@ impl<'session> CommandExecutor<'session> {
                 // checkTargetRelSatisfy 改变环境变量found 是FnMut 而且下边的searchPointerKeyHooks的会重复使用
                 // 不使用RefCell的话会报错 可变引用不能同时有多个
                 let checkTargetRelSatisfy = RefCell::new(
-                    |pointerKey: &[Byte]| {
+                    |pointerKey: &[Byte]| { // node的
                         // 对rel的data本身筛选
                         // todo 只是提示 已提交的pointerKey指向的对象必然只是在已提交的区域
                         // 得到relation数据的dataKey
@@ -366,7 +368,7 @@ impl<'session> CommandExecutor<'session> {
                             return Result::<IterationCmd>::Ok(IterationCmd::Return);
                         }
 
-                        // 因为调用searchPointerKeyByPrefix不是收集而是看看有没有 使用continue
+                        // 不存在对应的relationData 需要continue继续搜索
                         Result::<IterationCmd>::Ok(IterationCmd::Continue)
                     }
                 );

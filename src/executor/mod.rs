@@ -10,6 +10,7 @@ use crate::graph_value::GraphValue;
 use crate::parser::command::Command;
 use crate::parser::command::manage::Set;
 use crate::types::{SelectResultToFront, TableId};
+use anyhow::Result;
 
 mod create;
 mod insert;
@@ -54,7 +55,7 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
-    pub fn execute(&mut self, commands: &mut [Command]) -> anyhow::Result<SelectResultToFront> {
+    pub fn execute(&mut self, commands: &mut [Command]) -> Result<SelectResultToFront> {
         // 单个的command可能得到单个Vec<Value>
         let mut valueVecVec = Vec::with_capacity(commands.len());
 
@@ -79,8 +80,16 @@ impl<'session> CommandExecutor<'session> {
                 Command::Delete(delete) => self.delete(delete)?,
                 Command::Update(update) => self.update(update)?,
                 Command::Unlink(unlink) => self.unlink(unlink)?,
-                Command::Commit => self.commit()?,
-                Command::Rollback => self.rollback()?,
+                Command::Commit => {
+                    let commitResult = self.commit()?;
+                    self.session.generateTx()?;
+                    commitResult
+                }
+                Command::Rollback => {
+                    let rollbackResult = self.rollback()?;
+                    self.rollback()?;
+                    rollbackResult
+                }
                 Command::Set(set) => self.set(set)?,
             };
 
@@ -94,7 +103,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(valueVecVec)
     }
 
-    fn getTableRefMutByName(&self, tableName: &str) -> anyhow::Result<RefMut<String, Table>> {
+    fn getTableRefMutByName(&self, tableName: &str) -> Result<RefMut<String, Table>> {
         let table = meta::TABLE_NAME_TABLE.get_mut(tableName);
         if table.is_none() {
             throw!(&format!("table:{} not exist", tableName));
@@ -103,7 +112,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(table.unwrap())
     }
 
-    fn getTableRefByName(&self, tableName: &str) -> anyhow::Result<Ref<String, Table>> {
+    fn getTableRefByName(&self, tableName: &str) -> Result<Ref<String, Table>> {
         let table = meta::TABLE_NAME_TABLE.get(tableName);
         if table.is_none() {
             throw!(&format!("table:{} not exist", tableName));

@@ -100,7 +100,7 @@ impl Display for Element {
             Element::Op(op) => write!(f, "Op({})", op),
             Element::To => write!(f, "To"),
             Element::Null => write!(f, "Null"),
-            _ => write!(f, "unknown")
+            // _ => write!(f, "unknown")
         }
     }
 }
@@ -484,7 +484,7 @@ impl Parser {
     }
 
     /// 得到current element 然后 advance
-    pub(super) fn getCurrentElementAdvance(&mut self) -> anyhow::Result<&Element> {
+    pub(super) fn getCurrentElementAdvance(&mut self) -> Result<&Element> {
         if let Some(element) = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex) {
             suffix_plus_plus!(self.currentElementIndex);
             Ok(element)
@@ -493,7 +493,7 @@ impl Parser {
         }
     }
 
-    pub(super) fn getCurrentElement(&self) -> anyhow::Result<&Element> {
+    pub(super) fn getCurrentElement(&self) -> Result<&Element> {
         let option = self.getCurrentElementOption();
         if option.is_some() {
             Ok(option.unwrap())
@@ -511,7 +511,7 @@ impl Parser {
         self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex - 1)
     }
 
-    pub(super) fn peekPrevElement(&self) -> anyhow::Result<&Element> {
+    pub(super) fn peekPrevElement(&self) -> Result<&Element> {
         if let Some(previousElement) = self.peekPrevElementOpt() {
             Ok(previousElement)
         } else {
@@ -523,7 +523,7 @@ impl Parser {
         self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex + 1)
     }
 
-    pub(super) fn peekNextElement(&self) -> anyhow::Result<&Element> {
+    pub(super) fn peekNextElement(&self) -> Result<&Element> {
         if let Some(nextElement) = self.peekNextElementOpt() {
             Ok(nextElement)
         } else {
@@ -532,7 +532,7 @@ impl Parser {
     }
 
     /// 和parse toke 遍历char不同的是 要是越界了 index会是边界的后边1个 以符合当前的体系
-    pub(super) fn skipElement(&mut self, delta: i32) -> anyhow::Result<()> {
+    pub(super) fn skipElement(&mut self, delta: i32) -> Result<()> {
         let currentElementVecLen = self.elementVecVec.get(self.currentElementVecIndex).unwrap().len();
 
         if (self.currentElementIndex as i32 + delta) as usize >= currentElementVecLen {

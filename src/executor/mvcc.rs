@@ -92,7 +92,7 @@ impl<'session> CommandExecutor<'session> {
                                                               committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
-        const RANGE: Range<usize> = meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET..meta::POINTER_KEY_BYTE_LEN;
+       // const RANGE: Range<usize> = meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET..meta::POINTER_KEY_BYTE_LEN;
 
         // 读取 mvccKeyTag
         match extractMvccKeyTagFromPointerKey!(committedPointerKey) {

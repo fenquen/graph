@@ -18,7 +18,7 @@ impl<'session> CommandExecutor<'session> {
         match set {
             Set::SetAutoCommit(b) => self.session.setAutoCommit(*b)?,
             Set::SetScanConcurrency(scanConcurrency) => self.session.scanConcurrency = *scanConcurrency,
-            _ => throw!(&format!("{:?} not supported", set))
+            // _ => throw!(&format!("{:?} not supported", set))
         }
 
         //self.session.setAutoCommit()

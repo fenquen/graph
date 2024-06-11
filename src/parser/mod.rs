@@ -120,7 +120,6 @@ mod test {
 
     #[test]
     pub fn testParseInsert() {
-        // println!("{}", "".parse::<f64>().unwrap());
         parser::parse("insert into user values (1,null)").unwrap();
     }
 
@@ -128,7 +127,9 @@ mod test {
     pub fn testParseSelect() {
         // parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> wheel").unwrap();
         // parser::parse("select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)").unwrap();
-        parser::parse("select user(id = 1) -likes recursive(3..]-> user(age > 2)").unwrap();
+        // parser::parse("select user(id = 1) -likes recursive(3..]-> user(age > 2)").unwrap();
+
+        parser::parse("select user as user0 limit 1 offset 0").unwrap();
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub struct SelectTable {
     pub selectedColNames: Option<Vec<String>>,
     pub tableFilterExpr: Option<Expr>,
     pub tableAlias: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -34,6 +36,8 @@ pub struct SelectRel {
     pub srcColumnNames: Option<Vec<String>>,
     pub srcFilter: Option<Expr>,
     pub srcAlias: Option<String>,
+    pub srcLimit: Option<usize>,
+    pub srcOffset: Option<usize>,
 
     pub relationName: Option<String>,
     pub relationColumnNames: Option<Vec<String>>,
@@ -45,6 +49,8 @@ pub struct SelectRel {
     pub destColumnNames: Option<Vec<String>>,
     pub destFilter: Option<Expr>,
     pub destAlias: Option<String>,
+    pub destLimit: Option<usize>,
+    pub destOffset: Option<usize>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -94,6 +100,7 @@ impl Parser {
             ReadSrcColumnNames, // 可选
             ReadSrcFilterExpr, // 可选
             ReadSrcAlias, // 可选
+            ReadSrcLimitOffset,
 
             ReadRelationName, // 可选
             ReadRelationColumnNames,// 可选
@@ -105,6 +112,7 @@ impl Parser {
             ReadDestColumnNames,// 可选
             ReadDestFilterExpr,// 可选
             ReadDestAlias,// 可选
+            ReadDestLimitOffset,
 
             TryNextRound,
         }
@@ -127,6 +135,52 @@ impl Parser {
             }
 
             Ok(columnNames)
+        }
+
+        fn parseLimitOffset(parser: &mut Parser, text: String, selectRel: &mut SelectRel, src: bool) -> Result<()> {
+            match text.to_lowercase().as_str() {
+                "limit" => {
+                    let limit = parser.getCurrentElementAdvance()?.expectIntegerLiteral()?;
+                    if 0 >= limit {
+                        parser.throwSyntaxErrorDetail("limit should be positive")?;
+                    }
+
+                    if src {
+                        selectRel.srcLimit = Some(limit as usize);
+                    } else {
+                        selectRel.destLimit = Some(limit as usize);
+                    }
+
+                    // 尝试读取后边的offset
+                    if parser.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCaseBool("offset") {
+                        let offset = parser.getCurrentElementAdvance()?.expectIntegerLiteral()?;
+                        if 0 > offset {
+                            parser.throwSyntaxErrorDetail("offset should not be negtive")?;
+                        }
+
+                        if src {
+                            selectRel.srcOffset = Some(offset as usize);
+                        } else {
+                            selectRel.destOffset = Some(offset as usize);
+                        }
+                    }
+                }
+                "offset" => {
+                    let offset = parser.getCurrentElementAdvance()?.expectIntegerLiteral()?;
+                    if 0 > offset {
+                        parser.throwSyntaxErrorDetail("offset should not be negtive")?;
+                    }
+
+                    if src {
+                        selectRel.srcOffset = Some(offset as usize);
+                    } else {
+                        selectRel.destOffset = Some(offset as usize);
+                    }
+                }
+                _ => parser.throwSyntaxError()?,
+            }
+
+            Result::<()>::Ok(())
         }
 
         let mut state = State::ReadSrcName;
@@ -183,6 +237,18 @@ impl Parser {
                         self.skipElement(-1)?;
                     }
 
+                    state = State::ReadSrcLimitOffset;
+                    force = false;
+                }
+                // limit 1 offset 0
+                // 目前limit offset
+                State::ReadSrcLimitOffset => {
+                    if let Some(text) = currentElement.expectTextLiteralOpt() {
+                        parseLimitOffset(self, text, &mut selectRel, true)?;
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+
                     state = State::ReadRelationName;
                     force = false;
                 }
@@ -217,7 +283,7 @@ impl Parser {
                     state = State::ReadRelationDepth;
                     force = false;
                 }
-                //  todo 实现递归搜索
+                //  todo 实现递归搜索的parse 完成
                 State::ReadRelationDepth => {
                     if currentElement.expectTextLiteralContentIgnoreCaseBool("recursive") {
                         // 使用独立的mini模式
@@ -304,6 +370,16 @@ impl Parser {
                         self.skipElement(-1)?;
                     }
 
+                    state = State::ReadDestLimitOffset;
+                    force = false;
+                }
+                State::ReadDestLimitOffset => {
+                    if let Some(text) = currentElement.expectTextLiteralOpt() {
+                        parseLimitOffset(self, text, &mut selectRel, false)?;
+                    } else {
+                        self.skipElement(-1)?;
+                    }
+
                     state = State::TryNextRound;
                     force = false;
                 }
@@ -317,6 +393,8 @@ impl Parser {
                             srcColumnNames: selectRel.destColumnNames.clone(),
                             srcFilter: selectRel.destFilter.clone(),
                             srcAlias: selectRel.destAlias.clone(),
+                            srcLimit: selectRel.srcLimit.clone(),
+                            srcOffset: selectRel.srcOffset.clone(),
                             ..Default::default()
                         };
 
@@ -325,7 +403,7 @@ impl Parser {
                         selectRel = selectRel0;
 
                         state = State::ReadRelationName;
-                        force = false;
+                        force = true;
                     } else {
                         break;
                     }
@@ -333,25 +411,31 @@ impl Parser {
             }
         }
 
-        // 说明只是读个table而已
+        // 说明只是读个table而已 说明没有成功的度过ReadRelationName
         if (State::ReadSrcName..=State::ReadRelationName).contains(&state) {
-            let selectTable = SelectTable {
-                tableName: selectRel.srcTableName,
-                selectedColNames: selectRel.srcColumnNames,
-                tableFilterExpr: selectRel.srcFilter,
-                tableAlias: selectRel.srcAlias,
-            };
+            // 不是selectRel 单纯的select
+            if selectRelVec.is_empty() {
+                let selectTable = SelectTable {
+                    tableName: selectRel.srcTableName,
+                    selectedColNames: selectRel.srcColumnNames,
+                    tableFilterExpr: selectRel.srcFilter,
+                    tableAlias: selectRel.srcAlias,
+                    limit: selectRel.srcLimit,
+                    offset: selectRel.srcOffset,
+                    ..Default::default()
+                };
 
-            // 还要区分
-            match state {
                 // 读取relName的是没有下文了 符合 selectTableUnderRels
-                State::ReadRelationName => {
+                // select user limit 1 offset 0 跳出了上边的loop也到这 需要区分
+                // 要看后边还有没有了 要是有的话当成selectTableUnderRels 要没有的话便是selectTable
+                if state == State::ReadRelationName && self.getCurrentElementOption().is_some() {
                     // 复用成果 因为前部分都是select 1个 表
                     self.skipElement(-1)?;
                     return self.parseSelectTableUnderRels(selectTable);
                 }
+
                 // 对应[State::ReadSrcName, State::ReadRelationName)
-                _ => return Ok(Command::Select(Select::SelectTable(selectTable))),
+                return Ok(Command::Select(Select::SelectTable(selectTable)));
             }
         }
 
@@ -371,10 +455,10 @@ impl Parser {
                 Result::<(), anyhow::Error>::Ok(())
             };
 
-        for select in &selectRelVec {
-            testDuplicatedAlias(select.srcAlias.as_ref())?;
-            testDuplicatedAlias(select.relationAlias.as_ref())?;
-            testDuplicatedAlias(select.destAlias.as_ref())?;
+        for selectRel in &selectRelVec {
+            testDuplicatedAlias(selectRel.srcAlias.as_ref())?;
+            testDuplicatedAlias(selectRel.relationAlias.as_ref())?;
+            testDuplicatedAlias(selectRel.destAlias.as_ref())?;
         }
 
         Ok(Command::Select(Select::SelectRels(selectRelVec)))
@@ -472,7 +556,7 @@ impl Parser {
             if let Element::TextLiteral(text) = element {
                 match text.as_str() {
                     global::方括号1_STR |
-                    global::方括号1_STR |
+                    global::方括号_STR |
                     global::圆括号_STR |
                     global::圆括号1_STR => elementVec.push(element.clone()),
                     _ => { // 具体拆分

@@ -40,7 +40,7 @@ impl Session {
         let mut commands = parser::parse(sql)?;
 
         if commands.is_empty() {
-            return Ok(vec![]);
+            return Ok(Vec::new());
         }
 
         // todo set autocommit 是不需要tx的 如果sql只包含set如何应对
@@ -59,7 +59,7 @@ impl Session {
 
         let selectResultToFront = CommandExecutor::new(self).execute(&mut commands)?;
 
-        // todo sql中执行了commit导致当前tx提交后 当前不是inTx了 调用commit报错 需要commit()不要限制inTx
+        // todo sql中执行了commit rollback使得当前tx提交后,当前不是inTx了,要是后边还有不是set的sql需要再重起1个tx
         if self.autoCommit && isPureSetSql == false {
             self.commit()?;
         }
@@ -69,6 +69,7 @@ impl Session {
 
     /// 提交之后 在到下个执行sql前 session都是 not in tx 的
     pub fn commit(&mut self) -> Result<()> {
+        // todo sql中执行了commit导致当前tx提交后,当前不是inTx了,调用commit报错,需要commit()不要限制inTx 完成
         if self.notInTx() {
             return Ok(());
         }
@@ -127,7 +128,7 @@ impl Session {
         self.tableName_mutations.write().unwrap().clear();
     }
 
-    fn generateTx(&mut self) -> Result<()> {
+    pub fn generateTx(&mut self) -> Result<()> {
         // 函数返回的不管是Ok还是Err里边的都是previsou value
         // 要是闭包返回的是Some那么函数返回Ok 不然是Err
         if let Err(_) = meta::TX_UNDERGOING_COUNT.fetch_update(Ordering::Release, Ordering::Acquire,
