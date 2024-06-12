@@ -1,6 +1,9 @@
 # graph
 
-个人使用rust实现的rdbms风格的图数据库
+个人使用rust实现的rdbms风格的图数据库 <br>
+<a href="https://github.com/fenquen/graph">项目地址</a> <br>
+<a href="https://github.com/fenquen">个人的github主页</a> <br>
+如果您感觉还可以还望不吝惜你的star，你们的肯定是最大的支持和动力
 
 ## 项目动机
 
@@ -314,6 +317,7 @@ select user as user0 -likes recursive[6..6]-> user as user1
   }
 ]
 ```
+
 ### 删除普通表的数据
 
 删掉id是1的user
