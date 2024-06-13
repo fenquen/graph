@@ -1,3 +1,4 @@
+use std::thread;
 use crate::parser::command::Command;
 use crate::parser::Parser;
 use anyhow::Result;
@@ -51,13 +52,20 @@ impl Parser {
             }
             "scanconcurrency" => {
                 if let Element::IntegerLiteral(scanConcurrency) = self.getCurrentElementAdvance()? {
-                    let scanConcurrency = *scanConcurrency;
+                    let mut scanConcurrency = *scanConcurrency as usize;
 
                     if 0 >= scanConcurrency {
                         self.throwSyntaxErrorDetail("scan concurrency should be positive")?;
                     }
 
-                    Ok(Command::Set(Set::SetScanConcurrency(scanConcurrency as usize)))
+                    // 原来是使用num_cpus的 后来得知rust 1.81 也有 它们都是通过 cgroup sched_getaffinity taolu
+                    let cpuLogicalCoreCount = thread::available_parallelism()?.get();
+
+                    if scanConcurrency > cpuLogicalCoreCount {
+                        scanConcurrency = cpuLogicalCoreCount;
+                    }
+
+                    Ok(Command::Set(Set::SetScanConcurrency(scanConcurrency)))
                 } else {
                     self.throwSyntaxErrorDetail("scan concurrency should be integer")?
                 }

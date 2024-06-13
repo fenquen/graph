@@ -1,19 +1,17 @@
 # graph
 
 个人使用rust实现的rdbms风格的图数据库 <br>
-<a href="https://github.com/fenquen/graph">项目地址</a> <br>
-<a href="https://github.com/fenquen">个人的github主页</a> <br>
-如果您感觉还可以还望不吝惜你的star，你们的肯定是最大的支持和动力
+<a href="https://github.com/fenquen/graph">项目地址</a> <a href="https://github.com/fenquen">个人的github主页</a> <br>
 
 ## 项目动机
 
 日常使用的传统关系数据库在面对对象之间的关联关系的时候显得相当的力不从心，通常需要通过大量冗余的表关联join来达到效果<br>
-<br>
 显然使用图数据是不错的解决方式，市面上相应的产品也有不少，例如neo4j、nebula等<br>
 <br>
 rust是门相当特别的编程语言，使用独特的内存体系实现了不需程序员手动管理内存的无gc，大大降低了像c/c++的内存泄漏的风险<br>
+使用rust编写1个自己的图数据库是个相当有趣和有挑战的项目<br>
 <br>
-使用rust编写1个自己的图数据库是个相当有趣和有挑战的项目
+如果您感觉还可以对你有些帮助还望不吝惜你的star，你们的肯定是最大的支持和动力
 
 ## 开发环境
 

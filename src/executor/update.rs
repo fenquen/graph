@@ -8,7 +8,7 @@ use crate::meta::TableType;
 use crate::{extractRowIdFromDataKey, extractRowIdFromKeySlice,
             keyPrefixAddRowId, meta, throw, u64ToByteArrRef, byte_slice_to_u64};
 use crate::codec::BinaryCodec;
-use crate::executor::store::{ScanHooks, SearchPointerKeyHooks};
+use crate::executor::store::{ScanHooks, ScanParams, SearchPointerKeyHooks};
 use crate::expr::Expr;
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
@@ -16,6 +16,7 @@ use crate::parser::command::update::Update;
 use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, KV, RowData, RowId, TableMutations};
 use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
 use anyhow::Result;
+use crate::executor::CommandExecResult::DmlResult;
 
 impl<'session> CommandExecutor<'session> {
     // todo 要是point还有rel的联系不能update 完成
@@ -87,12 +88,15 @@ impl<'session> CommandExecutor<'session> {
             ),
         };
 
-        let mut pairs =
-            self.scanSatisfiedRows(table.value(),
-                                   update.filterExpr.as_ref(),
-                                   None,
-                                   true,
-                                   scanHooks)?;
+        let mut pairs = {
+            let scanParams = ScanParams {
+                table: table.value(),
+                tableFilter: update.filterExpr.as_ref(),
+                ..Default::default()
+            };
+
+            self.scanSatisfiedRows(scanParams, true, scanHooks)?
+        };
 
         enum A<'a> {
             DirectValue(GraphValue),

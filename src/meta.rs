@@ -27,6 +27,7 @@ use crate::utils::TrickyContainer;
 lazy_static! {
     pub static ref STORE: TrickyContainer<Store> = TrickyContainer::new();
     pub static ref TABLE_NAME_TABLE: DashMap<String, Table> = DashMap::new();
+    // 如果是usize的可以使用::std::sync::atomic::ATOMIC_USIZE_INIT
     pub static ref TABLE_ID_COUNTER: AtomicU64 = AtomicU64::default();
     pub static ref TX_ID_COUNTER: AtomicU64 = AtomicU64::new(TX_ID_MIN);
     /// db启动的时候设置的原先已使用的最大的txId

@@ -19,7 +19,6 @@ pub struct Link {
     pub relationName: String,
     pub relationColumnNames: Vec<String>,
     pub relationColumnExprs: Vec<Expr>,
-
     pub relationFilterExpr: Option<Expr>,
 }
 

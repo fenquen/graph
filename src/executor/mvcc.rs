@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::ops::{Index, Range};
 use bytes::{BufMut, BytesMut};
-use crate::{byte_slice_to_u64, extractMvccKeyTagFromPointerKey, extractRowIdFromDataKey, extractTxIdFromMvccKey, extractTxIdFromPointerKey, global, keyPrefixAddRowId, meta, throw, u64ToByteArrRef};
+use crate::{byte_slice_to_u64, extractMvccKeyTagFromPointerKey, extractRowIdFromDataKey, extractTxIdFromMvccKey, extractTxIdFromPointerKey, keyPrefixAddRowId, throw, u64ToByteArrRef};
+use crate::{global, meta};
 use crate::executor::CommandExecutor;
 use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, RowId, TableId, TableMutations, TxId};
 use anyhow::Result;
@@ -13,7 +14,7 @@ impl<'session> CommandExecutor<'session> {
                                                                  rawIterator: &mut DBRawIterator,
                                                                  dataKey: DataKey,
                                                                  columnFamily: &ColumnFamily,
-                                                                 tableName: &String) -> anyhow::Result<bool> {
+                                                                 tableName: &String) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // xmin
@@ -92,7 +93,7 @@ impl<'session> CommandExecutor<'session> {
                                                               committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
-       // const RANGE: Range<usize> = meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET..meta::POINTER_KEY_BYTE_LEN;
+        // const RANGE: Range<usize> = meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET..meta::POINTER_KEY_BYTE_LEN;
 
         // 读取 mvccKeyTag
         match extractMvccKeyTagFromPointerKey!(committedPointerKey) {
@@ -148,6 +149,8 @@ impl<'session> CommandExecutor<'session> {
 
         Ok(tableMutations.get(pointerKeyBuffer.as_ref()).is_none())
     }
+
+    // -------------------------------------------------------------------------------------------
 
     /// 当前tx上add时候生成 xmin xmax 对应的mvcc key
     pub(super) fn generateAddDataXminXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> anyhow::Result<(KV, KV)> {

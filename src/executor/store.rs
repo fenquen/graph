@@ -3,26 +3,33 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::{Range, RangeFrom};
 use std::sync::atomic::Ordering;
 use std::{mem, thread};
+use std::sync::mpsc;
+use std::sync::mpsc::SyncSender;
 use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, IterationCmd};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey, global, keyPrefixAddRowId, meta, suffix_plus_plus, throw, types, u64ToByteArrRef};
+use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey, keyPrefixAddRowId, suffix_plus_plus, throw, u64ToByteArrRef, global, meta, types, prefix_plus_plus};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor, KeyTag, RowId};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, KeyTag, RowId};
+use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
 use anyhow::Result;
+use lazy_static::lazy_static;
 use crate::executor::mvcc::BytesMutExt;
 use crate::session::Session;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
-pub(super) struct ScanHooks<A, B, C, D> where A: ScanCommittedPreProcessor,
-                                              B: ScanCommittedPostProcessor,
-                                              C: ScanUncommittedPreProcessor,
-                                              D: ScanUncommittedPostProcessor {
+pub(super) struct ScanHooks<A, B, C, D>
+where
+    A: ScanCommittedPreProcessor,
+    B: ScanCommittedPostProcessor,
+    C: ScanUncommittedPreProcessor,
+    D: ScanUncommittedPostProcessor,
+{
     /// 融合filter读取到committed RowData 前
     pub(super) scanCommittedPreProcessor: Option<A>,
     /// 融合filter读取到committed RowData 后
@@ -49,8 +56,11 @@ impl Default for ScanHooks<
     }
 }
 
-pub struct SearchPointerKeyHooks<A, B> where A: CommittedPointerKeyProcessor,
-                                             B: UncommittedPointerKeyProcessor {
+pub struct SearchPointerKeyHooks<A, B>
+where
+    A: CommittedPointerKeyProcessor,
+    B: UncommittedPointerKeyProcessor,
+{
     pub(super) committedPointerKeyProcessor: Option<A>,
     pub(super) uncommittedPointerKeyProcessor: Option<B>,
 }
@@ -60,6 +70,33 @@ impl Default for SearchPointerKeyHooks<Box<dyn CommittedPointerKeyProcessor>, Bo
         SearchPointerKeyHooks {
             committedPointerKeyProcessor: None,
             uncommittedPointerKeyProcessor: None,
+        }
+    }
+}
+
+/// 随着scan函数的参数越来越多,是有必要将它们都收拢到1道
+pub(super) struct ScanParams<'Table, 'TableFilter, 'SelectedColumnNames> {
+    pub table: &'Table Table,
+    pub tableFilter: Option<&'TableFilter Expr>,
+    pub selectedColumnNames: Option<&'SelectedColumnNames Vec<String>>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+lazy_static! {
+    static ref T: Table = Table::default();
+}
+
+// 如何对含有引用的struct生成default
+// https://stackoverflow.com/questions/66609014/how-can-i-implement-default-for-struct
+impl<'Table> Default for ScanParams<'Table, '_, '_> {
+    fn default() -> Self {
+        ScanParams {
+            table: &T,
+            tableFilter: None,
+            selectedColumnNames: None,
+            limit: None,
+            offset: None,
         }
     }
 }
@@ -86,8 +123,8 @@ impl<'session> CommandExecutor<'session> {
         let tableName_mutationsOnTable = self.session.tableName_mutations.read().unwrap();
         let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(&table.name);
 
-        let mut process =
-            |dataKey: DataKey| -> Result<()> {
+        let mut processDataKey =
+            |dataKey: DataKey, sender: Option<SyncSender<(DataKey, RowData)>>| -> Result<()> {
                 // todo getRowDatasByDataKeys 增加对uncommitted的区域的搜索 完成
                 // 习惯的套路就和scan函数里边1样 都是先搜索committed然后是uncommitted 这对scan来说是可以的
                 // 对这边的直接通过datakey获取有点不合适了 搜索uncommitted逻辑要到前边,要是有的话可以提前return
@@ -126,7 +163,10 @@ impl<'session> CommandExecutor<'session> {
                     };
 
                 if let Some(rowData) = self.readRowDataBinary(table, rowDataBinary.as_slice(), tableFilter, selectedColNames)? {
-                    rowDatas.push((dataKey, rowData));
+                    match sender {
+                        Some(sender) => sender.send((dataKey, rowData))?,
+                        None => rowDatas.push((dataKey, rowData)),
+                    }
                 }
 
                 Ok(())
@@ -135,41 +175,43 @@ impl<'session> CommandExecutor<'session> {
         // 要得到表的全部的data
         if dataKeys[0] == global::TOTAL_DATA_OF_TABLE {
             for dataKey in dataKeys[1]..=dataKeys[2] {
-                process(dataKey)?;
+                processDataKey(dataKey, None)?;
             }
         } else {
             // todo 使用rayon 遍历
             for dataKey in dataKeys {
-                process(*dataKey)?;
+                processDataKey(*dataKey, None)?;
             }
         }
 
         Ok(rowDatas)
     }
 
+
     // todo 实现 index
     // 如果传递的是fn()的话(不是Fn)是函数指针而不是闭包 不能和上下文有联系 闭包返回false 那么 continue
     /// 目前用到hook的地点有 update() selectTableUnderRels()
-    pub(super) fn scanSatisfiedRows<A, B, C, D>(&self, table: &Table,
-                                                tableFilter: Option<&Expr>,
-                                                selectedColumnNames: Option<&Vec<String>>,
+    pub(super) fn scanSatisfiedRows<A, B, C, D>(&self,
+                                                scanParams: ScanParams,
                                                 select: bool,
                                                 mut scanHooks: ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
-        where A: ScanCommittedPreProcessor,
-              B: ScanCommittedPostProcessor,
-              C: ScanUncommittedPreProcessor,
-              D: ScanUncommittedPostProcessor {
+    where
+        A: ScanCommittedPreProcessor,
+        B: ScanCommittedPostProcessor,
+        C: ScanUncommittedPreProcessor,
+        D: ScanUncommittedPostProcessor,
+    {
 
         // todo 使用table id 为 column family 标识
-        let columnFamily = Session::getColFamily(&table.name)?;
+        let columnFamily = Session::getColFamily(&scanParams.table.name)?;
 
         let tableName_mutationsOnTable = self.session.tableName_mutations.read().unwrap();
-        let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(&table.name);
+        let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(&scanParams.table.name);
 
         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
 
         let mut satisfiedRows =
-            if tableFilter.is_some() || select {
+            if scanParams.tableFilter.is_some() || select {
                 let mut satisfiedRows = Vec::new();
 
                 let mut serialScan = true;
@@ -178,8 +220,9 @@ impl<'session> CommandExecutor<'session> {
                 if self.session.scanConcurrency > 1 {
                     const COUNT_PER_THREAD: u64 = 2;
 
+                    // todo 需要添加统计功能记录表有多少条data
                     // 计算需要多少 concurrency
-                    let latestRowId = table.rowIdCounter.load(Ordering::Acquire) - 1;
+                    let latestRowId = scanParams.table.rowIdCounter.load(Ordering::Acquire) - 1;
                     let distance = latestRowId - meta::ROW_ID_INVALID;
                     let mut concurrency = distance / COUNT_PER_THREAD;
 
@@ -207,107 +250,156 @@ impl<'session> CommandExecutor<'session> {
                         // 不要忘了到末尾的tail
                         ranges.push((keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, lastRoundEnd + 1), keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, meta::ROW_ID_MAX)));
 
-                        let mut threadList = Vec::with_capacity(ranges.len());
+                        // let mut threadList = Vec::with_capacity(ranges.len());
 
                         // 以下是相当危险的,rust的引用直接转换成指针对应的数字,然后跨thread传递
                         // 能这么干的原因是,知道concurrent scan的涉及范围 会限制在当前函数之内 不会逃逸 因为后边要等待它们都结束
                         // 然而编译器是不知道这么细的细节的 只能1棒杀掉报错
                         let commandExecutorPointer = self as *const CommandExecutor as u64;
                         let scanHooksPointer = &mut scanHooks as *mut ScanHooks<A, B, C, D> as u64;
-                        let tableFilterPointer = match tableFilter {
-                            Some(expr) => Some(expr as *const Expr as u64),
-                            None => None
-                        };
-                        let selectedColumnNamesPointer = match selectedColumnNames {
-                            Some(selectedColumnNames) => Some(selectedColumnNames as *const Vec<String> as u64),
-                            None => None
-                        };
-                        for (dataKeyStart, dataKeyEnd) in ranges {
-                            let tableName = table.name.clone();
+                        let tableFilterPointer =
+                            match scanParams.tableFilter {
+                                Some(expr) => Some(expr as *const Expr as u64),
+                                None => None
+                            };
+                        let selectedColumnNamesPointer =
+                            match scanParams.selectedColumnNames {
+                                Some(selectedColumnNames) => Some(selectedColumnNames as *const Vec<String> as u64),
+                                None => None
+                            };
 
-                            let thread = thread::spawn(move || unsafe {
-                                // 还原变为
-                                let commandExecutor: &CommandExecutor<'session> = mem::transmute(commandExecutorPointer as *const CommandExecutor);
-                                let tableFilter: Option<&Expr> = tableFilterPointer.map(|tableFilterPointer| mem::transmute(tableFilterPointer as *const Expr));
-                                let selectedColumnNames: Option<&Vec<String>> = selectedColumnNamesPointer.map(|selectedColumnNamesPointer| mem::transmute(selectedColumnNamesPointer as *const Vec<String>));
-                                let scanHooks: &mut ScanHooks<A, B, C, D> = mem::transmute(scanHooksPointer as *mut ScanHooks<A, B, C, D>);
+                        return rayon::scope(move |scope| {
+                            let (sender, receiver) = mpsc::sync_channel(COUNT_PER_THREAD as usize);
 
-                                let table = commandExecutor.getTableRefByName(tableName.as_str())?;
-                                let snapshot = commandExecutor.session.getSnapshot()?;
-                                // column不是sync的 只能到thread上建立的
-                                let columnFamily = Session::getColFamily(tableName.as_str())?;
+                            for (dataKeyStart, dataKeyEnd) in ranges {
+                                let sender = sender.clone();
+                                scope.spawn(move |scope| unsafe {
+                                    // 要另外去包裹1层的原因是,通过sender发送的消息本身来传读相应的错误让外边知道
+                                    let processor = || {
+                                        let tableName = scanParams.table.name.clone();
 
-                                let tableName_mutationsOnTable = commandExecutor.session.tableName_mutations.read().unwrap();
-                                let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(table.name.as_str());
+                                        // 还原变为
+                                        let commandExecutor: &CommandExecutor<'session> = mem::transmute(commandExecutorPointer as *const CommandExecutor);
+                                        let tableFilter: Option<&Expr> = tableFilterPointer.map(|tableFilterPointer| mem::transmute(tableFilterPointer as *const Expr));
+                                        let selectedColumnNames: Option<&Vec<String>> = selectedColumnNamesPointer.map(|selectedColumnNamesPointer| mem::transmute(selectedColumnNamesPointer as *const Vec<String>));
+                                        let scanHooks: &mut ScanHooks<A, B, C, D> = mem::transmute(scanHooksPointer as *mut ScanHooks<A, B, C, D>);
 
-                                let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
-                                let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
+                                        let table = commandExecutor.getTableRefByName(tableName.as_str())?;
+                                        let snapshot = commandExecutor.session.getSnapshot()?;
+                                        // column不是sync的 只能到thread上建立的
+                                        let columnFamily = Session::getColFamily(tableName.as_str())?;
 
-                                let mut rowDatas = Vec::new();
+                                        let tableName_mutationsOnTable = commandExecutor.session.tableName_mutations.read().unwrap();
+                                        let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(table.name.as_str());
 
-                                for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(u64ToByteArrRef!(dataKeyStart), Direction::Forward)) {
-                                    let (dataKeyBinary, rowDataBinary) = iterResult?;
+                                        let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+                                        let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
 
-                                    let dataKey = byte_slice_to_u64!(&*dataKeyBinary);
-                                    if dataKey > dataKeyEnd {
-                                        break;
-                                    }
+                                        // let mut rowDatas = Vec::new();
+                                        let mut readCount = 0usize;
 
-                                    // visibility
-                                    if commandExecutor.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
-                                                                                                      &mut rawIterator,
-                                                                                                      dataKey,
-                                                                                                      &columnFamily,
-                                                                                                      &table.name)? == false {
-                                        continue;
-                                    }
+                                        for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(u64ToByteArrRef!(dataKeyStart), Direction::Forward)) {
+                                            let (dataKeyBinary, rowDataBinary) = iterResult?;
 
-                                    // visibility
-                                    if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
-                                        if commandExecutor.checkCommittedDataVisibilityWithTxMutations(mutationsRawCurrentTx,
-                                                                                                       &mut mvccKeyBuffer, dataKey)? == false {
-                                            continue;
-                                        }
-                                    }
+                                            let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
 
-                                    // committed pre
-                                    if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
-                                        if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
-                                            continue;
-                                        }
-                                    }
+                                            if dataKey > dataKeyEnd {
+                                                break;
+                                            }
 
-                                    if let Some(rowData) = commandExecutor.readRowDataBinary(table.value(), &*rowDataBinary, tableFilter, selectedColumnNames)? {
-                                        // committed post
-                                        if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
-                                            if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
+                                            // visibility
+                                            if commandExecutor.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
+                                                                                                              &mut rawIterator,
+                                                                                                              dataKey,
+                                                                                                              &columnFamily,
+                                                                                                              &table.name)? == false {
                                                 continue;
                                             }
+
+                                            // visibility
+                                            if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
+                                                if commandExecutor.checkCommittedDataVisibilityWithTxMutations(mutationsRawCurrentTx,
+                                                                                                               &mut mvccKeyBuffer, dataKey)? == false {
+                                                    continue;
+                                                }
+                                            }
+
+                                            // committed pre
+                                            if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
+                                                if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
+                                                    continue;
+                                                }
+                                            }
+
+                                            if let Some(rowData) = commandExecutor.readRowDataBinary(table.value(), &*rowDataBinary, tableFilter, selectedColumnNames)? {
+                                                // committed post
+                                                if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
+                                                    if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
+                                                        continue;
+                                                    }
+                                                }
+
+                                                // concurrent scan 当前不知如何应对offset 只能应对limit
+                                                // 而且limit不能分割平分到各个thread上,需要各个thread都要收集的数量都要满足limit
+                                                // 因可能这块没有 那块有
+                                                if let Some(limit) = scanParams.limit {
+                                                    if readCount >= limit {
+                                                        break;
+                                                    }
+                                                }
+
+                                                sender.send(Result::<(DataKey, RowData)>::Ok((dataKey, rowData))).expect("impossible");
+
+                                                suffix_plus_plus!(readCount);
+                                            }
                                         }
-                                        rowDatas.push((dataKey, rowData));
+
+                                        Result::<()>::Ok(())
+                                    };
+
+                                    // 错误通过消息去传递 让外边及时知道
+                                    match processor() {
+                                        Ok(()) => {}
+                                        Err(e) => sender.send(Result::<(DataKey, RowData)>::Err(e)).expect("impossible")
+                                    }
+                                });
+                            }
+
+                            // 不然的话下边的遍历receiver永远也不会return
+                            mem::drop(sender);
+
+                            for a in receiver {
+                                let a = a?;
+                                if let Some(limit) = scanParams.limit {
+                                    if satisfiedRows.len() >= limit {
+                                        break;
                                     }
                                 }
 
-                                Result::<Vec<(DataKey, RowData)>>::Ok(rowDatas)
-                            });
+                                satisfiedRows.push(a);
+                            }
+
+                            Result::<Vec<(DataKey, RowData)>>::Ok(satisfiedRows)
+                        });
+
+                        /*for (dataKeyStart, dataKeyEnd) in ranges {
+                            let tableName = scanParams.table.name.clone();
+                            let sender = sender.clone();
+                            let thread = thread::spawn();
 
                             threadList.push(thread);
-                        }
-
-                        for thread in threadList {
-                            let rows = thread.join().unwrap()?;
-                            for row in rows {
-                                satisfiedRows.push(row);
-                            }
-                        }
+                        }*/
                     }
                 }
 
+                // 虽然设置了可以对线程scan 然而可能因为实际的数据量不够还是用不到
                 if serialScan {
                     let snapshot = self.session.getSnapshot()?;
 
                     // mvcc的visibility筛选
                     let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
+
+                    let mut readCount = 0usize;
 
                     // todo scan遍历能不能concurrent
                     // 对data条目而不是pointer条目遍历
@@ -327,7 +419,7 @@ impl<'session> CommandExecutor<'session> {
                                                                                &mut rawIterator,
                                                                                dataKey,
                                                                                &columnFamily,
-                                                                               &table.name)? == false {
+                                                                               &scanParams.table.name)? == false {
                             continue;
                         }
 
@@ -346,14 +438,30 @@ impl<'session> CommandExecutor<'session> {
                         }
 
                         // mvcc筛选过了 对rowData本身的筛选
-                        if let Some(rowData) = self.readRowDataBinary(table, &*rowDataBinary, tableFilter, selectedColumnNames)? {
+                        if let Some(rowData) = self.readRowDataBinary(scanParams.table, &*rowDataBinary, scanParams.tableFilter, scanParams.selectedColumnNames)? {
                             if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
                                 if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
                                     continue;
                                 }
                             }
 
+                            // 应对 offset
+                            if let Some(offset) = scanParams.offset {
+                                if offset > readCount {
+                                    continue;
+                                }
+                            }
+
+                            // 应对 limit
+                            if let Some(limit) = scanParams.limit {
+                                if satisfiedRows.len() >= limit {
+                                    break;
+                                }
+                            }
+
                             satisfiedRows.push((dataKey, rowData));
+
+                            suffix_plus_plus!(readCount);
                         }
                     }
                 }
@@ -405,7 +513,7 @@ impl<'session> CommandExecutor<'session> {
                     }
                 }
 
-                if let Some(rowData) = self.readRowDataBinary(table, addRowDataBinaryCurrentTx, tableFilter, selectedColumnNames)? {
+                if let Some(rowData) = self.readRowDataBinary(scanParams.table, addRowDataBinaryCurrentTx, scanParams.tableFilter, scanParams.selectedColumnNames)? {
                     if let Some(ref mut scanUncommittedPostProcessor) = scanHooks.scanUncommittedPostProcessor {
                         if scanUncommittedPostProcessor(tableMutationsCurrentTx, addedDataKeyCurrentTx, &rowData)? == false {
                             continue;
@@ -531,8 +639,10 @@ impl<'session> CommandExecutor<'session> {
 
         fn collectionMinus0<'a, T, T0>(collectionT: &'a [T],
                                        collectionT0: &'a [T0],
-                                       tEqT0: impl Fn(&T, &T0) -> bool) -> Vec<&'a T> where T: Clone + PartialEq,
-                                                                                            T0: Clone + PartialEq {
+                                       tEqT0: impl Fn(&T, &T0) -> bool) -> Vec<&'a T> where
+            T: Clone + PartialEq,
+            T0: Clone + PartialEq,
+        {
             let mut a = vec![];
 
             for t in collectionT {
@@ -579,8 +689,10 @@ impl<'session> CommandExecutor<'session> {
     // todo pointerKey应该同时到committed和uncommitted去搜索
     pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
-        where A: CommittedPointerKeyProcessor,
-              B: UncommittedPointerKeyProcessor {
+    where
+        A: CommittedPointerKeyProcessor,
+        B: UncommittedPointerKeyProcessor,
+    {
         let mut keys = Vec::new();
 
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);

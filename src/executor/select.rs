@@ -13,7 +13,7 @@ use crate::types::{Byte, ColumnFamily, DataKey, KeyTag, RowData, DBRawIterator, 
 use crate::global;
 use crate::parser::command::select::{EndPointType, RelDesc, Select, SelectRel, SelectTable, SelectTableUnderRels};
 use anyhow::{anyhow, Result};
-use crate::executor::store::{ScanHooks, SearchPointerKeyHooks};
+use crate::executor::store::{ScanHooks, ScanParams, SearchPointerKeyHooks};
 use crate::expr::Expr;
 use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
 
@@ -33,12 +33,17 @@ impl<'session> CommandExecutor<'session> {
     fn selectTable(&self, selectTable: &SelectTable) -> Result<CommandExecResult> {
         let table = self.getTableRefByName(selectTable.tableName.as_str())?;
 
-        let rowDatas =
-            self.scanSatisfiedRows(table.value(),
-                                   selectTable.tableFilterExpr.as_ref(),
-                                   selectTable.selectedColNames.as_ref(),
-                                   true,
-                                   ScanHooks::default())?;
+        let rowDatas = {
+            let scanParams = ScanParams {
+                table: table.value(),
+                tableFilter: selectTable.tableFilterExpr.as_ref(),
+                selectedColumnNames: selectTable.selectedColNames.as_ref(),
+                limit: selectTable.limit,
+                offset: selectTable.offset,
+            };
+
+            self.scanSatisfiedRows(scanParams, true, ScanHooks::default())?
+        };
 
         let values: Vec<Value> = self.processRowDatasToDisplay(rowDatas);
         // JSON_ENUM_UNTAGGED!(println!("{}", serde_json::to_string(&rows)?));
@@ -74,12 +79,15 @@ impl<'session> CommandExecutor<'session> {
             let relationDatas: Vec<(DataKey, RowData)> = {
                 let relation = self.getTableRefByName(selectRel.relationName.as_ref().unwrap())?;
 
+                let scanParams = ScanParams {
+                    table: relation.value(),
+                    tableFilter: selectRel.relationFilter.as_ref(),
+                    selectedColumnNames: selectRel.relationColumnNames.as_ref(),
+                    ..Default::default()
+                };
+
                 // 就像是普通表的搜索,得到满足搜索条件的relation data
-                self.scanSatisfiedRows(relation.value(),
-                                       selectRel.relationFilter.as_ref(),
-                                       selectRel.relationColumnNames.as_ref(),
-                                       true,
-                                       ScanHooks::default())?
+                self.scanSatisfiedRows(scanParams, true, ScanHooks::default())?
             };
 
             let mut selectResultVecInSelectRel = Vec::with_capacity(relationDatas.len());
@@ -447,11 +455,16 @@ impl<'session> CommandExecutor<'session> {
             scanUncommittedPostProcessor: Option::<Box<dyn ScanUncommittedPostProcessor>>::None,
         };
 
-        let rowDatas =
-            self.scanSatisfiedRows(table.value(),
-                                   selectTableUnderRels.selectTable.tableFilterExpr.as_ref(),
-                                   selectTableUnderRels.selectTable.selectedColNames.as_ref(),
-                                   true, scanHooks)?;
+        let rowDatas = {
+            let scanParams = ScanParams {
+                table: table.value(),
+                tableFilter: selectTableUnderRels.selectTable.tableFilterExpr.as_ref(),
+                selectedColumnNames: selectTableUnderRels.selectTable.selectedColNames.as_ref(),
+                ..Default::default()
+            };
+
+            self.scanSatisfiedRows(scanParams, true, scanHooks)?
+        };
 
         let values = self.processRowDatasToDisplay(rowDatas);
 

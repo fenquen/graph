@@ -3,7 +3,7 @@ use rocksdb::{Direction, IteratorMode};
 use crate::{extractTargetDataKeyFromPointerKey, meta, byte_slice_to_u64, types};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::executor::mvcc::BytesMutExt;
-use crate::executor::store::ScanHooks;
+use crate::executor::store::{ScanHooks, ScanParams};
 use crate::parser::command::unlink::{Unlink, UnlinkLinkStyle, UnlinkSelfStyle};
 use crate::session::Session;
 use crate::types::{ColumnFamily, DataKey, ScanCommittedPreProcessor};
@@ -27,11 +27,15 @@ impl<'session> CommandExecutor<'session> {
         let relationColumnFamily = Session::getColFamily(unlinkLinkStyle.relationName.as_str())?;
 
         // 得到rel 干掉指向src和dest的pointer key
-        let relationRowDatas =
-            self.scanSatisfiedRows(relation.value(),
-                                   unlinkLinkStyle.relationFilterExpr.as_ref(),
-                                   None, true,
-                                   ScanHooks::default())?;
+        let relationRowDatas = {
+            let scanParams = ScanParams {
+                table: relation.value(),
+                tableFilter: unlinkLinkStyle.relationFilterExpr.as_ref(),
+                ..Default::default()
+            };
+
+            self.scanSatisfiedRows(scanParams, true, ScanHooks::default())?
+        };
 
         // KEY_PREFIX_POINTER + relDataRowId + KEY_TAG_SRC_TABLE_ID + src的tableId + KEY_TAG_KEY + src dest rel的dataKey
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);

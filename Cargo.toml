@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-anyhow = { version = "1.0",features = ["backtrace"] }
+anyhow = { version = "1.0", features = ["backtrace"] }
 lazy_static = "1.4.0"
 clap = { version = "4.3.1", features = ["derive"] }
 log4rs = "1.3.0"
@@ -17,11 +17,11 @@ strum_macros = "0.26"
 tokio = { version = "1", features = ["full"] }
 bytes = "1.6.0"
 rocksdb = { version = "0.22.0", features = ["multi-threaded-cf"] }
-futures = { version = "0.3.30",features = ["default"] }
+futures = { version = "0.3.30", features = ["default"] }
 tokio-tungstenite = "0.21.0"
 futures-channel = "0.3.30"
 futures-util = "0.3.30"
-num_cpus = "1.16.0"
+rayon = "1.9.0"
 
 
 # https://course.rs/cargo/reference/profiles.html

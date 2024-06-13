@@ -1,8 +1,9 @@
 use std::sync::atomic::Ordering;
 use bytes::BytesMut;
+use log::Level::Debug;
 use crate::{global, keyPrefixAddRowId, meta, types, u64ToByteArrRef};
 use crate::executor::{CommandExecResult, CommandExecutor};
-use crate::executor::store::ScanHooks;
+use crate::executor::store::{ScanHooks, ScanParams};
 use crate::meta::Table;
 use crate::parser::command::insert::Insert;
 use crate::parser::command::link::Link;
@@ -17,23 +18,39 @@ impl<'session> CommandExecutor<'session> {
         let destTable = self.getTableRefByName(link.destTableName.as_str())?;
 
         // 对src table和dest table调用expr筛选
-        let srcSatisfiedVec =
-            self.scanSatisfiedRows(srcTable.value(),
-                                   link.srcTableFilterExpr.as_ref(), None,
-                                   false, ScanHooks::default())?;
-        // src 空的 link 不成立
-        if srcSatisfiedVec.is_empty() {
-            return Ok(CommandExecResult::DmlResult);
-        }
+        let srcSatisfiedVec = {
+            let scanParams = ScanParams {
+                table: srcTable.value(),
+                tableFilter: link.srcTableFilterExpr.as_ref(),
+                ..Default::default()
+            };
 
-        let destSatisfiedVec =
-            self.scanSatisfiedRows(destTable.value(),
-                                   link.destTableFilterExpr.as_ref(), None,
-                                   false, ScanHooks::default())?;
-        // dest 空的 link 不成立
-        if destSatisfiedVec.is_empty() {
-            return Ok(CommandExecResult::DmlResult);
-        }
+            let srcSatisfiedVec = self.scanSatisfiedRows(scanParams, false, ScanHooks::default())?;
+
+            // src 空的 link 不成立
+            if srcSatisfiedVec.is_empty() {
+                return Ok(CommandExecResult::DmlResult);
+            }
+
+            srcSatisfiedVec
+        };
+
+        let destSatisfiedVec = {
+            let scanParams = ScanParams {
+                table: destTable.value(),
+                tableFilter: link.destTableFilterExpr.as_ref(),
+                ..Default::default()
+            };
+
+            let destSatisfiedVec = self.scanSatisfiedRows(scanParams, false, ScanHooks::default())?;
+
+            // dest 空的 link 不成立
+            if destSatisfiedVec.is_empty() {
+                return Ok(CommandExecResult::DmlResult);
+            }
+
+            destSatisfiedVec
+        };
 
         // add rel本身的data
         let mut insertValues = Insert {
