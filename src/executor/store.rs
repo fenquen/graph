@@ -24,12 +24,11 @@ use crate::session::Session;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
 pub(super) struct ScanHooks<A, B, C, D>
-where
-    A: ScanCommittedPreProcessor,
-    B: ScanCommittedPostProcessor,
-    C: ScanUncommittedPreProcessor,
-    D: ScanUncommittedPostProcessor,
-{
+    where
+        A: ScanCommittedPreProcessor,
+        B: ScanCommittedPostProcessor,
+        C: ScanUncommittedPreProcessor,
+        D: ScanUncommittedPostProcessor {
     /// 融合filter读取到committed RowData 前
     pub(super) scanCommittedPreProcessor: Option<A>,
     /// 融合filter读取到committed RowData 后
@@ -57,10 +56,9 @@ impl Default for ScanHooks<
 }
 
 pub struct SearchPointerKeyHooks<A, B>
-where
-    A: CommittedPointerKeyProcessor,
-    B: UncommittedPointerKeyProcessor,
-{
+    where
+        A: CommittedPointerKeyProcessor,
+        B: UncommittedPointerKeyProcessor {
     pub(super) committedPointerKeyProcessor: Option<A>,
     pub(super) uncommittedPointerKeyProcessor: Option<B>,
 }
@@ -195,11 +193,11 @@ impl<'session> CommandExecutor<'session> {
                                                 scanParams: ScanParams,
                                                 select: bool,
                                                 mut scanHooks: ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
-    where
-        A: ScanCommittedPreProcessor,
-        B: ScanCommittedPostProcessor,
-        C: ScanUncommittedPreProcessor,
-        D: ScanUncommittedPostProcessor,
+        where
+            A: ScanCommittedPreProcessor,
+            B: ScanCommittedPostProcessor,
+            C: ScanUncommittedPreProcessor,
+            D: ScanUncommittedPostProcessor,
     {
 
         // todo 使用table id 为 column family 标识
@@ -214,6 +212,7 @@ impl<'session> CommandExecutor<'session> {
             if scanParams.tableFilter.is_some() || select {
                 let mut satisfiedRows = Vec::new();
 
+                let mut serialScan = true;
 
                 // 如果设置 scanConcurrency >1 说明是有 concurrent可能,到底是不是还要看下边的
                 if self.session.scanConcurrency > 1 {
@@ -226,6 +225,8 @@ impl<'session> CommandExecutor<'session> {
                     let mut concurrency = distance / COUNT_PER_THREAD;
 
                     if concurrency > 1 {
+                        serialScan = false;
+
                         if concurrency > self.session.scanConcurrency as u64 {
                             concurrency = self.session.scanConcurrency as u64;
                         }
@@ -265,7 +266,7 @@ impl<'session> CommandExecutor<'session> {
                                 None => None
                             };
 
-                        return rayon::scope(move |scope| {
+                        satisfiedRows = rayon::scope(move |scope| {
                             let (sender, receiver) = mpsc::sync_channel(COUNT_PER_THREAD as usize);
 
                             for (dataKeyStart, dataKeyEnd) in ranges {
@@ -377,91 +378,83 @@ impl<'session> CommandExecutor<'session> {
                             }
 
                             Result::<Vec<(DataKey, RowData)>>::Ok(satisfiedRows)
-                        });
-
-                        /*for (dataKeyStart, dataKeyEnd) in ranges {
-                            let tableName = scanParams.table.name.clone();
-                            let sender = sender.clone();
-                            let thread = thread::spawn();
-
-                            threadList.push(thread);
-                        }*/
+                        })?;
                     }
                 }
 
                 // 虽然设置了可以对线程scan 然而可能因为实际的数据量不够还是用不到
-
-                let snapshot = self.session.getSnapshot()?;
-
-                // mvcc的visibility筛选
-                let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
-
-                let mut readCount = 0usize;
-
-                // todo scan遍历能不能concurrent
-                // 对data条目而不是pointer条目遍历
-                for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(meta::DATA_KEY_PATTERN, Direction::Forward)) {
-                    let (dataKeyBinary, rowDataBinary) = iterResult?;
-
-                    // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
-                    // 前4个bit的值是不是 KEY_PREFIX_DATA
-                    if extractPrefixFromKeySlice!(dataKeyBinary) != meta::KEY_PREFIX_DATA {
-                        break;
-                    }
-
-                    let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
+                if serialScan {
+                    let snapshot = self.session.getSnapshot()?;
 
                     // mvcc的visibility筛选
-                    if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
-                                                                           &mut rawIterator,
-                                                                           dataKey,
-                                                                           &columnFamily,
-                                                                           &scanParams.table.name)? == false {
-                        continue;
-                    }
+                    let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
 
-                    // 以上是全都在已落地的维度内的visibility check
-                    // 还要结合当前事务上的尚未提交的mutations,看已落地的是不是应该干掉
-                    if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
-                        if self.checkCommittedDataVisibilityWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
+                    let mut readCount = 0usize;
+
+                    // todo scan遍历能不能concurrent
+                    // 对data条目而不是pointer条目遍历
+                    for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(meta::DATA_KEY_PATTERN, Direction::Forward)) {
+                        let (dataKeyBinary, rowDataBinary) = iterResult?;
+
+                        // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
+                        // 前4个bit的值是不是 KEY_PREFIX_DATA
+                        if extractPrefixFromKeySlice!(dataKeyBinary) != meta::KEY_PREFIX_DATA {
+                            break;
+                        }
+
+                        let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
+
+                        // mvcc的visibility筛选
+                        if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
+                                                                               &mut rawIterator,
+                                                                               dataKey,
+                                                                               &columnFamily,
+                                                                               &scanParams.table.name)? == false {
                             continue;
                         }
-                    }
 
-                    if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
-                        if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
-                            continue;
-                        }
-                    }
-
-                    // mvcc筛选过了 对rowData本身的筛选
-                    if let Some(rowData) = self.readRowDataBinary(scanParams.table, &*rowDataBinary, scanParams.tableFilter, scanParams.selectedColumnNames)? {
-                        if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
-                            if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
+                        // 以上是全都在已落地的维度内的visibility check
+                        // 还要结合当前事务上的尚未提交的mutations,看已落地的是不是应该干掉
+                        if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
+                            if self.checkCommittedDataVisibilityWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
                                 continue;
                             }
                         }
 
-                        // 应对 offset
-                        if let Some(offset) = scanParams.offset {
-                            if offset > readCount {
+                        if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
+                            if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
                                 continue;
                             }
                         }
 
-                        // 应对 limit
-                        if let Some(limit) = scanParams.limit {
-                            if satisfiedRows.len() >= limit {
-                                break;
+                        // mvcc筛选过了 对rowData本身的筛选
+                        if let Some(rowData) = self.readRowDataBinary(scanParams.table, &*rowDataBinary, scanParams.tableFilter, scanParams.selectedColumnNames)? {
+                            if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
+                                if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
+                                    continue;
+                                }
                             }
+
+                            // 应对 offset
+                            if let Some(offset) = scanParams.offset {
+                                if offset > readCount {
+                                    continue;
+                                }
+                            }
+
+                            // 应对 limit
+                            if let Some(limit) = scanParams.limit {
+                                if satisfiedRows.len() >= limit {
+                                    break;
+                                }
+                            }
+
+                            satisfiedRows.push((dataKey, rowData));
+
+                            suffix_plus_plus!(readCount);
                         }
-
-                        satisfiedRows.push((dataKey, rowData));
-
-                        suffix_plus_plus!(readCount);
                     }
                 }
-
                 satisfiedRows
             } else { // 说明是link 且尚未写filter
                 let mut rawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
@@ -685,9 +678,9 @@ impl<'session> CommandExecutor<'session> {
     // todo pointerKey应该同时到committed和uncommitted去搜索
     pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
-    where
-        A: CommittedPointerKeyProcessor,
-        B: UncommittedPointerKeyProcessor,
+        where
+            A: CommittedPointerKeyProcessor,
+            B: UncommittedPointerKeyProcessor,
     {
         let mut keys = Vec::new();
 

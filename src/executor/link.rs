@@ -8,6 +8,7 @@ use crate::meta::Table;
 use crate::parser::command::insert::Insert;
 use crate::parser::command::link::Link;
 use crate::types::{DataKey, KeyTag, KV, RowId, ScanCommittedPreProcessor};
+use anyhow::Result;
 
 impl<'session> CommandExecutor<'session> {
     /// 它本质是向relation对应的data file写入
@@ -81,12 +82,15 @@ impl<'session> CommandExecutor<'session> {
 
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
 
-        let mut process = |selfTable: &Table, selfDataKey: DataKey, pointerKeyTag: KeyTag, targetTable: &Table, targetDataKey: DataKey| {
-            let (xmin, xmax) = self.generateAddPointerXminXmax(&mut pointerKeyBuffer, selfDataKey, pointerKeyTag, targetTable.tableId, targetDataKey)?;
-            self.session.writeAddPointerMutation(&selfTable.name, xmin, xmax);
+        let mut process =
+            |selfTable: &Table, selfDataKey: DataKey,
+             pointerKeyTag: KeyTag,
+             targetTable: &Table, targetDataKey: DataKey| {
+                let (xmin, xmax) = self.generateAddPointerXminXmax(&mut pointerKeyBuffer, selfDataKey, pointerKeyTag, targetTable.tableId, targetDataKey)?;
+                self.session.writeAddPointerMutation(&selfTable.name, xmin, xmax);
 
-            anyhow::Result::<()>::Ok(())
-        };
+                Result::<()>::Ok(())
+            };
 
         // 对src来说
         // key + rel的tableId + rel的key
