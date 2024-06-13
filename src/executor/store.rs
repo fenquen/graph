@@ -214,7 +214,6 @@ impl<'session> CommandExecutor<'session> {
             if scanParams.tableFilter.is_some() || select {
                 let mut satisfiedRows = Vec::new();
 
-                let mut serialScan = true;
 
                 // 如果设置 scanConcurrency >1 说明是有 concurrent可能,到底是不是还要看下边的
                 if self.session.scanConcurrency > 1 {
@@ -227,8 +226,6 @@ impl<'session> CommandExecutor<'session> {
                     let mut concurrency = distance / COUNT_PER_THREAD;
 
                     if concurrency > 1 {
-                        serialScan = false;
-
                         if concurrency > self.session.scanConcurrency as u64 {
                             concurrency = self.session.scanConcurrency as u64;
                         }
@@ -393,76 +390,75 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 // 虽然设置了可以对线程scan 然而可能因为实际的数据量不够还是用不到
-                if serialScan {
-                    let snapshot = self.session.getSnapshot()?;
+
+                let snapshot = self.session.getSnapshot()?;
+
+                // mvcc的visibility筛选
+                let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
+
+                let mut readCount = 0usize;
+
+                // todo scan遍历能不能concurrent
+                // 对data条目而不是pointer条目遍历
+                for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(meta::DATA_KEY_PATTERN, Direction::Forward)) {
+                    let (dataKeyBinary, rowDataBinary) = iterResult?;
+
+                    // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
+                    // 前4个bit的值是不是 KEY_PREFIX_DATA
+                    if extractPrefixFromKeySlice!(dataKeyBinary) != meta::KEY_PREFIX_DATA {
+                        break;
+                    }
+
+                    let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
 
                     // mvcc的visibility筛选
-                    let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
+                    if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
+                                                                           &mut rawIterator,
+                                                                           dataKey,
+                                                                           &columnFamily,
+                                                                           &scanParams.table.name)? == false {
+                        continue;
+                    }
 
-                    let mut readCount = 0usize;
-
-                    // todo scan遍历能不能concurrent
-                    // 对data条目而不是pointer条目遍历
-                    for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(meta::DATA_KEY_PATTERN, Direction::Forward)) {
-                        let (dataKeyBinary, rowDataBinary) = iterResult?;
-
-                        // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
-                        // 前4个bit的值是不是 KEY_PREFIX_DATA
-                        if extractPrefixFromKeySlice!(dataKeyBinary) != meta::KEY_PREFIX_DATA {
-                            break;
-                        }
-
-                        let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
-
-                        // mvcc的visibility筛选
-                        if self.checkCommittedDataVisibilityWithoutTxMutations(&mut mvccKeyBuffer,
-                                                                               &mut rawIterator,
-                                                                               dataKey,
-                                                                               &columnFamily,
-                                                                               &scanParams.table.name)? == false {
+                    // 以上是全都在已落地的维度内的visibility check
+                    // 还要结合当前事务上的尚未提交的mutations,看已落地的是不是应该干掉
+                    if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
+                        if self.checkCommittedDataVisibilityWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
                             continue;
                         }
+                    }
 
-                        // 以上是全都在已落地的维度内的visibility check
-                        // 还要结合当前事务上的尚未提交的mutations,看已落地的是不是应该干掉
-                        if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
-                            if self.checkCommittedDataVisibilityWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
+                    if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
+                        if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
+                            continue;
+                        }
+                    }
+
+                    // mvcc筛选过了 对rowData本身的筛选
+                    if let Some(rowData) = self.readRowDataBinary(scanParams.table, &*rowDataBinary, scanParams.tableFilter, scanParams.selectedColumnNames)? {
+                        if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
+                            if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
                                 continue;
                             }
                         }
 
-                        if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
-                            if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
+                        // 应对 offset
+                        if let Some(offset) = scanParams.offset {
+                            if offset > readCount {
                                 continue;
                             }
                         }
 
-                        // mvcc筛选过了 对rowData本身的筛选
-                        if let Some(rowData) = self.readRowDataBinary(scanParams.table, &*rowDataBinary, scanParams.tableFilter, scanParams.selectedColumnNames)? {
-                            if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
-                                if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
-                                    continue;
-                                }
+                        // 应对 limit
+                        if let Some(limit) = scanParams.limit {
+                            if satisfiedRows.len() >= limit {
+                                break;
                             }
-
-                            // 应对 offset
-                            if let Some(offset) = scanParams.offset {
-                                if offset > readCount {
-                                    continue;
-                                }
-                            }
-
-                            // 应对 limit
-                            if let Some(limit) = scanParams.limit {
-                                if satisfiedRows.len() >= limit {
-                                    break;
-                                }
-                            }
-
-                            satisfiedRows.push((dataKey, rowData));
-
-                            suffix_plus_plus!(readCount);
                         }
+
+                        satisfiedRows.push((dataKey, rowData));
+
+                        suffix_plus_plus!(readCount);
                     }
                 }
 
