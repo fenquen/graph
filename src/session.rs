@@ -20,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use crate::executor::CommandExecutor;
 use crate::parser::command::Command;
 use crate::types::{Byte, ColumnFamily, KV, SelectResultToFront, Snapshot, TableMutations, TxId};
+use crate::utils::HashMapExt;
 
 pub struct Session {
     autoCommit: bool,
@@ -57,6 +58,7 @@ impl Session {
             self.generateTx()?;
         }
 
+        // todo 要是执行的过程有报错 是不是应该rollback
         let selectResultToFront = CommandExecutor::new(self).execute(&mut commands)?;
 
         // todo sql中执行了commit rollback使得当前tx提交后,当前不是inTx了,要是后边还有不是set的sql需要再重起1个tx
@@ -249,9 +251,13 @@ impl Session {
         self.writeMutation(tableName, Mutation::DeletePointer { oldXmax })
     }
 
-    fn writeMutation(&self, tableName: &String, mutation: Mutation) {
+    pub fn writeAddIndexMutation(&self, indexName: &String, data: KV) {
+        self.writeMutation(indexName, Mutation::AddIndex { data })
+    }
+
+    fn writeMutation(&self, dbObjectName: &String, mutation: Mutation) {
         let mut tableName_mutationsOnTable = self.tableName_mutations.write().unwrap();
-        let mutationsOnTable = tableName_mutationsOnTable.getMutWithDefault(tableName);
+        let mutationsOnTable = tableName_mutationsOnTable.getMutWithDefault(dbObjectName);
 
         match mutation {
             Mutation::AddData { data, xmin, xmax, origin } => {
@@ -270,12 +276,15 @@ impl Session {
             Mutation::DeleteData { oldXmax } => {
                 mutationsOnTable.insert(oldXmax.0, oldXmax.1);
             }
-            Mutation::DeletePointer { oldXmax } => {
-                mutationsOnTable.insert(oldXmax.0, oldXmax.1);
-            }
             Mutation::AddPointer { xmin, xmax } => {
                 mutationsOnTable.insert(xmin.0, xmin.1);
                 mutationsOnTable.insert(xmax.0, xmax.1);
+            }
+            Mutation::DeletePointer { oldXmax } => {
+                mutationsOnTable.insert(oldXmax.0, oldXmax.1);
+            }
+            Mutation::AddIndex { data } => {
+                mutationsOnTable.insert(data.0, data.1);
             }
         };
     }
@@ -294,25 +303,6 @@ impl Default for Session {
     }
 }
 
-trait HashMapExt<K, V, S = RandomState> {
-    fn getMutWithDefault<Q: ?Sized>(&mut self, k: &Q) -> &mut V
-        where K: Borrow<Q> + From<Q>,
-              Q: Hash + Eq + Clone,
-              V: Default;
-}
-
-impl<K: Eq + Hash, V, S: BuildHasher> HashMapExt<K, V, S> for HashMap<K, V, S> {
-    fn getMutWithDefault<Q: ?Sized>(&mut self, k: &Q) -> &mut V
-        where K: Borrow<Q> + From<Q>,
-              Q: Hash + Eq + Clone,
-              V: Default {
-        if let None = self.get_mut(k) {
-            self.insert(k.clone().into(), V::default());
-        }
-        self.get_mut(k).unwrap()
-    }
-}
-
 pub enum Mutation {
     AddData {
         data: KV,
@@ -323,6 +313,9 @@ pub enum Mutation {
     AddPointer {
         xmin: KV,
         xmax: KV,
+    },
+    AddIndex {
+        data: KV
     },
     UpdateData {
         oldXmax: KV,
@@ -337,6 +330,7 @@ pub enum Mutation {
     DeletePointer {
         oldXmax: KV
     },
+
 }
 
 #[derive(Default)]
@@ -385,6 +379,6 @@ mod test {
         println!("{}", serde_json::to_string(&a).unwrap());
 
         // https://stackoverflow.com/questions/26611664/what-is-the-r-operator-in-rust
-        let a: Object = serde_json::from_str("").unwrap();
+        serde_json::from_str::<Object>("").unwrap();
     }
 }

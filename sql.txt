@@ -73,5 +73,3 @@ link user(id= 6) to user(id=7) by likes(level =0)
     "requestType": "ExecuteSql",
     "sql":"select user as user0 -likes recursive[6..6]-> user as user1"
 }
-
-select user as user0 -likes recursive[6..6]-> user user1

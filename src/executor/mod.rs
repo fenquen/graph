@@ -3,13 +3,13 @@ use std::sync::atomic::AtomicU64;
 use dashmap::mapref::one::{Ref, RefMut};
 use serde_json::Value;
 use strum_macros::Display;
-use crate::meta::Table;
+use crate::meta::{DBObject, Index, Table};
 use crate::session::Session;
 use crate::{meta, throw};
 use crate::graph_value::GraphValue;
 use crate::parser::command::Command;
 use crate::parser::command::manage::Set;
-use crate::types::{SelectResultToFront, TableId};
+use crate::types::{SelectResultToFront, DBObjectId};
 use anyhow::Result;
 
 mod create;
@@ -61,18 +61,40 @@ impl<'session> CommandExecutor<'session> {
 
         for command in commands {
             let executionResult = match command {
+                Command::CreateIndex(index) => {
+                    let index = Index {
+                        id: DBObjectId::default(),
+                        name: index.name.clone(),
+                        tableName: index.tableName.clone(),
+                        columnNames: index.columnNames.clone(),
+                        rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
+                        createIfNotExist: index.createIfNotExist,
+                    };
+
+                    self.createIndex(index)?
+                }
                 Command::CreateTable(table) => {
                     let table = Table {
+                        id: DBObjectId::default(),
                         name: table.name.clone(),
                         columns: table.columns.clone(),
-                        type0: table.type0.clone(),
                         // todo rowId 要从1起 完成
                         rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
-                        tableId: TableId::default(),
                         createIfNotExist: table.createIfNotExist,
                     };
 
-                    self.createTable(table)?
+                    self.createTable(table, true)?
+                }
+                Command::CreateRelation(table) => {
+                    let table = Table {
+                        id: DBObjectId::default(),
+                        name: table.name.clone(),
+                        columns: table.columns.clone(),
+                        rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
+                        createIfNotExist: table.createIfNotExist,
+                    };
+
+                    self.createTable(table, false)?
                 }
                 Command::Insert(insertValues) => self.insert(insertValues)?,
                 Command::Select(select) => self.select(select)?,
@@ -103,21 +125,13 @@ impl<'session> CommandExecutor<'session> {
         Ok(valueVecVec)
     }
 
-    fn getTableRefMutByName(&self, tableName: &str) -> Result<RefMut<String, Table>> {
-        let table = meta::TABLE_NAME_TABLE.get_mut(tableName);
-        if table.is_none() {
-            throw!(&format!("table:{} not exist", tableName));
+    fn getDBObjectByName(&self, dbObjectName: &str) -> Result<Ref<String, DBObject>> {
+        let dbObject = meta::NAME_DB_OBJ.get(dbObjectName);
+        if dbObject.is_none() {
+            throw!(&format!("db object:{} not exist", dbObjectName));
         }
 
-        Ok(table.unwrap())
-    }
-
-    fn getTableRefByName(&self, tableName: &str) -> Result<Ref<String, Table>> {
-        let table = meta::TABLE_NAME_TABLE.get(tableName);
-        if table.is_none() {
-            throw!(&format!("table:{} not exist", tableName));
-        }
-        Ok(table.unwrap())
+        Ok(dbObject.unwrap())
     }
 }
 
@@ -157,7 +171,10 @@ mod test {
         let a = A::S("1".to_string());
 
         impl Serialize for A {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
                 match self {
                     A::S(string) => {
                         if global::UNTAGGED_ENUM_JSON.get() {

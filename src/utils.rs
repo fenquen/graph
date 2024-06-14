@@ -2,6 +2,9 @@ use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
 use std::{alloc, ptr};
 use std::alloc::Layout;
+use std::borrow::Borrow;
+use std::collections::HashMap;
+use std::hash::{BuildHasher, Hash, RandomState};
 use anyhow::format_err;
 
 /// 越过了rust的兜底 以不可变引用对外提供像原来的c/c++ java那样 <br>
@@ -86,6 +89,28 @@ impl<T> DerefMut for TrickyContainer<T> {
 unsafe impl<T> Send for TrickyContainer<T> {}
 
 unsafe impl<T> Sync for TrickyContainer<T> {}
+
+pub trait HashMapExt<K, V, S = RandomState> {
+    fn getMutWithDefault<Q: ?Sized>(&mut self, k: &Q) -> &mut V
+    where
+        K: Borrow<Q> + From<Q>,
+        Q: Hash + Eq + Clone,
+        V: Default;
+}
+
+impl<K: Eq + Hash, V, S: BuildHasher> HashMapExt<K, V, S> for HashMap<K, V, S> {
+    fn getMutWithDefault<Q: ?Sized>(&mut self, k: &Q) -> &mut V
+    where
+        K: Borrow<Q> + From<Q>,
+        Q: Hash + Eq + Clone,
+        V: Default,
+    {
+        if let None = self.get_mut(k) {
+            self.insert(k.clone().into(), V::default());
+        }
+        self.get_mut(k).unwrap()
+    }
+}
 
 #[cfg(test)]
 mod test {

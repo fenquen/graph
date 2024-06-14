@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::SeekFrom;
 use std::mem;
@@ -16,25 +17,28 @@ use dashmap::DashMap;
 use lazy_static::lazy_static;
 use rocksdb::{BoundColumnFamily, ColumnFamilyDescriptor, DB, DBCommon,
               DBRawIteratorWithThreadMode, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options};
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use crate::config::CONFIG;
 use crate::graph_value::GraphValue;
 use crate::session::Session;
-use crate::types::{Byte, DataKey, DBIterator, DBRawIterator, KeyPrefix, KeyTag, RowId, TableId, TxId};
+use crate::types::{Byte, DataKey, DBIterator, DBRawIterator, KeyPrefix, KeyTag, RowId, DBObjectId, TxId};
 use crate::utils::TrickyContainer;
 
 lazy_static! {
     pub static ref STORE: TrickyContainer<Store> = TrickyContainer::new();
-    pub static ref TABLE_NAME_TABLE: DashMap<String, Table> = DashMap::new();
+
+    pub static ref NAME_DB_OBJ: DashMap<String, DBObject> = DashMap::new();
     // 如果是usize的可以使用::std::sync::atomic::ATOMIC_USIZE_INIT
-    pub static ref TABLE_ID_COUNTER: AtomicU64 = AtomicU64::default();
+    pub static ref DB_OBJECT_ID_COUNTER: AtomicU64 = AtomicU64::default();
+
     pub static ref TX_ID_COUNTER: AtomicU64 = AtomicU64::new(TX_ID_MIN);
     /// db启动的时候设置的原先已使用的最大的txId
     pub static ref TX_ID_START_UP: TrickyContainer<TxId> = TrickyContainer::new();
     pub static ref TX_UNDERGOING_COUNT:AtomicU64 = AtomicU64::default();
-}
 
+    pub static ref TABLE_NAME_INDEX_NAMES: RwLock<HashMap<String, Vec<String>>> = Default::default();
+}
 pub struct Store {
     pub metaStore: DB,
     pub dataStore: DB,
@@ -215,39 +219,98 @@ macro_rules! extractKeyTagFromMvccKey {
     };
 }
 
+#[derive(Serialize, Deserialize)]
+pub enum DBObject {
+    Table(Table),
+    Index(Index),
+    Relation(Table),
+}
+
+impl DBObject {
+    pub const TABLE: &'static str = "table";
+    pub const INDEX: &'static str = "index";
+    pub const RELATION: &'static str = "relation";
+
+    pub fn asTable(&self) -> Result<&Table> {
+        if let DBObject::Table(table) = self {
+            Ok(table)
+        } else {
+            throw!(&format!("{} is not a table", self.getName()))
+        }
+    }
+
+    pub fn asIndex(&self) -> Result<&Index> {
+        if let DBObject::Index(index) = self {
+            Ok(index)
+        } else {
+            throw!(&format!("{} is not a index", self.getName()))
+        }
+    }
+
+    pub fn asRelation(&self) -> Result<&Table> {
+        if let DBObject::Relation(table) = self {
+            Ok(table)
+        } else {
+            throw!(&format!("{} is not a relation", self.getName()))
+        }
+    }
+
+    pub fn getId(&self) -> DBObjectId {
+        match self {
+            DBObject::Table(table) => table.id,
+            DBObject::Index(index) => index.id,
+            DBObject::Relation(table) => table.id,
+        }
+    }
+
+    pub fn getName(&self) -> String {
+        match self {
+            DBObject::Table(table) => table.name.clone(),
+            DBObject::Index(index) => index.name.clone(),
+            DBObject::Relation(table) => table.name.clone(),
+        }
+    }
+
+    pub fn getRowIdCounter(&self) -> &AtomicU64 {
+        match self {
+            DBObject::Table(table) => &table.rowIdCounter,
+            DBObject::Index(index) => &index.rowIdCounter,
+            DBObject::Relation(table) => &table.rowIdCounter,
+        }
+    }
+}
+
+// todo alter table
+// todo drop table
+// todo 可以的话是不是记录下table的record的实际数量
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Table {
+    /// start from 0
+    pub id: DBObjectId,
     pub name: String,
     pub columns: Vec<Column>,
-    pub type0: TableType,
     #[serde(skip_serializing, skip_deserializing)]
     /// start from 1
     pub rowIdCounter: AtomicU64,
-    /// start from 0
-    pub tableId: TableId,
     pub createIfNotExist: bool,
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+#[derive(Debug, Deserialize, Clone, Serialize, Default)]
 pub enum TableType {
+    #[default]
     Table,
+    Index,
     Relation,
-    Unknown,
-}
-
-impl Default for TableType {
-    fn default() -> Self {
-        TableType::Unknown
-    }
 }
 
 impl FromStr for TableType {
     type Err = GraphError;
 
     fn from_str(str: &str) -> Result<Self, Self::Err> {
-        match str.to_uppercase().as_str() {
-            "TABLE" => Ok(TableType::Table),
-            "RELATION" => Ok(TableType::Relation),
+        match str.to_lowercase().as_str() {
+            "table" => Ok(TableType::Table),
+            "index" => Ok(TableType::Index),
+            "relation" => Ok(TableType::Relation),
             _ => throw!(&format!("unknown type:{}", str)),
         }
     }
@@ -266,20 +329,12 @@ impl PartialEq for Column {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Clone, Serialize, PartialEq, Default)]
 pub enum ColumnType {
+    #[default]
     String,
     Integer,
     Decimal,
-    /// 内部使用的 当创建relation时候用到 用来给realtion添加2个额外的字段 src dest
-    PointDesc,
-    Unknown,
-}
-
-impl Default for ColumnType {
-    fn default() -> Self {
-        ColumnType::Unknown
-    }
 }
 
 impl ColumnType {
@@ -294,25 +349,14 @@ impl ColumnType {
     }
 }
 
-impl From<&str> for ColumnType {
-    fn from(value: &str) -> Self {
-        match value.to_uppercase().as_str() {
-            "STRING" => ColumnType::String,
-            "INTEGER" => ColumnType::Integer,
-            "DECIMAL" => ColumnType::Decimal,
-            _ => ColumnType::Unknown
-        }
-    }
-}
-
 impl FromStr for ColumnType {
     type Err = GraphError;
 
     fn from_str(str: &str) -> Result<Self, Self::Err> {
-        match str.to_uppercase().as_str() {
-            "STRING" => Ok(ColumnType::String),
-            "INTEGER" => Ok(ColumnType::Integer),
-            "DECIMAL" => Ok(ColumnType::Decimal),
+        match str.to_lowercase().as_str() {
+            "string" => Ok(ColumnType::String),
+            "integer" => Ok(ColumnType::Integer),
+            "decimal" => Ok(ColumnType::Decimal),
             _ => throw!(&format!("unknown type:{}", str))
         }
     }
@@ -324,17 +368,27 @@ impl Display for ColumnType {
             ColumnType::String => write!(f, "STRING"),
             ColumnType::Integer => write!(f, "INTEGER"),
             ColumnType::Decimal => write!(f, "DECIMAL"),
-            _ => write!(f, "UNKNOWN"),
         }
     }
 }
 
+#[derive(Serialize, Deserialize, Default, Debug)]
+pub struct Index {
+    pub id: DBObjectId,
+    pub name: String,
+    /// start from 1
+    pub rowIdCounter: AtomicU64,
+    pub createIfNotExist: bool,
+    pub tableName: String,
+    pub columnNames: Vec<String>,
+}
+
 pub fn init() -> Result<()> {
     // 用来后边dataStore时候对应各个的columnFamily
-    let mut tableNames = Vec::new();
+    let mut columnFamilyNames = Vec::new();
 
     // tx id 对应的column family
-    tableNames.push(COLUMN_FAMILY_NAME_TX_ID.to_string());
+    columnFamilyNames.push(COLUMN_FAMILY_NAME_TX_ID.to_string());
 
     // 生成用来保存表文件和元数据的目录
     // meta的保存格式是 tableId->json
@@ -355,32 +409,32 @@ pub fn init() -> Result<()> {
         for iterResult in iterator {
             let (key, value) = iterResult?;
 
-            let tableId = byte_slice_to_u64!(&*key);
-            let table: Table = serde_json::from_slice(&*value)?;
+            let dbObjectId = byte_slice_to_u64!(&*key);
+            let dbObject: DBObject = serde_json::from_slice(&*value)?;
 
-            if tableId != table.tableId {
+            if dbObjectId != dbObject.getId() {
                 throw!("table记录的key和table中的tableId不同");
             }
 
-            tableNames.push(table.name.clone());
+            columnFamilyNames.push(dbObject.getName());
 
-            TABLE_NAME_TABLE.insert(table.name.to_owned(), table);
+            NAME_DB_OBJ.insert(dbObject.getName(), dbObject);
 
             // key是以binary由大到小排序的 也便是table id由大到小排序
-            latestTableId = tableId;
+            latestTableId = dbObjectId;
         }
 
-        TABLE_ID_COUNTER.store(latestTableId + 1, Ordering::Release);
+        DB_OBJECT_ID_COUNTER.store(latestTableId + 1, Ordering::Release);
 
         metaStore
     };
 
     let dataStore: DB = {
         let columnFamilyDescVec: Vec<ColumnFamilyDescriptor> =
-            tableNames.iter().map(|tableName| {
+            columnFamilyNames.iter().map(|columnFamilyName| {
                 let mut columnFamilyOption = Options::default();
                 columnFamilyOption.set_max_write_buffer_number(2);
-                ColumnFamilyDescriptor::new(tableName, columnFamilyOption)
+                ColumnFamilyDescriptor::new(columnFamilyName, columnFamilyOption)
             }).collect::<Vec<ColumnFamilyDescriptor>>();
 
         std::fs::create_dir_all(CONFIG.dataDir.as_str())?;
@@ -396,15 +450,15 @@ pub fn init() -> Result<()> {
     };
 
     // 遍历各个cf读取last的key 读取lastest的rowId
-    for ref tableName in tableNames {
-        let cf = dataStore.cf_handle(tableName.as_str()).unwrap();
-        let mut rawIterator: DBRawIterator = dataStore.raw_iterator_cf(&cf);
+    for ref columnFamilyName in columnFamilyNames {
+        let columnFamily = dataStore.cf_handle(columnFamilyName.as_str()).unwrap();
+        let mut rawIterator: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
 
         // 到last条目而不是末尾 不用去调用prev()
         rawIterator.seek_to_last();
 
         // todo latest的txId需要还原 完成
-        match (rawIterator.key(), tableName.as_str()) {
+        match (rawIterator.key(), columnFamilyName.as_str()) {
             (Some(key), COLUMN_FAMILY_NAME_TX_ID) => {
                 let lastTxId = byte_slice_to_u64!(key);
 
@@ -413,14 +467,17 @@ pub fn init() -> Result<()> {
             }
             (Some(key), _) => {
                 let lastRowId = extractRowIdFromKeySlice!(key);
-                TABLE_NAME_TABLE.get_mut(tableName.as_str()).unwrap().rowIdCounter.store(lastRowId + 1, Ordering::Release);
+
+                let dbObject = NAME_DB_OBJ.get(columnFamilyName.as_str()).unwrap();
+                dbObject.getRowIdCounter().store(lastRowId + 1, Ordering::Release);
             }
             (None, COLUMN_FAMILY_NAME_TX_ID) => {
                 TX_ID_START_UP.set(TX_ID_MIN - 1);
                 TX_ID_COUNTER.store(TX_ID_MIN, Ordering::Release);
             }
             (None, _) => {
-                TABLE_NAME_TABLE.get_mut(tableName.as_str()).unwrap().rowIdCounter.store(ROW_ID_MIN, Ordering::Release);
+                let dbObject = NAME_DB_OBJ.get(columnFamilyName.as_str()).unwrap();
+                dbObject.getRowIdCounter().store(ROW_ID_MIN, Ordering::Release);
             }
         }
     }

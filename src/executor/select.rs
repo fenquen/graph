@@ -31,11 +31,12 @@ impl<'session> CommandExecutor<'session> {
 
     /// 普通的和rdbms相同的 select
     fn selectTable(&self, selectTable: &SelectTable) -> Result<CommandExecResult> {
-        let table = self.getTableRefByName(selectTable.tableName.as_str())?;
+        let table = self.getDBObjectByName(selectTable.tableName.as_str())?;
+        let table = table.asTable()?;
 
         let rowDatas = {
             let scanParams = ScanParams {
-                table: table.value(),
+                table,
                 tableFilter: selectTable.tableFilterExpr.as_ref(),
                 selectedColumnNames: selectTable.selectedColNames.as_ref(),
                 limit: selectTable.limit,
@@ -77,10 +78,11 @@ impl<'session> CommandExecutor<'session> {
             // 为什么要使用{} 不然的话有概率死锁
             // https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
             let relationDatas: Vec<(DataKey, RowData)> = {
-                let relation = self.getTableRefByName(selectRel.relationName.as_ref().unwrap())?;
+                let relation = self.getDBObjectByName(selectRel.relationName.as_ref().unwrap())?;
+                let relation = relation.asRelation()?;
 
                 let scanParams = ScanParams {
-                    table: relation.value(),
+                    table: relation,
                     tableFilter: selectRel.relationFilter.as_ref(),
                     selectedColumnNames: selectRel.relationColumnNames.as_ref(),
                     ..Default::default()
@@ -95,10 +97,14 @@ impl<'session> CommandExecutor<'session> {
             // 融合了当前的selectRel的满足条件的全部的relationDatas的全部的destDataKey
             let mut destDataKeysInSelectRel = HashSet::new();
 
-            let srcTable = self.getTableRefByName(&selectRel.srcTableName)?;
-            let destTable = self.getTableRefByName(selectRel.destTableName.as_ref().unwrap())?;
+            let srcTable = self.getDBObjectByName(&selectRel.srcTableName)?;
+            let srcTable = srcTable.asTable()?;
 
-            let relation = self.getTableRefByName(selectRel.relationName.as_ref().unwrap())?;
+            let destTable = self.getDBObjectByName(selectRel.destTableName.as_ref().unwrap())?;
+            let destTable = destTable.asTable()?;
+
+            let relation = self.getDBObjectByName(selectRel.relationName.as_ref().unwrap())?;
+            let relation = relation.asRelation()?;
 
             // 遍历当前的selectRel的多条relationData
             'loopRelationData:
@@ -106,7 +112,7 @@ impl<'session> CommandExecutor<'session> {
                 let gatherTargetDatas =
                     |pointerKeyTag: KeyTag, targetTable: &Table, targetFilter: Option<&Expr>| {
                         // todo selectRels时候如何应对pointerKey的mvcc 完成
-                        let targetDatas = self.searchDataByPointerKeyPrefix(relation.value(), relationDataKey, pointerKeyTag, targetTable, targetFilter)?;
+                        let targetDatas = self.searchDataByPointerKeyPrefix(relation, relationDataKey, pointerKeyTag, targetTable, targetFilter)?;
 
                         // todo 不知道要不要dedup
                         Result::<Vec<(DataKey, RowData)>>::Ok(targetDatas)
@@ -114,9 +120,7 @@ impl<'session> CommandExecutor<'session> {
 
                 // 收罗该rel上的全部的src的dataKey
                 let mut srcRowDatas = {
-                    let srcRowDatas =
-                        gatherTargetDatas(meta::POINTER_KEY_TAG_SRC_TABLE_ID,
-                                          srcTable.value(), selectRel.srcFilter.as_ref())?;
+                    let srcRowDatas = gatherTargetDatas(meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, selectRel.srcFilter.as_ref())?;
 
                     if srcRowDatas.is_empty() {
                         continue 'loopRelationData;
@@ -129,8 +133,7 @@ impl<'session> CommandExecutor<'session> {
                 let mut destRowDatas =
                     if selectRel.relationDepth.is_some() {
                         let destRowDatas =
-                            gatherTargetDatas(meta::POINTER_KEY_TAG_DEST_TABLE_ID,
-                                              destTable.value(), selectRel.destFilter.as_ref())?;
+                            gatherTargetDatas(meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, selectRel.destFilter.as_ref())?;
 
                         if destRowDatas.is_empty() {
                             continue 'loopRelationData;
@@ -215,9 +218,9 @@ impl<'session> CommandExecutor<'session> {
                                     };
 
                                 let destRowDatasRecursive =
-                                    self.selectRelRecursive(initial, srcTable.value(), selectRel.srcFilter.as_ref(),
+                                    self.selectRelRecursive(initial, srcTable, selectRel.srcFilter.as_ref(),
                                                             meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID,
-                                                            relation.value(), selectRel.relationFilter.as_ref(),
+                                                            relation, selectRel.relationFilter.as_ref(),
                                                             meta::POINTER_KEY_TAG_DEST_TABLE_ID,
                                                             depth)?;
 
@@ -348,7 +351,8 @@ impl<'session> CommandExecutor<'session> {
     /// 相当是在原来基础上再加上对data指向的rel的筛选
     fn selectTableUnderRels(&self, selectTableUnderRels: &SelectTableUnderRels) -> Result<CommandExecResult> {
         // 先要以普通select table体系筛选 然后对pointerKey筛选
-        let table = self.getTableRefByName(selectTableUnderRels.selectTable.tableName.as_str())?;
+        let table = self.getDBObjectByName(selectTableUnderRels.selectTable.tableName.as_str())?;
+        let table = table.asTable()?;
 
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
 
@@ -396,7 +400,7 @@ impl<'session> CommandExecutor<'session> {
 
                 // 如果是起点的话 那么rel便是它的downstream
                 // 搜寻满足和当前table data的相互地位的rel的data 遍历的是rel
-                pointerKeyBuffer.writePointerKeyLeadingPart(nodeDataKey, pointerKeyTag, relation.tableId);
+                pointerKeyBuffer.writePointerKeyLeadingPart(nodeDataKey, pointerKeyTag, relation.id);
 
                 // 本node指向rel的pointerKey的前缀
                 let pointerKeyPrefix = pointerKeyBuffer.to_vec();
@@ -414,17 +418,18 @@ impl<'session> CommandExecutor<'session> {
             |nodeDataKey: DataKey| {
                 // 遍历relDesc,看data是不是都能满足
                 for relDesc in &selectTableUnderRels.relDescVec {
-                    let relation = self.getTableRefByName(relDesc.relationName.as_str())?;
+                    let relation = self.getDBObjectByName(relDesc.relationName.as_str())?;
+                    let relation  = relation.asRelation()?;
 
                     // 是不是能满足当前relDesc要求
                     let satisfyRelDesc =
                         match relDesc.endPointType {
                             // 闭包里边镶嵌闭包
-                            EndPointType::Start => processRelDesc(nodeDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relDesc, relation.value())?,
-                            EndPointType::End => processRelDesc(nodeDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relDesc, relation.value())?,
+                            EndPointType::Start => processRelDesc(nodeDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relDesc, relation)?,
+                            EndPointType::End => processRelDesc(nodeDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relDesc, relation)?,
                             EndPointType::Either => {
-                                processRelDesc(nodeDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relDesc, relation.value())? ||
-                                    processRelDesc(nodeDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relDesc, relation.value())?
+                                processRelDesc(nodeDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relDesc, relation)? ||
+                                    processRelDesc(nodeDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relDesc, relation)?
                             }
                         };
 
@@ -457,7 +462,7 @@ impl<'session> CommandExecutor<'session> {
 
         let rowDatas = {
             let scanParams = ScanParams {
-                table: table.value(),
+                table,
                 tableFilter: selectTableUnderRels.selectTable.tableFilterExpr.as_ref(),
                 selectedColumnNames: selectTableUnderRels.selectTable.selectedColNames.as_ref(),
                 ..Default::default()

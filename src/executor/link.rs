@@ -14,14 +14,17 @@ impl<'session> CommandExecutor<'session> {
     /// 它本质是向relation对应的data file写入
     /// 两个元素之间的relation只看种类不看里边的属性的
     pub(super) fn link(&self, link: &Link) -> anyhow::Result<CommandExecResult> {
-        // 得到3个表的对象
-        let srcTable = self.getTableRefByName(link.srcTableName.as_str())?;
-        let destTable = self.getTableRefByName(link.destTableName.as_str())?;
+        // 得到表的对象
+        let srcTable = self.getDBObjectByName(link.srcTableName.as_str())?;
+        let srcTable = srcTable.asTable()?;
+
+        let destTable = self.getDBObjectByName(link.destTableName.as_str())?;
+        let destTable = destTable.asTable()?;
 
         // 对src table和dest table调用expr筛选
         let srcSatisfiedVec = {
             let scanParams = ScanParams {
-                table: srcTable.value(),
+                table: srcTable,
                 tableFilter: link.srcTableFilterExpr.as_ref(),
                 ..Default::default()
             };
@@ -38,7 +41,7 @@ impl<'session> CommandExecutor<'session> {
 
         let destSatisfiedVec = {
             let scanParams = ScanParams {
-                table: destTable.value(),
+                table: destTable,
                 tableFilter: link.destTableFilterExpr.as_ref(),
                 ..Default::default()
             };
@@ -61,13 +64,14 @@ impl<'session> CommandExecutor<'session> {
             columnExprs: link.relationColumnExprs.clone(),
         };
 
-        let relation = self.getTableRefByName(&link.relationName)?;
+        let relation = self.getDBObjectByName(&link.relationName)?;
+        let relation = relation.asRelation()?;
 
         let relRowId: RowId = relation.rowIdCounter.fetch_add(1, Ordering::AcqRel);
         let relDataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, relRowId);
 
         let dataAdd = {
-            let rowDataBinary = self.generateInsertValuesBinary(&mut insertValues, &*relation)?;
+            let (rowDataBinary, _) = self.generateInsertValuesBinary(&mut insertValues, &*relation)?;
             (u64ToByteArrRef!(relDataKey).to_vec(), rowDataBinary.to_vec()) as KV
         };
 
@@ -86,7 +90,7 @@ impl<'session> CommandExecutor<'session> {
             |selfTable: &Table, selfDataKey: DataKey,
              pointerKeyTag: KeyTag,
              targetTable: &Table, targetDataKey: DataKey| {
-                let (xmin, xmax) = self.generateAddPointerXminXmax(&mut pointerKeyBuffer, selfDataKey, pointerKeyTag, targetTable.tableId, targetDataKey)?;
+                let (xmin, xmax) = self.generateAddPointerXminXmax(&mut pointerKeyBuffer, selfDataKey, pointerKeyTag, targetTable.id, targetDataKey)?;
                 self.session.writeAddPointerMutation(&selfTable.name, xmin, xmax);
 
                 Result::<()>::Ok(())
@@ -99,11 +103,11 @@ impl<'session> CommandExecutor<'session> {
             // 尚未设置过滤条件 得到的是全部的
             if srcSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for srcDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    process(srcTable.value(), srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation.value(), relDataKey)?;
+                    process(srcTable, srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation, relDataKey)?;
                 }
             } else {
                 for (srcDataKey, _) in &srcSatisfiedVec {
-                    process(srcTable.value(), *srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation.value(), relDataKey)?;
+                    process(srcTable, *srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation, relDataKey)?;
                 }
             }
         }
@@ -115,21 +119,21 @@ impl<'session> CommandExecutor<'session> {
             // 尚未设置过滤条件 得到的是全部的
             if srcSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for srcDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    process(relation.value(), relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.value(), srcDataKey)?;
+                    process(relation, relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, srcDataKey)?;
                 }
             } else {
                 for (srcDataKey, _) in &srcSatisfiedVec {
-                    process(relation.value(), relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.value(), *srcDataKey)?;
+                    process(relation, relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, *srcDataKey)?;
                 }
             }
 
             if destSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for destDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    process(relation.value(), relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable.value(), destDataKey)?;
+                    process(relation, relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, destDataKey)?;
                 }
             } else {
                 for (destDataKey, _) in &destSatisfiedVec {
-                    process(relation.value(), relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable.value(), *destDataKey)?;
+                    process(relation, relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, *destDataKey)?;
                 }
             }
         }
@@ -139,11 +143,11 @@ impl<'session> CommandExecutor<'session> {
         {
             if destSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for destDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    process(destTable.value(), destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation.value(), relDataKey)?;
+                    process(destTable, destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation, relDataKey)?;
                 }
             } else {
                 for (destDataKey, _) in &destSatisfiedVec {
-                    process(destTable.value(), *destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation.value(), relDataKey)?;
+                    process(destTable, *destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation, relDataKey)?;
                 }
             }
         }

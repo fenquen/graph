@@ -1,20 +1,25 @@
 use crate::global;
-use crate::meta::{Column, Table, TableType};
+use crate::meta::{Column, DBObject, Index, Table, TableType};
 use crate::parser::command::Command;
 use crate::parser::element::Element;
 use crate::parser::Parser;
+use anyhow::Result;
 
 impl Parser {
     // todo 实现 default value
     // todo 实现 if not exist 完成
     // CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)
-    pub(in crate::parser) fn parseCreate(&mut self) -> anyhow::Result<Command> {
-        // 不是table便是relation
-        let tableType = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str().parse()?;
-        self.parseCreateTable(tableType)
+    pub(in crate::parser) fn parseCreate(&mut self) -> Result<Command> {
+        let dbObjectType = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase();
+        match dbObjectType.as_str() {
+            DBObject::RELATION | DBObject::TABLE => self.parseCreateTable(dbObjectType.as_str()),
+            DBObject::INDEX => self.parseCreateIndex(),
+            _ => self.throwSyntaxErrorDetail(&format!("unknow database object {}", dbObjectType))?
+        }
     }
 
-    fn parseCreateTable(&mut self, tableType: TableType) -> anyhow::Result<Command> {
+    /// 因为relation和table的结构是相同的 共用
+    fn parseCreateTable(&mut self, dbObjectType: &str) -> Result<Command> {
         let mut table = Table::default();
 
         // 应对 if not exist
@@ -27,8 +32,6 @@ impl Parser {
 
             table.createIfNotExist = true;
         }
-
-        table.type0 = tableType;
 
         // 读取table name
         table.name = self.getCurrentElementAdvance()?.expectTextLiteral("table name can not be pure number")?;
@@ -100,11 +103,51 @@ impl Parser {
             }
         }
 
-        Ok(Command::CreateTable(table))
+        if dbObjectType == DBObject::TABLE {
+            Ok(Command::CreateTable(table))
+        } else {
+            Ok(Command::CreateRelation(table))
+        }
+    }
+
+    /// ```create index aaa on user[id, name] ```
+    fn parseCreateIndex(&mut self) -> Result<Command> {
+        let mut index = Index::default();
+
+        index.name = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+
+        // 读取 on
+        self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("on", "index name should followed by on")?;
+
+        index.tableName = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+
+        // 读取[
+        self.getCurrentElementAdvance()?.expectTextLiteral(global::方括号_STR)?;
+
+        loop {
+            let columnName = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+            match columnName.as_str() {
+                global::逗号_STR => continue,
+                global::方括号1_STR => break,
+                _ => {}
+            }
+
+            index.columnNames.push(columnName);
+        }
+
+        if index.columnNames.is_empty() {
+            self.throwSyntaxErrorDetail("index has no columns")?;
+        }
+
+        if self.hasRemainingElement() {
+            self.throwSyntaxErrorDetail("has redundant content")?;
+        }
+
+        Ok(Command::CreateIndex(index))
     }
 
     /// 字母数字 且 数字不能打头
-    fn checkDbObjectName(&self, name: &str) -> anyhow::Result<()> {
+    fn checkDbObjectName(&self, name: &str) -> Result<()> {
         let chars: Vec<char> = name.chars().collect();
 
         // 打头得要字母

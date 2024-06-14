@@ -1,32 +1,27 @@
 use std::sync::atomic::Ordering;
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use crate::meta::TableType;
-use crate::{keyPrefixAddRowId, meta, throw, u64ToByteArrRef};
+use crate::{global, keyPrefixAddRowId, meta, throw, u64ToByteArrRef};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::parser::command::insert::Insert;
 use crate::types::{DataKey, KV, RowId};
+use anyhow::Result;
+use crate::codec::BinaryCodec;
 
 impl<'session> CommandExecutor<'session> {
     // todo insert时候value的排布要和创建表的时候column的顺序对应 完成
-    pub (super) fn insert(&self, insert: &mut Insert) -> anyhow::Result<CommandExecResult> {
+    pub(super) fn insert(&self, insert: &mut Insert) -> Result<CommandExecResult> {
         // 对应的表是不是exist
-        let table = self.getTableRefByName(&insert.tableName)?;
-
-        // 不能对relation使用insert into
-        if let TableType::Relation = table.type0 {
-            throw!(&format!("{} is a RELATION , can not use insert into on RELATION", insert.tableName));
-        }
+        let dbObject = self.getDBObjectByName(&insert.tableName)?;
+        let table = dbObject.asTable()?;
 
         let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
         let dataKey: DataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, rowId);
 
         // 写 data本身的key和value
-        let dataAdd = {
-            let dataKeyBinary = u64ToByteArrRef!(dataKey);
-            let rowDataBinary = self.generateInsertValuesBinary(insert, &*table)?;
-
-            (dataKeyBinary.to_vec(), rowDataBinary.to_vec()) as KV
-        };
+        let dataKeyBinary = u64ToByteArrRef!(dataKey);
+        let (rowDataBinary, rowData) = self.generateInsertValuesBinary(insert, &*table)?;
+        let dataAdd = (dataKeyBinary.to_vec(), rowDataBinary.to_vec()) as KV;
 
         // 写 xmin xmax 对应的 mvcc key
         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
@@ -35,6 +30,32 @@ impl<'session> CommandExecutor<'session> {
         let origin = self.generateOrigin(dataKey, meta::DATA_KEY_INVALID);
 
         self.session.writeAddDataMutation(&table.name, dataAdd, xminAdd, xmaxAdd, origin);
+
+        // index的key应该是什么样的 columnData + dataKey
+        let tableName_indexNames = meta::TABLE_NAME_INDEX_NAMES.read().unwrap();
+        if let Some(indexNames) = tableName_indexNames.get(&table.name) {
+            let mut indexKeyBuffer = BytesMut::with_capacity(rowDataBinary.len() + meta::DATA_KEY_BYTE_LEN);
+
+            // 遍历各个index
+            for indexName in indexNames {
+                let dbObject = self.getDBObjectByName(indexName)?;
+                let index = dbObject.asIndex()?;
+
+                assert_eq!(table.name, index.tableName);
+
+                indexKeyBuffer.clear();
+
+                // 遍历了index的各个column
+                for targetColumnName in &index.columnNames {
+                    let columnValue = rowData.get(targetColumnName).unwrap();
+                    columnValue.encode(&mut indexKeyBuffer)?;
+                }
+
+                indexKeyBuffer.put_slice(dataKeyBinary);
+
+                self.session.writeAddIndexMutation(&index.name, (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
+            }
+        }
 
         Ok(CommandExecResult::DmlResult)
     }

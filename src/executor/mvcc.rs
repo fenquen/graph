@@ -4,7 +4,7 @@ use bytes::{BufMut, BytesMut};
 use crate::{byte_slice_to_u64, extractMvccKeyTagFromPointerKey, extractRowIdFromDataKey, extractTxIdFromMvccKey, extractTxIdFromPointerKey, keyPrefixAddRowId, throw, u64ToByteArrRef};
 use crate::{global, meta};
 use crate::executor::CommandExecutor;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, RowId, TableId, TableMutations, TxId};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, RowId, DBObjectId, TableMutations, TxId};
 use anyhow::Result;
 
 impl<'session> CommandExecutor<'session> {
@@ -185,7 +185,7 @@ impl<'session> CommandExecutor<'session> {
     pub(super) fn generateAddPointerXminXmax(&self,
                                              pointerKeyBuffer: &mut BytesMut,
                                              selfDataKey: DataKey,
-                                             pointerKeyTag: KeyTag, tableId: TableId, targetDatakey: DataKey) -> anyhow::Result<(KV, KV)> {
+                                             pointerKeyTag: KeyTag, tableId: DBObjectId, targetDatakey: DataKey) -> anyhow::Result<(KV, KV)> {
         let xmin = {
             pointerKeyBuffer.writePointerKeyMvccXmin(selfDataKey, pointerKeyTag, tableId, targetDatakey, self.session.getTxId()?);
             (pointerKeyBuffer.to_vec(), global::EMPTY_BINARY) as KV
@@ -203,7 +203,7 @@ impl<'session> CommandExecutor<'session> {
     pub(super) fn generateDeletePointerXmax(&self,
                                             pointerKeyBuffer: &mut BytesMut,
                                             selfDataKey: DataKey,
-                                            pointerKeyTag: KeyTag, tableId: TableId, targetDatakey: DataKey) -> anyhow::Result<KV> {
+                                            pointerKeyTag: KeyTag, tableId: DBObjectId, targetDatakey: DataKey) -> anyhow::Result<KV> {
         pointerKeyBuffer.writePointerKeyMvccXmax(selfDataKey, pointerKeyTag, tableId, targetDatakey, self.session.getTxId()?);
         Ok((pointerKeyBuffer.to_vec(), global::EMPTY_BINARY))
     }
@@ -214,7 +214,7 @@ pub trait BytesMutExt {
     /// 只包含了前边的dataKey keyTag targetTableId
     fn writePointerKeyLeadingPart(&mut self,
                                   dataKey: DataKey,
-                                  keyTag: KeyTag, targetTableId: TableId);
+                                  keyTag: KeyTag, targetTableId: DBObjectId);
 
     // ----------------------------------------------------------------------------
 
@@ -222,21 +222,21 @@ pub trait BytesMutExt {
 
     fn writePointerKeyMvccXmin(&mut self,
                                selfDatakey: DataKey,
-                               pointerKeyTag: KeyTag, targetTableId: TableId, targetDataKey: DataKey,
+                               pointerKeyTag: KeyTag, targetTableId: DBObjectId, targetDataKey: DataKey,
                                txId: TxId) {
         self.writePointerKey(selfDatakey, pointerKeyTag, targetTableId, targetDataKey, meta::MVCC_KEY_TAG_XMIN, txId)
     }
 
     fn writePointerKeyMvccXmax(&mut self,
                                selfDatakey: DataKey,
-                               pointerKeyTag: KeyTag, targetTableId: TableId, targetDataKey: DataKey,
+                               pointerKeyTag: KeyTag, targetTableId: DBObjectId, targetDataKey: DataKey,
                                txId: TxId) {
         self.writePointerKey(selfDatakey, pointerKeyTag, targetTableId, targetDataKey, meta::MVCC_KEY_TAG_XMAX, txId)
     }
 
     fn writePointerKey(&mut self,
                        selfDatakey: DataKey,
-                       pointerKeyTag: KeyTag, targetTableId: TableId, targetDataKey: DataKey,
+                       pointerKeyTag: KeyTag, targetTableId: DBObjectId, targetDataKey: DataKey,
                        pointerMvccKeyTag: KeyTag, txId: TxId);
 
     // --------------------------------------------------------------------------------
@@ -268,7 +268,7 @@ pub trait BytesMutExt {
 impl BytesMutExt for BytesMut {
     fn writePointerKeyLeadingPart(&mut self,
                                   selfDataKey: DataKey,
-                                  keyTag: KeyTag, targetTableId: TableId) {
+                                  keyTag: KeyTag, targetTableId: DBObjectId) {
         self.clear();
 
         let rowId = extractRowIdFromDataKey!(selfDataKey);
@@ -293,7 +293,7 @@ impl BytesMutExt for BytesMut {
 
     fn writePointerKey(&mut self,
                        selfDatakey: DataKey,
-                       pointerKeyTag: KeyTag, targetTableId: TableId, targetDataKey: DataKey,
+                       pointerKeyTag: KeyTag, targetTableId: DBObjectId, targetDataKey: DataKey,
                        pointerMvccKeyTag: KeyTag, txId: TxId) {
         self.writePointerKeyLeadingPart(selfDatakey, pointerKeyTag, targetTableId);
         self.put_u64(targetDataKey);

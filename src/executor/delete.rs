@@ -10,10 +10,11 @@ impl<'session> CommandExecutor<'session> {
     /// 得到满足expr的record 然后把它的xmax变为当前的txId
     pub(super) fn delete(&self, delete: &Delete) -> anyhow::Result<CommandExecResult> {
         let pairs = {
-            let table = self.getTableRefByName(delete.tableName.as_str())?;
+            let table = self.getDBObjectByName(delete.tableName.as_str())?;
+            let table = table.asTable()?;
 
             let scanParams = ScanParams {
-                table: table.value(),
+                table,
                 tableFilter: delete.filterExpr.as_ref(),
                 ..Default::default()
             };

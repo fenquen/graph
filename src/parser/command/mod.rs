@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::meta::Table;
+use crate::meta::{Index, Table};
 use crate::parser::command::delete::Delete;
 use crate::parser::command::insert::Insert;
 use crate::parser::command::link::Link;
@@ -20,6 +20,8 @@ pub mod manage;
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Command {
     CreateTable(Table),
+    CreateIndex(Index),
+    CreateRelation(Table),
     Insert(Insert),
     Link(Link),
     Update(Update),

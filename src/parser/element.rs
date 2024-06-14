@@ -29,7 +29,7 @@ impl Element {
         }
     }
 
-    pub(super) fn expectTextLiteral(&self, errorStr: &str) -> anyhow::Result<String> {
+    pub(super) fn expectTextLiteral(&self, errorStr: &str) -> Result<String> {
         if let Some(text) = self.expectTextLiteralOpt() {
             Ok(text.to_string())
         } else {
@@ -37,7 +37,7 @@ impl Element {
         }
     }
 
-    pub(super) fn expectTextLiteralContent(&self, expectContent: &str) -> anyhow::Result<()> {
+    pub(super) fn expectTextLiteralContent(&self, expectContent: &str) -> Result<()> {
         if self.expectTextLiteralContentBool(expectContent) {
             Ok(())
         } else {
@@ -64,7 +64,7 @@ impl Element {
         }
     }
 
-    pub(super) fn expectTextLiteralContentIgnoreCase(&self, expectContent: &str, errorStr: &str) -> anyhow::Result<()> {
+    pub(super) fn expectTextLiteralContentIgnoreCase(&self, expectContent: &str, errorStr: &str) -> Result<()> {
         if self.expectTextLiteralContentIgnoreCaseBool(expectContent) {
             Ok(())
         } else {
@@ -546,5 +546,9 @@ impl Parser {
 
     pub(super) fn resetCurrentElementIndex(&mut self) {
         self.currentElementIndex = 0;
+    }
+
+    pub(super) fn hasRemainingElement(&self) -> bool {
+        self.getCurrentElementOption().is_some()
     }
 }

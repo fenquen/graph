@@ -21,11 +21,8 @@ use crate::executor::CommandExecResult::DmlResult;
 impl<'session> CommandExecutor<'session> {
     // todo 要是point还有rel的联系不能update 完成
     pub(super) fn update(&self, update: &Update) -> Result<CommandExecResult> {
-        let table = self.getTableRefByName(update.tableName.as_str())?;
-
-        if let TableType::Relation = table.type0 {
-            throw!("can not use update on relation");
-        }
+        let table = self.getDBObjectByName(update.tableName.as_str())?;
+        let table = table.asTable()?;
 
         let columnName_column = {
             let mut columnName_column = HashMap::with_capacity(table.columns.len());
@@ -90,7 +87,7 @@ impl<'session> CommandExecutor<'session> {
 
         let mut pairs = {
             let scanParams = ScanParams {
-                table: table.value(),
+                table,
                 tableFilter: update.filterExpr.as_ref(),
                 ..Default::default()
             };

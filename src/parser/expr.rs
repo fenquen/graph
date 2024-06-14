@@ -52,7 +52,7 @@ impl Parser {
                         expr = Expr::BiDirection {
                             leftExpr: Box::new(expr),
                             op,
-                            rightExprVec: Default::default(),
+                            rightExprs: Default::default(),
                         }
                     } else {
                         // 应对 (((a = 1)))  因为递归结束后返回到上1级的时候currentElement是")"
@@ -89,7 +89,7 @@ impl Parser {
                                         expr = Expr::BiDirection {
                                             leftExpr: left,
                                             op,
-                                            rightExprVec: self.parseInExprs()?.into_iter().map(|expr| { Box::new(expr) }).collect(),
+                                            rightExprs: self.parseInExprs()?.into_iter().map(|expr| { Box::new(expr) }).collect(),
                                         }
                                     } else {
                                         self.throwSyntaxError()?;
@@ -105,7 +105,7 @@ impl Parser {
                                         expr = Expr::BiDirection {
                                             leftExpr: left,
                                             op,
-                                            rightExprVec: vec![Box::new(subExpr)],
+                                            rightExprs: vec![Box::new(subExpr)],
                                         }
                                     } else {
                                         self.throwSyntaxError()?;
@@ -125,7 +125,7 @@ impl Parser {
                         expr = Expr::BiDirection {
                             leftExpr: left,
                             op,
-                            rightExprVec: vec![Box::new(Expr::Single(currentElement))],
+                            rightExprs: vec![Box::new(Expr::Single(currentElement))],
                         }
                     } else {
                         self.throwSyntaxError()?;
@@ -168,7 +168,7 @@ impl Parser {
                                         leftExpr: Box::new(expr),
                                         op,
                                         // 需要递归下钻
-                                        rightExprVec: vec![Box::new(self.parseExpr(!nextElementIs括号)?)],
+                                        rightExprs: vec![Box::new(self.parseExpr(!nextElementIs括号)?)],
                                     };
                                     // (m and (a = 0 and (b = 1))) 这个时候解析到的是1后边的那个")"而已 还有")"残留
                                     // (a=0 and (b=1) and 1 or 0)
@@ -185,7 +185,7 @@ impl Parser {
                                             leftExpr: left,
                                             op,
                                             // 递归的level不能用力太猛 不然应对不了 a > 0+6 and b=0 会把 0+6 and b=0 当成1个expr
-                                            rightExprVec: vec![Box::new(self.parseExpr(true)?)],
+                                            rightExprs: vec![Box::new(self.parseExpr(true)?)],
                                         };
 
                                         parseCondState = ParseCondState::ParseRightComplete;
@@ -198,7 +198,7 @@ impl Parser {
                                     expr = Expr::BiDirection {
                                         leftExpr: Box::new(expr),
                                         op,
-                                        rightExprVec: Default::default(),
+                                        rightExprs: Default::default(),
                                     };
                                     // 不递归而是本level循环
                                     parseCondState = ParseCondState::ParsingRight;

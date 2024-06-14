@@ -20,15 +20,17 @@ use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUn
 use anyhow::Result;
 use lazy_static::lazy_static;
 use crate::executor::mvcc::BytesMutExt;
+use crate::parser::op::{LogicalOp, Op};
 use crate::session::Session;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
 pub(super) struct ScanHooks<A, B, C, D>
-    where
-        A: ScanCommittedPreProcessor,
-        B: ScanCommittedPostProcessor,
-        C: ScanUncommittedPreProcessor,
-        D: ScanUncommittedPostProcessor {
+where
+    A: ScanCommittedPreProcessor,
+    B: ScanCommittedPostProcessor,
+    C: ScanUncommittedPreProcessor,
+    D: ScanUncommittedPostProcessor,
+{
     /// 融合filter读取到committed RowData 前
     pub(super) scanCommittedPreProcessor: Option<A>,
     /// 融合filter读取到committed RowData 后
@@ -56,9 +58,10 @@ impl Default for ScanHooks<
 }
 
 pub struct SearchPointerKeyHooks<A, B>
-    where
-        A: CommittedPointerKeyProcessor,
-        B: UncommittedPointerKeyProcessor {
+where
+    A: CommittedPointerKeyProcessor,
+    B: UncommittedPointerKeyProcessor,
+{
     pub(super) committedPointerKeyProcessor: Option<A>,
     pub(super) uncommittedPointerKeyProcessor: Option<B>,
 }
@@ -187,17 +190,18 @@ impl<'session> CommandExecutor<'session> {
 
 
     // todo 实现 index
+    // todo 识别何时应该使用index和使用哪种index
     // 如果传递的是fn()的话(不是Fn)是函数指针而不是闭包 不能和上下文有联系 闭包返回false 那么 continue
     /// 目前用到hook的地点有 update() selectTableUnderRels()
     pub(super) fn scanSatisfiedRows<A, B, C, D>(&self,
                                                 scanParams: ScanParams,
                                                 select: bool,
                                                 mut scanHooks: ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
-        where
-            A: ScanCommittedPreProcessor,
-            B: ScanCommittedPostProcessor,
-            C: ScanUncommittedPreProcessor,
-            D: ScanUncommittedPostProcessor,
+    where
+        A: ScanCommittedPreProcessor,
+        B: ScanCommittedPostProcessor,
+        C: ScanUncommittedPreProcessor,
+        D: ScanUncommittedPostProcessor,
     {
 
         // todo 使用table id 为 column family 标识
@@ -210,6 +214,33 @@ impl<'session> CommandExecutor<'session> {
 
         let mut satisfiedRows =
             if scanParams.tableFilter.is_some() || select {
+                fn getSuitableIndexName(tableFilter: &Expr, tableName: &String) {
+                    match tableFilter {
+                        Expr::Single(element) => {
+                            if let Element::TextLiteral(columnName) = element {
+                                // table相应的index上有没有这个columnName
+
+                                let tableName_indexNames = meta::TABLE_NAME_INDEX_NAMES.read().unwrap();
+                                tableName_indexNames.get(tableName);
+                            }
+                        }
+                        Expr::BiDirection { leftExpr, op, rightExprs } => { // 如果是 且 的话 有探寻的意义
+                            if let Op::LogicalOp(LogicalOp::And) = op {
+                                if let Expr::Single(Element::TextLiteral(columnName)) = leftExpr {
+                                    //
+                                }
+
+                                for rightExpr in rightExprs {
+                                    getSuitableIndexName(rightExpr, tableName)
+                                }
+                            }
+                        }
+                        Expr::None => panic!("impossible")
+                    }
+                }
+
+                if let Some(tableFilter) = scanParams.tableFilter {}
+
                 let mut satisfiedRows = Vec::new();
 
                 let mut serialScan = true;
@@ -282,7 +313,9 @@ impl<'session> CommandExecutor<'session> {
                                         let selectedColumnNames: Option<&Vec<String>> = selectedColumnNamesPointer.map(|selectedColumnNamesPointer| mem::transmute(selectedColumnNamesPointer as *const Vec<String>));
                                         let scanHooks: &mut ScanHooks<A, B, C, D> = mem::transmute(scanHooksPointer as *mut ScanHooks<A, B, C, D>);
 
-                                        let table = commandExecutor.getTableRefByName(tableName.as_str())?;
+                                        let table = commandExecutor.getDBObjectByName(tableName.as_str())?;
+                                        let table = table.asTable()?;
+
                                         let snapshot = commandExecutor.session.getSnapshot()?;
                                         // column不是sync的 只能到thread上建立的
                                         let columnFamily = Session::getColFamily(tableName.as_str())?;
@@ -329,7 +362,7 @@ impl<'session> CommandExecutor<'session> {
                                                 }
                                             }
 
-                                            if let Some(rowData) = commandExecutor.readRowDataBinary(table.value(), &*rowDataBinary, tableFilter, selectedColumnNames)? {
+                                            if let Some(rowData) = commandExecutor.readRowDataBinary(table, &*rowDataBinary, tableFilter, selectedColumnNames)? {
                                                 // committed post
                                                 if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
                                                     if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
@@ -550,9 +583,9 @@ impl<'session> CommandExecutor<'session> {
                         throw!(&format!("not have column:{}", selectedColumnName));
                     }
 
-                    let entry = entry.unwrap();
+                    let (columnName, columnValue) = entry.unwrap();
 
-                    a.insert(entry.0, entry.1);
+                    a.insert(columnName, columnValue);
                 }
 
                 a
@@ -575,7 +608,7 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
-    pub(super) fn generateInsertValuesBinary(&self, insert: &mut Insert, table: &Table) -> Result<Bytes> {
+    pub(super) fn generateInsertValuesBinary(&self, insert: &mut Insert, table: &Table) -> Result<(Bytes, RowData)> {
         // 要是未显式说明column的话还需要读取table的column
         if insert.useExplicitColumnNames == false {
             for column in &table.columns {
@@ -646,13 +679,15 @@ impl<'session> CommandExecutor<'session> {
         }
 
         // todo 如果指明了要insert的column name的话 需要排序 符合表定义时候的column顺序 完成
-        let destByteSlice = {
+        let (destByteSlice, columnName_columnValue) = {
             let mut columnName_columnExpr = HashMap::with_capacity(insert.columnNames.len());
             for (columnName, columnExpr) in insert.columnNames.iter().zip(insert.columnExprs.iter()) {
                 columnName_columnExpr.insert(columnName, columnExpr);
             }
 
             let mut destByteSlice = BytesMut::new();
+
+            let mut columnName_columnValue = HashMap::with_capacity(table.columns.len());
 
             // 要以create时候的顺序encode
             for column in &table.columns {
@@ -661,16 +696,18 @@ impl<'session> CommandExecutor<'session> {
                 // columnType和value要对上
                 let columnValue = columnExpr.calc(None)?;
                 if column.type0.compatible(&columnValue) == false {
-                    throw!(&format!("column:{},type:{} is not compatible with value:{}", column.name, column.type0, columnValue));
+                    throw!(&format!("column:{}, type:{} is not compatible with value:{}", column.name, column.type0, columnValue));
                 }
 
                 columnValue.encode(&mut destByteSlice)?;
+
+                columnName_columnValue.insert(column.name.clone(), columnValue);
             }
 
-            destByteSlice
+            (destByteSlice, columnName_columnValue)
         };
 
-        Ok(destByteSlice.freeze())
+        Ok((destByteSlice.freeze(), columnName_columnValue))
     }
 
     /// 当前对relation本身的数据的筛选是通过注入闭包实现的
@@ -678,9 +715,9 @@ impl<'session> CommandExecutor<'session> {
     // todo pointerKey应该同时到committed和uncommitted去搜索
     pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
-        where
-            A: CommittedPointerKeyProcessor,
-            B: UncommittedPointerKeyProcessor,
+    where
+        A: CommittedPointerKeyProcessor,
+        B: UncommittedPointerKeyProcessor,
     {
         let mut keys = Vec::new();
 
@@ -765,7 +802,7 @@ impl<'session> CommandExecutor<'session> {
                                                pointerKeyTag: KeyTag,
                                                dest: &Table, destFilter: Option<&Expr>) -> Result<Vec<(DataKey, RowData)>> {
         let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
-        pointerKeyBuffer.writePointerKeyLeadingPart(srcDataKey, pointerKeyTag, dest.tableId);
+        pointerKeyBuffer.writePointerKeyLeadingPart(srcDataKey, pointerKeyTag, dest.id);
 
         let mut targetRelationDataKeys = Vec::new();
 

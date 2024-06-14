@@ -119,6 +119,11 @@ mod test {
     }
 
     #[test]
+    pub fn testParseCreateIndex() {
+        parser::parse("create index aaa on user[name,id] aaaaa").unwrap();
+    }
+
+    #[test]
     pub fn testParseInsert() {
         parser::parse("insert into user values (1,null)").unwrap();
     }

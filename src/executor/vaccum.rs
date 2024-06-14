@@ -8,7 +8,7 @@ use crate::executor::mvcc::BytesMutExt;
 
 impl<'session> CommandExecutor<'session> {
     pub fn vaccumData(thresholdTxIdInclude: TxId) -> Result<()> {
-        let tableNames: Vec<String> = meta::TABLE_NAME_TABLE.iter().map(|pair| pair.name.clone()).collect();
+        let tableNames: Vec<String> = meta::NAME_DB_OBJ.iter().map(|pair| pair.getName().clone()).collect();
 
         let dataStore = &meta::STORE.dataStore;
 
@@ -28,7 +28,7 @@ impl<'session> CommandExecutor<'session> {
             let mut dbRawIteratorPointerKey: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
 
             // 先去scan xmax mvccKey
-            dbRawIteratorMvccKey.seek(u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_MVCC, meta::ROW_ID_INVALID)));
+            dbRawIteratorMvccKey.seek(meta::MVCC_KEY_PATTERN);
 
             let mut keyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
 
@@ -117,7 +117,7 @@ impl<'session> CommandExecutor<'session> {
                         }
                     }
                 }
-                
+
                 dbRawIteratorMvccKey.next();
             }
         }

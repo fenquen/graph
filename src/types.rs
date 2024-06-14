@@ -20,7 +20,7 @@ pub type Snapshot<'db> = SnapshotWithThreadMode<'db, DBWithThreadMode<MultiThrea
 
 pub type Byte = u8;
 
-pub type TableId = u64;
+pub type DBObjectId = u64;
 pub type RowId = u64;
 
 pub type KeyPrefix = Byte;

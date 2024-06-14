@@ -15,7 +15,7 @@ pub enum Expr {
     BiDirection {
         leftExpr: Box<Expr>,
         op: Op,
-        rightExprVec: Vec<Box<Expr>>,
+        rightExprs: Vec<Box<Expr>>,
     },
     None,
 }
@@ -43,7 +43,7 @@ impl Expr {
                     _ => Ok(graphValue),
                 }
             }
-            Expr::BiDirection { leftExpr, op, rightExprVec } => {
+            Expr::BiDirection { leftExpr, op, rightExprs: rightExprVec } => {
                 let leftValue = leftExpr.calc(rowData)?;
 
                 if rightExprVec.is_empty() {
@@ -69,7 +69,7 @@ impl Expr {
                     false
                 }
             }
-            Expr::BiDirection { leftExpr, op: _op, rightExprVec } => {
+            Expr::BiDirection { leftExpr, op: _op, rightExprs: rightExprVec } => {
                 if leftExpr.needAcutalRowData() {
                     return true;
                 }
