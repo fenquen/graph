@@ -2,6 +2,9 @@
 name = "graph"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/fenquen/graph"
+keywords = ["graph", "rdbms"]
+readme = "README.md"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
