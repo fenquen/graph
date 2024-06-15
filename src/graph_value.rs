@@ -16,11 +16,15 @@ use crate::types::{Byte, DataKey};
 pub enum GraphValue {
     /// 应对表的字段名 需要后续配合rowData来得到实际的
     Pending(String),
+
     String(String),
     Boolean(bool),
     Integer(i64),
     Decimal(f64),
     Null,
+
+    IndexUseful { columnName: String, op: Op, values: Vec<GraphValue> },
+    IndexUseless,
 }
 
 /// type标识(u8) + 内容长度(u32,对应的是变长的 Pending String PoinstDesc) + 内容
@@ -32,7 +36,7 @@ impl BinaryCodec for GraphValue {
         let typeTag = srcByteSlice.bytes.get_u8();
 
         match typeTag {
-            GraphValue::PENDING | GraphValue::STRING=> {
+            GraphValue::PENDING | GraphValue::STRING => {
                 let contentLen = srcByteSlice.bytes.get_u32() as usize;
                 // let currentPos = srcByteSlice.position();
                 // 不需要绝对的position 需要相对的 上边的绝对的currentPos用不到了
@@ -79,6 +83,7 @@ impl BinaryCodec for GraphValue {
                 destByteSlice.put_f64(*s);
             }
             GraphValue::Null => destByteSlice.put_u8(GraphValue::NULL),
+            _ => panic!("impossible")
         }
 
         Ok(())
@@ -96,6 +101,7 @@ impl Serialize for GraphValue {
                 GraphValue::Integer(s) => s.serialize(serializer),
                 GraphValue::Decimal(s) => s.serialize(serializer),
                 GraphValue::Null => serializer.serialize_none(),
+                _ => panic!("impossible")
             }
         } else {
             let mut serialMap = serializer.serialize_map(Some(1))?;
@@ -125,6 +131,7 @@ impl Serialize for GraphValue {
                     serialMap.serialize_key("Null")?;
                     serialMap.serialize_value(&Value::Null)?;
                 }
+                _ => panic!("impossible")
             }
 
             serialMap.end()
@@ -196,7 +203,68 @@ impl GraphValue {
         if let Op::SqlOp(SqlOp::In) = op {
             self.calcIn(rightValues)
         } else {
+            // 当前只允许in的时候有多个
+            if rightValues.len() > 1 {
+                throw!("right values only can be multi when op is in");
+            }
+
             self.calcOneToOne(op, &rightValues[0])
+        }
+    }
+
+    pub fn calc0(&self, op: Op, rightValues: &[GraphValue]) -> Result<GraphValue> {
+        if rightValues.len() > 1 {
+            if let Op::SqlOp(SqlOp::In) = op {
+                for rightValue in rightValues {
+                    match rightValue { // rightValues需要的都是常量
+                        GraphValue::Pending(_) | GraphValue::IndexUseful { .. } | GraphValue::IndexUseless => return Ok(GraphValue::IndexUseless),
+                        _ => {}
+                    }
+                }
+
+                // rightValues都是常量
+                match self {
+                    GraphValue::Pending(columnName) => {
+                        Ok(GraphValue::IndexUseful {
+                            columnName: columnName.clone(),
+                            op,
+                            values: rightValues.to_vec(),
+                        })
+                    }
+                    GraphValue::IndexUseful { .. } | GraphValue::IndexUseless => Ok(GraphValue::IndexUseless),
+                    GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null => {
+                        self.calc(op, rightValues)
+                    }
+                }
+            } else {
+                throw!("right values only can be multi when op is in")
+            }
+        } else {
+            let rightValue = &rightValues[0];
+
+            match (self, rightValue) {
+                //(GraphValue::Pending(_), GraphValue::Pending(_)) => GraphValue::IndexUseless,
+                (GraphValue::Pending(columnName), GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null) => {
+                    Ok(GraphValue::IndexUseful {
+                        columnName: columnName.clone(),
+                        op,
+                        values: vec![rightValue.clone()],
+                    })
+                }
+                (GraphValue::String(columnName) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null, GraphValue::Pending(_)) => {
+                    Ok(GraphValue::IndexUseful {
+                        columnName: columnName.clone(),
+                        op,
+                        values: vec![rightValue.clone()],
+                    })
+                }
+                // 两边都是常量
+                (GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null,
+                    GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null) => {
+                    self.calc(op, &[rightValue.clone()])
+                }
+                _ => Ok(GraphValue::IndexUseless)
+            }
         }
     }
 

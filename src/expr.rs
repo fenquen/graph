@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Index;
 use serde_json::Value;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -43,14 +44,71 @@ impl Expr {
                     _ => Ok(graphValue),
                 }
             }
-            Expr::BiDirection { leftExpr, op, rightExprs: rightExprVec } => {
+            Expr::BiDirection { leftExpr, op, rightExprs } => {
                 let leftValue = leftExpr.calc(rowData)?;
 
-                if rightExprVec.is_empty() {
+                if rightExprs.is_empty() {
                     throw!("has no right values");
                 }
 
-                let rightValues: Vec<GraphValue> = rightExprVec.iter().map(|expr| { expr.calc(rowData).unwrap() }).collect();
+                let rightValues: Vec<GraphValue> = rightExprs.iter().map(|rightExpr| { rightExpr.calc(rowData).unwrap() }).collect();
+
+                leftValue.calc(op.clone(), &rightValues)
+            }
+            Expr::None => panic!("impossible"),
+        }
+    }
+
+    pub fn a(&self, indexColumnNames: &[String],
+             dest: &mut HashMap<String, Vec<(Op, GraphValue)>>) -> Result<GraphValue> {
+        match self {
+            Expr::Single(element) => {
+                Ok(GraphValue::try_from(element)?)
+            }
+            Expr::BiDirection { leftExpr, op, rightExprs } => {
+                let leftValue = leftExpr.a(indexColumnNames, dest)?;
+
+                let mut columnName = None;
+
+                let leftIsPending =
+                    if let GraphValue::Pending(ref columnName0) = leftValue {
+                        columnName = Some(columnName0.clone());
+                        true
+                    } else {
+                        false
+                    };
+
+                if rightExprs.is_empty() {
+                    throw!("has no right values");
+                }
+
+                let rightValues: Vec<GraphValue> = rightExprs.iter().map(|rightExpr| { rightExpr.a(indexColumnNames, dest).unwrap() }).collect();
+
+                let mut rightHasPending = false;
+
+                for rightValue in &rightValues {
+                    // 两边都是columnName 用不了index
+                    if let GraphValue::Pending(ref columnName0) = rightValue {
+                        // 对in来说不能有多个的columnName
+                        if rightHasPending {
+                            panic!()
+                        }
+
+                        if leftIsPending {
+                            panic!()
+                        }
+
+                        rightHasPending = true;
+
+                        columnName = Some(columnName0.clone());
+                    }
+                }
+
+                // 说明未用到columnName
+                if columnName.is_none() {
+                    panic!()
+                }
+
 
                 leftValue.calc(op.clone(), &rightValues)
             }
@@ -83,6 +141,28 @@ impl Expr {
                 false
             }
             Expr::None => panic!("impossilble")
+        }
+    }
+
+    pub fn extractColumnNames(&self, dest: &mut HashSet<String>) -> Result<()> {
+        match self {
+            Expr::Single(element) => {
+                if let Element::TextLiteral(columnName) = element {
+                    dest.push(columnName.clone());
+                }
+
+                Ok(())
+            }
+            Expr::BiDirection { leftExpr, rightExprs, .. } => {
+                Self::extractColumnNames(&**leftExpr, dest)?;
+
+                for rightExpr in rightExprs {
+                    Self::extractColumnNames(&**rightExpr, dest)?;
+                }
+
+                Ok(())
+            }
+            Expr::None => panic!("impossible")
         }
     }
 }

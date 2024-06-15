@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Range, RangeFrom};
 use std::sync::atomic::Ordering;
 use std::{mem, thread};
@@ -9,7 +9,8 @@ use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, IterationCmd};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey, keyPrefixAddRowId, suffix_plus_plus, throw, u64ToByteArrRef, global, meta, types, prefix_plus_plus};
+use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey, keyPrefixAddRowId, suffix_plus_plus, throw, u64ToByteArrRef, prefix_plus_plus, throwFormat};
+use crate::{global, meta, types, utils};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::graph_value::GraphValue;
 use crate::meta::{Column, Table};
@@ -25,11 +26,11 @@ use crate::session::Session;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
 pub(super) struct ScanHooks<A, B, C, D>
-where
-    A: ScanCommittedPreProcessor,
-    B: ScanCommittedPostProcessor,
-    C: ScanUncommittedPreProcessor,
-    D: ScanUncommittedPostProcessor,
+    where
+        A: ScanCommittedPreProcessor,
+        B: ScanCommittedPostProcessor,
+        C: ScanUncommittedPreProcessor,
+        D: ScanUncommittedPostProcessor,
 {
     /// 融合filter读取到committed RowData 前
     pub(super) scanCommittedPreProcessor: Option<A>,
@@ -58,9 +59,9 @@ impl Default for ScanHooks<
 }
 
 pub struct SearchPointerKeyHooks<A, B>
-where
-    A: CommittedPointerKeyProcessor,
-    B: UncommittedPointerKeyProcessor,
+    where
+        A: CommittedPointerKeyProcessor,
+        B: UncommittedPointerKeyProcessor,
 {
     pub(super) committedPointerKeyProcessor: Option<A>,
     pub(super) uncommittedPointerKeyProcessor: Option<B>,
@@ -197,11 +198,11 @@ impl<'session> CommandExecutor<'session> {
                                                 scanParams: ScanParams,
                                                 select: bool,
                                                 mut scanHooks: ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
-    where
-        A: ScanCommittedPreProcessor,
-        B: ScanCommittedPostProcessor,
-        C: ScanUncommittedPreProcessor,
-        D: ScanUncommittedPostProcessor,
+        where
+            A: ScanCommittedPreProcessor,
+            B: ScanCommittedPostProcessor,
+            C: ScanUncommittedPreProcessor,
+            D: ScanUncommittedPostProcessor,
     {
 
         // todo 使用table id 为 column family 标识
@@ -214,31 +215,6 @@ impl<'session> CommandExecutor<'session> {
 
         let mut satisfiedRows =
             if scanParams.tableFilter.is_some() || select {
-                fn getSuitableIndexName(tableFilter: &Expr, tableName: &String) {
-                    match tableFilter {
-                        Expr::Single(element) => {
-                            if let Element::TextLiteral(columnName) = element {
-                                // table相应的index上有没有这个columnName
-
-                                let tableName_indexNames = meta::TABLE_NAME_INDEX_NAMES.read().unwrap();
-                                tableName_indexNames.get(tableName);
-                            }
-                        }
-                        Expr::BiDirection { leftExpr, op, rightExprs } => { // 如果是 且 的话 有探寻的意义
-                            if let Op::LogicalOp(LogicalOp::And) = op {
-                                if let Expr::Single(Element::TextLiteral(columnName)) = leftExpr {
-                                    //
-                                }
-
-                                for rightExpr in rightExprs {
-                                    getSuitableIndexName(rightExpr, tableName)
-                                }
-                            }
-                        }
-                        Expr::None => panic!("impossible")
-                    }
-                }
-
                 if let Some(tableFilter) = scanParams.tableFilter {}
 
                 let mut satisfiedRows = Vec::new();
@@ -550,6 +526,54 @@ impl<'session> CommandExecutor<'session> {
         Ok(satisfiedRows)
     }
 
+    // todo table对应的index列表 是不是应该融入到 table对象
+    fn getMostSuitableIndexName(&self, table: &Table, tableFilter: &Expr) -> Result<Option<String>> {
+        if table.indexNames.is_empty() {
+            return Ok(None);
+        }
+
+        // 遍历各个index 计算得到 tableFilter 落地到 index 是什么 需要prefix匹配
+        // index 包含 a
+        // (a=1 or (a=2 or c>0)) -> a=1 or a=2
+        // (a>10 and (a<1 or c>0))-> a >10 or a<1
+        // index 包含 a b
+        // (a=1 or (a=2 or b>0)) -> (a=1 or (a=2 or b>0))
+        // (a>10 and (a<1 or c>0)) -> a>10 or a<1
+        // (a =10 and b>19) -> a=10
+
+        // 要把涉及到columnName的提取
+        let mut columnNamesFromTableFilter = HashSet::new();
+        tableFilter.extractColumnNames(&mut columnNamesFromTableFilter)?;
+        if columnNamesFromTableFilter.is_empty() {
+            return Ok(None);
+        }
+
+        for indexName in &table.indexNames {
+            let dbObject = self.getDBObjectByName(indexName)?;
+            let index = dbObject.asIndex()?;
+
+            let mut usedCount = 0usize;
+
+            // 要以index的column顺序
+            for indexColumnName in &index.columnNames {
+                if columnNamesFromTableFilter.contains(indexColumnName) == false {
+                    break;
+                }
+
+                suffix_plus_plus!(usedCount);
+            }
+
+            if usedCount == 0 {
+                continue;
+            }
+
+            let usedIndexColumnNames = &index.columnNames[0..usedCount];
+        }
+
+
+        Ok(None)
+    }
+
     fn readRowDataBinary(&self,
                          table: &Table,
                          rowBinary: &[Byte],
@@ -715,9 +739,9 @@ impl<'session> CommandExecutor<'session> {
     // todo pointerKey应该同时到committed和uncommitted去搜索
     pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
-    where
-        A: CommittedPointerKeyProcessor,
-        B: UncommittedPointerKeyProcessor,
+        where
+            A: CommittedPointerKeyProcessor,
+            B: UncommittedPointerKeyProcessor,
     {
         let mut keys = Vec::new();
 
@@ -837,8 +861,5 @@ impl<'session> CommandExecutor<'session> {
         Ok(relationDatas)
     }
 }
-
-
-
 
 
