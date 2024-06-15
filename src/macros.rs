@@ -8,6 +8,13 @@ macro_rules! throw {
 }
 
 #[macro_export]
+macro_rules! throwFormat {
+    ($($a:tt)*) => {
+        core::result::Result::Err(crate::graph_error::GraphError::new(&format!($($a)*)))?
+    };
+}
+
+#[macro_export]
 macro_rules! prefix_plus_plus {
     ($expr:expr) => {
         {
