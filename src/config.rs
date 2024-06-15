@@ -42,7 +42,7 @@ pub fn load() -> Config {
     let mut configJsonFile = match File::open(configFilePath) {
         Ok(f) => f,
         Err(e) => {
-            log::info!("配置文件 {} 不存在 {}",configFilePath, e);
+            log::info!("config file:{} not exist, {}",configFilePath, e);
             process::exit(1);
         }
     };
@@ -53,7 +53,7 @@ pub fn load() -> Config {
     let config: Config = match serde_json::from_str(&configJsonFileContent) {
         Ok(config) => config,
         Err(e) => {
-            log::info!("读取配置文件 {} 错误 {}", configFilePath, e);
+            log::info!("reading config file:{} error, {}", configFilePath, e);
             process::exit(1);
         }
     };
