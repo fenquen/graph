@@ -37,7 +37,7 @@ lazy_static! {
     pub static ref TX_ID_START_UP: TrickyContainer<TxId> = TrickyContainer::new();
     pub static ref TX_UNDERGOING_COUNT:AtomicU64 = AtomicU64::default();
 
-    pub static ref TABLE_NAME_INDEX_NAMES: RwLock<HashMap<String, Vec<String>>> = Default::default();
+    //pub static ref TABLE_NAME_INDEX_NAMES: RwLock<HashMap<String, Vec<String>>> = Default::default();
 }
 pub struct Store {
     pub metaStore: DB,
@@ -239,6 +239,14 @@ impl DBObject {
         }
     }
 
+    pub fn asTableMut(&mut self) -> Result<&mut Table> {
+        if let DBObject::Table(table) = self {
+            Ok(table)
+        } else {
+            throw!(&format!("{} is not a table", self.getName()))
+        }
+    }
+
     pub fn asIndex(&self) -> Result<&Index> {
         if let DBObject::Index(index) = self {
             Ok(index)
@@ -293,6 +301,7 @@ pub struct Table {
     /// start from 1
     pub rowIdCounter: AtomicU64,
     pub createIfNotExist: bool,
+    pub indexNames: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize, Default)]
