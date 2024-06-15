@@ -7,7 +7,6 @@ use serde_json::Value;
 use crate::executor::{CommandExecutor, IterationCmd};
 use crate::graph_value::GraphValue;
 
-
 /// 到后台的sql可能是由多个小sql构成的 单个小select的sql对应个Vec<Value>
 pub type SelectResultToFront = Vec<Vec<Value>>;
 
