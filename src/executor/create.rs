@@ -49,13 +49,13 @@ impl<'session> CommandExecutor<'session> {
         }
 
         // 需要对index涉及的table和column校验的
-        let targetTable = meta::NAME_DB_OBJ.get(index.tableName.as_str());
+        let targetTable = meta::NAME_DB_OBJ.get_mut(index.tableName.as_str());
         if targetTable.is_none() {
             throw!(&format!("create index failed , target table {} not exist", index.tableName ));
         }
-        let targetTable = targetTable.unwrap();
+        let mut targetTable = targetTable.unwrap();
         // 隐含了index的对象需要是table
-        let targetTable = targetTable.asTable()?;
+        let mut targetTable = targetTable.asTableMut()?;
 
         let tableColumnNames: Vec<&str> = targetTable.columns.iter().map(|tableColumn| tableColumn.name.as_str()).collect();
 
@@ -65,25 +65,25 @@ impl<'session> CommandExecutor<'session> {
             }
         }
 
+        // 分配id
         index.id = meta::DB_OBJECT_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
 
-        // todo 如何知道表涉及到的index有哪些
-        // 建立table和相应的index的联系
-        {
-            let mut tableName_indexNames = meta::TABLE_NAME_INDEX_NAMES.write().unwrap();
-            let indexNames = tableName_indexNames.getMutWithDefault(&index.tableName);
-            indexNames.push(index.tableName.clone());
-        }
+        let indexName = index.name.clone();
 
         // 生成column family
         self.session.createColFamily(index.name.as_str())?;
 
-        let key = u64ToByteArrRef!(index.id);
+        let indexId = u64ToByteArrRef!(index.id);
+        let dbObjectIndex = DBObject::Index(index);
 
-        let dbObject = DBObject::Index(index);
+        // 落地 index
+        meta::STORE.metaStore.put(indexId, serde_json::to_string(&dbObjectIndex)?.as_bytes())?;
+        meta::NAME_DB_OBJ.insert(dbObjectIndex.getName(), dbObjectIndex);
 
-        meta::STORE.metaStore.put(key, serde_json::to_string(&dbObject)?.as_bytes())?;
-        meta::NAME_DB_OBJ.insert(dbObject.getName(), dbObject);
+        // todo 如何知道表涉及到的index有哪些,要有table和相应的index的联系
+        // 回写update表的信息
+        targetTable.indexNames.push(indexName);
+        meta::STORE.metaStore.put(u64ToByteArrRef!(targetTable.id), serde_json::to_string(targetTable)?.as_bytes())?;
 
         Ok(CommandExecResult::DdlResult)
     }

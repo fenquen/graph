@@ -32,12 +32,11 @@ impl<'session> CommandExecutor<'session> {
         self.session.writeAddDataMutation(&table.name, dataAdd, xminAdd, xmaxAdd, origin);
 
         // index的key应该是什么样的 columnData + dataKey
-        let tableName_indexNames = meta::TABLE_NAME_INDEX_NAMES.read().unwrap();
-        if let Some(indexNames) = tableName_indexNames.get(&table.name) {
+        {
             let mut indexKeyBuffer = BytesMut::with_capacity(rowDataBinary.len() + meta::DATA_KEY_BYTE_LEN);
 
             // 遍历各个index
-            for indexName in indexNames {
+            for indexName in &table.indexNames {
                 let dbObject = self.getDBObjectByName(indexName)?;
                 let index = dbObject.asIndex()?;
 

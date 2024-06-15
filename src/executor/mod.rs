@@ -81,6 +81,7 @@ impl<'session> CommandExecutor<'session> {
                         // todo rowId 要从1起 完成
                         rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
                         createIfNotExist: table.createIfNotExist,
+                        indexNames: table.indexNames.clone(),
                     };
 
                     self.createTable(table, true)?
@@ -92,6 +93,7 @@ impl<'session> CommandExecutor<'session> {
                         columns: table.columns.clone(),
                         rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
                         createIfNotExist: table.createIfNotExist,
+                        indexNames: table.indexNames.clone(),
                     };
 
                     self.createTable(table, false)?
@@ -172,8 +174,8 @@ mod test {
 
         impl Serialize for A {
             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
+                where
+                    S: Serializer,
             {
                 match self {
                     A::S(string) => {
