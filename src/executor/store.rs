@@ -9,19 +9,21 @@ use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, IterationCmd};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey, keyPrefixAddRowId, suffix_plus_plus, throw, u64ToByteArrRef, prefix_plus_plus, throwFormat};
+use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey};
+use crate::{keyPrefixAddRowId, suffix_plus_plus, throw, u64ToByteArrRef, prefix_plus_plus, throwFormat};
 use crate::{global, meta, types, utils};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::graph_value::GraphValue;
-use crate::meta::{Column, Table};
+use crate::meta::{Column, DBObject, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
 use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, KeyTag, RowId};
 use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
 use anyhow::Result;
+use dashmap::mapref::one::Ref;
 use lazy_static::lazy_static;
 use crate::executor::mvcc::BytesMutExt;
-use crate::parser::op::{LogicalOp, Op};
+use crate::parser::op::{LogicalOp, Op, SqlOp};
 use crate::session::Session;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
@@ -103,6 +105,13 @@ impl<'Table> Default for ScanParams<'Table, '_, '_> {
     }
 }
 
+struct IndexSearch<'a> {
+    index: Ref<'a, String, DBObject>,
+    /// 包含的grapgValue 只可能是 IndexUseful
+    columnNameValuesVec: Vec<(String, Vec<(Op, Vec<GraphValue>)>)>,
+    isAnd: bool,
+}
+
 impl<'session> CommandExecutor<'session> {
     // todo 实现不实际捞取数据的
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
@@ -128,7 +137,7 @@ impl<'session> CommandExecutor<'session> {
         let mut processDataKey =
             |dataKey: DataKey, sender: Option<SyncSender<(DataKey, RowData)>>| -> Result<()> {
                 // todo getRowDatasByDataKeys 增加对uncommitted的区域的搜索 完成
-                // 习惯的套路就和scan函数里边1样 都是先搜索committed然后是uncommitted 这对scan来说是可以的
+                // 习惯的套路和scan函数相同 都是先搜索committed然后是uncommitted 这对scan来说是可以的
                 // 对这边的直接通过datakey获取有点不合适了 搜索uncommitted逻辑要到前边,要是有的话可以提前return
                 if let Some(tableMutations) = tableMutations {
                     if self.checkUncommittedDataVisibility(tableMutations, mvccKeyBuffer, dataKey)? {
@@ -215,7 +224,11 @@ impl<'session> CommandExecutor<'session> {
 
         let mut satisfiedRows =
             if scanParams.tableFilter.is_some() || select {
-                if let Some(tableFilter) = scanParams.tableFilter {}
+                if let Some(tableFilter) = scanParams.tableFilter {
+                    if let Some(indexSearch) = self.getMostSuitableIndex(scanParams.table, tableFilter)? {
+                        self.searchByIndex(indexSearch)?;
+                    }
+                }
 
                 let mut satisfiedRows = Vec::new();
 
@@ -526,8 +539,8 @@ impl<'session> CommandExecutor<'session> {
         Ok(satisfiedRows)
     }
 
-    // todo table对应的index列表 是不是应该融入到 table对象
-    fn getMostSuitableIndexName(&self, table: &Table, tableFilter: &Expr) -> Result<Option<String>> {
+    // todo table对应的index列表 是不是应该融入到table对象 完成
+    fn getMostSuitableIndex(&self, table: &Table, tableFilter: &Expr) -> Result<Option<IndexSearch>> {
         if table.indexNames.is_empty() {
             return Ok(None);
         }
@@ -542,36 +555,91 @@ impl<'session> CommandExecutor<'session> {
         // (a =10 and b>19) -> a=10
 
         // 要把涉及到columnName的提取
-        let mut columnNamesFromTableFilter = HashSet::new();
-        tableFilter.extractColumnNames(&mut columnNamesFromTableFilter)?;
-        if columnNamesFromTableFilter.is_empty() {
+        // index上的1个字段上的多个过滤expr是什么逻辑(and,or)联系,不同字段之间又是什么逻辑联系
+        //  ((a=1 or a=2) and (b>3 or b=1)) 获取搜索 a=1 和 a=2 的index ,如果index本身还包含b的话,然后再分别使用 b>3和b=1 筛选
+        let mut columnName_op_values = HashMap::default();
+        let mut isAnd = true;
+        tableFilter.collectIndexUsefuls(&mut columnName_op_values, &mut isAnd)?;
+
+        if columnName_op_values.is_empty() {
             return Ok(None);
         }
 
+        let columnNamesFromTableFilter: Vec<&String> = columnName_op_values.keys().collect();
+
+        // 候选名单
+        let mut candiateInices = Vec::with_capacity(table.indexNames.len());
+
+        // todo 要是有多个index都能应对tableFilter应该挑选哪个 目前是挑选包含字段多的
+        // 遍历table的index,筛掉不合适的
         for indexName in &table.indexNames {
             let dbObject = self.getDBObjectByName(indexName)?;
             let index = dbObject.asIndex()?;
 
-            let mut usedCount = 0usize;
+            // 能用到index的几个字段
+            let mut columnFromIndexUsedCount = 0usize;
 
-            // 要以index的column顺序
-            for indexColumnName in &index.columnNames {
-                if columnNamesFromTableFilter.contains(indexColumnName) == false {
+            // tableFilter的字段和index的字段就算有交集,tableFilter的字段要包含index的第1个字段
+            // 例如 (b=1 and c=3),虽然index含有字段a,b,c,然而tableFilter未包含打头的a字段 不能使用
+            // (a=1 and c=3) 虽然包含了打头的a字段,然而也只能用到index的a字段部分 因为缺了b字段 使得c用不了
+            for columnNameFromIndex in &index.columnNames {
+                if columnNamesFromTableFilter.contains(&columnNameFromIndex) == false {
                     break;
                 }
 
-                suffix_plus_plus!(usedCount);
+                // 应对废话 a>0  a<=0 如果是第1个那么index失效 如果是第2个那么有效范围到1
+                let values = columnName_op_values.get(columnNameFromIndex).unwrap();
+
+
+                suffix_plus_plus!(columnFromIndexUsedCount);
             }
 
-            if usedCount == 0 {
+            if columnFromIndexUsedCount == 0 {
                 continue;
             }
 
-            let usedIndexColumnNames = &index.columnNames[0..usedCount];
+            // 不能直接放index 因为它是来源dbObject的 而for 循环结束后dbObject销毁了
+            candiateInices.push((columnFromIndexUsedCount, dbObject));
         }
 
+        // columnFromIndexUsedCount 由大到小排序 选大的
+        candiateInices.sort_by(|a, b| { b.0.cmp(&a.0) });
 
-        Ok(None)
+        if candiateInices.is_empty() {
+            return Ok(None);
+        }
+
+        // 目前的话实现的比较粗糙,排前头的几个要是columnFromIndexUsedCount大小相同 选第1个
+        let (columnFromIndexUsedCount, index) = candiateInices.remove(0);
+
+        let index0 = index.asIndex()?;
+        let mut columnNameValuesVec = Vec::with_capacity(columnFromIndexUsedCount);
+        for columnName in &index0.columnNames[0..=columnFromIndexUsedCount] {
+            let op_values = columnName_op_values.remove(columnName).unwrap();
+
+            // value 和 column的type是不是匹配
+            for column in &table.columns {
+                if column.name.as_str() == columnName {
+                    for (op, values) in &op_values {
+                        for value in values {
+                            if column.type0.compatible(value) == false {
+                                throwFormat!("table: {}, column:{}, type:{} is not compatible with value:{}", table.name, columnName, column.type0, value)
+                            }
+                        }
+                    }
+                }
+            }
+
+            columnNameValuesVec.push((columnName.clone(), op_values));
+        }
+
+        let indexSearch = IndexSearch {
+            index,
+            columnNameValuesVec,
+            isAnd,
+        };
+
+        Ok(Some(indexSearch))
     }
 
     fn readRowDataBinary(&self,
@@ -859,6 +927,37 @@ impl<'session> CommandExecutor<'session> {
             = self.getRowDatasByDataKeys(targetRelationDataKeys.as_slice(), dest, destFilter, None)?;
 
         Ok(relationDatas)
+    }
+
+    /// index本身也是1个table 保存的不过是dataKey
+    fn searchByIndex(&self, indexSearch: IndexSearch) -> Result<()> {
+        let index = indexSearch.index.asIndex()?;
+        let snapshot = self.session.getSnapshot()?;
+
+        let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
+        let rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&indexColumnFamily);
+
+        let tableObject = self.getDBObjectByName(index.tableName.as_str())?;
+        let table = tableObject.asTable()?;
+
+        // 遍index各个column上的values
+        for (columnName, values) in &indexSearch.columnNameValuesVec {
+            // 遍历column上的value
+            for  (op, values) in values {
+                assert!(op.permitByIndex());
+
+                match op {
+                    Op::MathCmpOp(matchCmpOp) => {
+                        let value = values.first().unwrap();
+                        assert!(value.isConstant());
+                    }
+                    Op::SqlOp(SqlOp::In) => {}
+                    _ => panic!("impossible")
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -92,18 +92,18 @@ unsafe impl<T> Sync for TrickyContainer<T> {}
 
 pub trait HashMapExt<K, V, S = RandomState> {
     fn getMutWithDefault<Q: ?Sized>(&mut self, k: &Q) -> &mut V
-    where
-        K: Borrow<Q> + From<Q>,
-        Q: Hash + Eq + Clone,
-        V: Default;
+        where
+            K: Borrow<Q> + From<Q>,
+            Q: Hash + Eq + Clone,
+            V: Default;
 }
 
 impl<K: Eq + Hash, V, S: BuildHasher> HashMapExt<K, V, S> for HashMap<K, V, S> {
     fn getMutWithDefault<Q: ?Sized>(&mut self, k: &Q) -> &mut V
-    where
-        K: Borrow<Q> + From<Q>,
-        Q: Hash + Eq + Clone,
-        V: Default,
+        where
+            K: Borrow<Q> + From<Q>,
+            Q: Hash + Eq + Clone,
+            V: Default,
     {
         if let None = self.get_mut(k) {
             self.insert(k.clone().into(), V::default());
@@ -187,5 +187,12 @@ mod test {
 
         dangerouCell.set(A { name: "test1".to_string() });
         println!("{}", &*dangerouCell.name);
+    }
+
+    #[test]
+    pub fn testSort() {
+        let mut vec = vec![0, 7, 1];
+        vec.sort_by(|a, b| b.cmp(&a));
+        println!("{:?}", vec);
     }
 }

@@ -5,9 +5,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use crate::graph_value::GraphValue;
 use crate::parser::element::Element;
-use crate::parser::op::Op;
+use crate::parser::op::{LogicalOp, Op};
 use crate::throw;
 use crate::types::RowData;
+use crate::utils::HashMapExt;
 
 // 碰到"(" 下钻递归,返回后落地到上级的left right
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,58 +60,32 @@ impl Expr {
         }
     }
 
-    pub fn a(&self, indexColumnNames: &[String],
-             dest: &mut HashMap<String, Vec<(Op, GraphValue)>>) -> Result<GraphValue> {
+    /// 收集tableFilter上涉及到columnName的expr 把成果收集到dest对应的map
+    /// 例如 ((a=1 or a=2) and (b>3 or b=1)) 会收集成为 “a”-> []
+    pub fn collectIndexUsefuls(&self, dest: &mut HashMap<String, Vec<(Op, Vec<GraphValue>)>>, isAnd: &mut bool) -> Result<GraphValue> {
         match self {
             Expr::Single(element) => {
                 Ok(GraphValue::try_from(element)?)
             }
             Expr::BiDirection { leftExpr, op, rightExprs } => {
-                let leftValue = leftExpr.a(indexColumnNames, dest)?;
+                let leftValue = leftExpr.collectIndexUsefuls(dest, isAnd)?;
 
-                let mut columnName = None;
+                let rightValues: Vec<GraphValue> =
+                    rightExprs.iter().map(|rightExpr| { rightExpr.collectIndexUsefuls(dest, isAnd).unwrap() }).collect();
 
-                let leftIsPending =
-                    if let GraphValue::Pending(ref columnName0) = leftValue {
-                        columnName = Some(columnName0.clone());
-                        true
-                    } else {
-                        false
-                    };
+                let graphValueIndex = leftValue.calc0(op.clone(), &rightValues)?;
 
-                if rightExprs.is_empty() {
-                    throw!("has no right values");
+                if let GraphValue::IndexUseful { ref columnName, op, ref values } = graphValueIndex {
+                    let mut indexUsefuls = dest.getMutWithDefault(columnName);
+                    indexUsefuls.push((op, values.clone()));
                 }
 
-                let rightValues: Vec<GraphValue> = rightExprs.iter().map(|rightExpr| { rightExpr.a(indexColumnNames, dest).unwrap() }).collect();
-
-                let mut rightHasPending = false;
-
-                for rightValue in &rightValues {
-                    // 两边都是columnName 用不了index
-                    if let GraphValue::Pending(ref columnName0) = rightValue {
-                        // 对in来说不能有多个的columnName
-                        if rightHasPending {
-                            panic!()
-                        }
-
-                        if leftIsPending {
-                            panic!()
-                        }
-
-                        rightHasPending = true;
-
-                        columnName = Some(columnName0.clone());
-                    }
+                // 含有or的话 都以它来 不然都是and
+                if let Op::LogicalOp(LogicalOp::Or) = op {
+                    *isAnd = false;
                 }
 
-                // 说明未用到columnName
-                if columnName.is_none() {
-                    panic!()
-                }
-
-
-                leftValue.calc(op.clone(), &rightValues)
+                Ok(graphValueIndex)
             }
             Expr::None => panic!("impossible"),
         }
@@ -148,7 +123,7 @@ impl Expr {
         match self {
             Expr::Single(element) => {
                 if let Element::TextLiteral(columnName) = element {
-                    dest.push(columnName.clone());
+                    dest.insert(columnName.clone());
                 }
 
                 Ok(())

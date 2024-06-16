@@ -1,6 +1,6 @@
 # graph
 
-个人使用rust实现的rdbms风格的图数据库 <br>
+个人独立设计和使用rust实现的rdbms风格的图数据库 <br>
 <a href="https://github.com/fenquen/graph">项目地址</a> <a href="https://github.com/fenquen">个人的github主页</a> <br>
 
 ## 项目动机

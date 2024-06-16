@@ -243,20 +243,27 @@ impl GraphValue {
             let rightValue = &rightValues[0];
 
             match (self, rightValue) {
-                //(GraphValue::Pending(_), GraphValue::Pending(_)) => GraphValue::IndexUseless,
                 (GraphValue::Pending(columnName), GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null) => {
-                    Ok(GraphValue::IndexUseful {
-                        columnName: columnName.clone(),
-                        op,
-                        values: vec![rightValue.clone()],
-                    })
+                    if op.permitByIndex() {
+                        Ok(GraphValue::IndexUseful {
+                            columnName: columnName.clone(),
+                            op,
+                            values: vec![rightValue.clone()],
+                        })
+                    } else {  // a+3 显然是不能的
+                        Ok(GraphValue::IndexUseless)
+                    }
                 }
-                (GraphValue::String(columnName) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null, GraphValue::Pending(_)) => {
-                    Ok(GraphValue::IndexUseful {
-                        columnName: columnName.clone(),
-                        op,
-                        values: vec![rightValue.clone()],
-                    })
+                (GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null, GraphValue::Pending(columnName)) => {
+                    if op.permitByIndex() {
+                        Ok(GraphValue::IndexUseful {
+                            columnName: columnName.clone(),
+                            op,
+                            values: vec![self.clone()],
+                        })
+                    } else {  // a+3 显然是不能的
+                        Ok(GraphValue::IndexUseless)
+                    }
                 }
                 // 两边都是常量
                 (GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null,
@@ -412,6 +419,21 @@ impl GraphValue {
         }
 
         Ok(GraphValue::Boolean(true))
+    }
+
+    pub fn isConstant(&self) -> bool {
+        match self {
+            GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null => true,
+            _ => false
+        }
+    }
+
+    pub fn asIndexUseful(&self) -> Result<(&Op, &[GraphValue])> {
+        if let GraphValue::IndexUseful { op, values, .. } = self {
+            Ok((op, values))
+        } else {
+            throw!("not indexUseful")
+        }
     }
 }
 

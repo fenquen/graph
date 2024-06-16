@@ -24,6 +24,23 @@ impl Display for Op {
     }
 }
 
+impl Op {
+    pub fn permitByIndex(&self) -> bool {
+        match self {
+            Op::MathCmpOp(mathCmpOp) => {
+                if let MathCmpOp::NotEqual = mathCmpOp {
+                    false
+                } else {
+                    true
+                }
+            }
+            Op::LogicalOp(_) => false,
+            Op::MathCalcOp(_) => false,
+            _ => true
+        }
+    }
+}
+
 // https://note.qidong.name/2023/03/rust-enum-str/
 #[derive(DisplayStrum, Clone, Debug, Copy, Serialize, Deserialize)]
 pub enum MathCmpOp {
