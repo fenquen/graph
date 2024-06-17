@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::Display;
@@ -91,7 +92,10 @@ impl BinaryCodec for GraphValue {
 }
 
 impl Serialize for GraphValue {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> where S: Serializer {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
         // 因为没有别的地方可以传递参数来标识了 不得已用threadLocal
         if global::UNTAGGED_ENUM_JSON.get() {
             match self {
@@ -433,6 +437,35 @@ impl GraphValue {
             Ok((op, values))
         } else {
             throw!("not indexUseful")
+        }
+    }
+
+    pub fn asBoolean(&self) -> Result<bool> {
+        if let GraphValue::Boolean(b) = self {
+            Ok(*b)
+        } else {
+            throw!("not boolean")
+        }
+    }
+}
+
+impl PartialEq for GraphValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.calc(Op::MathCmpOp(MathCmpOp::Equal), &[other.clone()]).unwrap().asBoolean().unwrap()
+    }
+}
+
+impl PartialOrd for GraphValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+
+        match (self, other) {
+            (GraphValue::String(s), GraphValue::String(s0)) => Some(s.cmp(s0)),
+            (GraphValue::Boolean(b), GraphValue::Boolean(b0)) => Some(b.cmp(b0)),
+            (GraphValue::Integer(integer), GraphValue::Integer(integer0)) => Some(integer.cmp(integer0)),
+            (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Some(float64.total_cmp(&(*integer as f64))),
+            (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Some(float.total_cmp(float0)),
+            (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Some(float64.total_cmp(&(*integer as f64))),
+            _ => None,
         }
     }
 }
