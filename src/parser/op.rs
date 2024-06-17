@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::{global, throw};
 use crate::graph_error::GraphError;
 use strum_macros::{Display as DisplayStrum, Display, EnumString};
+use anyhow::Result;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Op {
@@ -36,7 +37,7 @@ impl Op {
             }
             Op::LogicalOp(_) => false,
             Op::MathCalcOp(_) => false,
-            _ => true
+            Op::SqlOp(_) => true
         }
     }
 }

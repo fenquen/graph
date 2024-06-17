@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Index;
 use serde_json::Value;
 use anyhow::Result;
+use futures_util::SinkExt;
 use serde::{Deserialize, Serialize};
 use crate::graph_value::GraphValue;
 use crate::parser::element::Element;
-use crate::parser::op::{LogicalOp, Op};
+use crate::parser::op::{LogicalOp, MathCmpOp, Op, SqlOp};
 use crate::throw;
 use crate::types::RowData;
 use crate::utils::HashMapExt;
@@ -62,22 +63,36 @@ impl Expr {
 
     /// 收集tableFilter上涉及到columnName的expr 把成果收集到dest对应的map
     /// 例如 ((a=1 or a=2) and (b>3 or b=1)) 会收集成为 “a”-> []
-    pub fn collectIndexUsefuls(&self, dest: &mut HashMap<String, Vec<(Op, Vec<GraphValue>)>>, isAnd: &mut bool) -> Result<GraphValue> {
+    pub fn collectColNameValue(&self, dest: &mut HashMap<String, Vec<(Op, Vec<GraphValue>)>>, isAnd: &mut bool) -> Result<GraphValue> {
         match self {
             Expr::Single(element) => {
                 Ok(GraphValue::try_from(element)?)
             }
             Expr::BiDirection { leftExpr, op, rightExprs } => {
-                let leftValue = leftExpr.collectIndexUsefuls(dest, isAnd)?;
+                let leftValue = leftExpr.collectColNameValue(dest, isAnd)?;
 
                 let rightValues: Vec<GraphValue> =
-                    rightExprs.iter().map(|rightExpr| { rightExpr.collectIndexUsefuls(dest, isAnd).unwrap() }).collect();
+                    rightExprs.iter().map(|rightExpr| { rightExpr.collectColNameValue(dest, isAnd).unwrap() }).collect();
 
                 let graphValueIndex = leftValue.calc0(op.clone(), &rightValues)?;
 
                 if let GraphValue::IndexUseful { ref columnName, op, ref values } = graphValueIndex {
-                    let mut indexUsefuls = dest.getMutWithDefault(columnName);
-                    indexUsefuls.push((op, values.clone()));
+                    let mut op_valuesVec = dest.getMutWithDefault(columnName);
+
+                    // 拆分掉in
+                    if let Op::SqlOp(SqlOp::In) = op {
+                        if values.len() == 1 {
+                            op_valuesVec.push((Op::MathCmpOp(MathCmpOp::Equal), values.clone()));
+                        } else {  // 要是in有多个的话 需要是or
+                            *isAnd = false;
+
+                            for value in values {
+                                op_valuesVec.push((Op::MathCmpOp(MathCmpOp::Equal), vec![value.clone()]));
+                            }
+                        }
+                    } else {
+                        op_valuesVec.push((op, values.clone()));
+                    }
                 }
 
                 // 含有or的话 都以它来 不然都是and
