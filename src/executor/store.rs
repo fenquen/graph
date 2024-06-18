@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
 use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
-use crate::executor::{CommandExecutor, IterationCmd};
+use crate::executor::{CommandExecutor, index, IterationCmd};
 use crate::expr::Expr;
 use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey};
 use crate::{keyPrefixAddRowId, suffix_plus_plus, throw, u64ToByteArrRef, prefix_plus_plus, throwFormat};
@@ -106,9 +106,9 @@ impl<'Table> Default for ScanParams<'Table, '_, '_> {
 }
 
 struct IndexSearch<'a> {
-    index: Ref<'a, String, DBObject>,
+    dbObjectIndex: Ref<'a, String, DBObject>,
     /// 包含的grapgValue 只可能是 IndexUseful
-    columnNameValuesVec: Vec<(String, Vec<(Op, Vec<GraphValue>)>)>,
+    opValueVecAcrossIndexColumns: Vec<Vec<(Op, GraphValue)>>,
     isAnd: bool,
 }
 
@@ -545,761 +545,84 @@ impl<'session> CommandExecutor<'session> {
             return Ok(None);
         }
 
-        // 遍历各个index 计算得到 tableFilter 落地到 index 是什么 需要prefix匹配
-        // index 包含 a
-        // (a=1 or (a=2 or c>0)) -> a=1 or a=2
-        // (a>10 and (a<1 or c>0))-> a >10 or a<1
-        // index 包含 a b
-        // (a=1 or (a=2 or b>0)) -> (a=1 or (a=2 or b>0))
-        // (a>10 and (a<1 or c>0)) -> a>10 or a<1
-        // (a =10 and b>19) -> a=10
+        // 要把tableFilter上涉及到的columnName的expr全部提取
+        // tableFilter上的字段名->Vec<(op, value)>
+        let mut columnNameFromTableFilter_opValuesVec = HashMap::default();
 
-        // 要把涉及到columnName的提取
-        // index上的1个字段上的多个过滤expr是什么逻辑(and,or)联系,不同字段之间又是什么逻辑联系
-        //  ((a=1 or a=2) and (b>3 or b=1)) 获取搜索 a=1 和 a=2 的index ,如果index本身还包含b的话,然后再分别使用 b>3和b=1 筛选
-        let mut columnName_op_values = HashMap::default();
+        // 上边的Vec<(op, value)>的各个元素之间 以及 各column之间 是and还是or,实现的还是不够精细
         let mut isAnd = true;
-        tableFilter.collectColNameValue(&mut columnName_op_values, &mut isAnd)?;
+        tableFilter.collectColNameValue(&mut columnNameFromTableFilter_opValuesVec, &mut isAnd)?;
 
-        if columnName_op_values.is_empty() {
+        // 说明tableFilter上未写column名
+        if columnNameFromTableFilter_opValuesVec.is_empty() {
             return Ok(None);
         }
 
-        let columnNamesFromTableFilter: Vec<&String> = columnName_op_values.keys().collect();
+        let columnNamesFromTableFilter: Vec<&String> = columnNameFromTableFilter_opValuesVec.keys().collect();
 
         // 候选名单
         let mut candiateInices = Vec::with_capacity(table.indexNames.len());
 
-        // a > 19 and a<27 and a=1 and a >=19
-        // a ='b' and a likes 'b%'
-        #[derive(Default)]
-        struct RangeDesc {
-            lowerValue: Option<GraphValue>,
-            lowerInclusive: bool,
-            upperValue: Option<GraphValue>,
-            upperInclusive: bool,
-        }
-
-        fn andSingle<'a>(op: Op, value: &'a GraphValue,
-                         targetOp: Op, targetValue: &'a GraphValue) -> Option<Vec<(Op, &'a GraphValue)>> {
-            assert!(op.permitByIndex());
-            assert!(value.isConstant());
-
-            assert!(targetOp.permitByIndex());
-            assert!(targetValue.isConstant());
-
-            match (op, targetOp) {
-                (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::Equal)) => {
-                    if value == targetValue {
-                        return Some(vec![(op, value)]);
-                    }
-
-                    None
-                }
-                (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                    if value >= targetValue {
-                        return Some(vec![(op, value)]);
-                    }
-
-                    None
-                }
-                (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
-                    if value > targetValue {
-                        return Some(vec![(op, value)]);
-                    }
-
-                    None
-                }
-                (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                    if value <= targetValue {
-                        return Some(vec![(op, value)]);
-                    }
-
-                    None
-                }
-                (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::LessThan)) => {
-                    if value < targetValue {
-                        return Some(vec![(op, value)]);
-                    }
-
-                    None
-                }
-                // -----------------------------------------------------------------------------
-                (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::Equal)) => {
-                    if targetValue > value {
-                        return Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), targetValue)]);
-                    }
-
-                    None
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
-                    if value >= targetValue {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)])
-                    } else {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                    if value >= targetValue { // >6 and >=6
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)])
-                    } else { // >3 and >=4
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                    if value == targetValue {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), targetValue)])
-                    } else if value > targetValue { // >=6 and <=3
-                        None
-                    } else { // >=6 and <=9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value), (Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::LessThan)) => {
-                    if value >= targetValue { // >=3 and <3
-                        None
-                    } else { // >=3 and <4
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value), (Op::MathCmpOp(MathCmpOp::LessThan), targetValue)])
-                    }
-                }
-                // -----------------------------------------------------------------------------
-                (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::Equal)) => {
-                    if targetValue >= value {
-                        return Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), targetValue)]);
-                    }
-
-                    None
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                    if value >= targetValue {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)])
-                    } else {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
-                    if value > targetValue {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)])
-                    } else {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                    if value == targetValue {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)])
-                    } else if value > targetValue { // >=6 and <=0
-                        None
-                    } else { // >=6 and <=7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value), (Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::LessThan)) => {
-                    if value == targetValue { // >=6 and <6
-                        None
-                    } else if value > targetValue { // >=7 and <6
-                        None
-                    } else { // >=6 and <7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value), (Op::MathCmpOp(MathCmpOp::LessThan), targetValue)])
-                    }
-                }
-                // ------------------------------------------------------------------------------
-                (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::Equal)) => {
-                    if targetValue <= value {
-                        return Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), targetValue)]);
-                    }
-
-                    None
-                }
-                (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
-                    if value > targetValue { // <=6 and >3
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value), (Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)])
-                    } else {  // <=6 and >6
-                        None
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                    if value == targetValue {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), value)])
-                    } else if value > targetValue {  // <=6 and >5
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value), (Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)])
-                    } else { // <=6 and >7
-                        None
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                    if value <= targetValue {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)])
-                    } else {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::LessThan)) => {
-                    if value >= targetValue { // <=6 and <6
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)])
-                    } else {  // <=6 and <7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)])
-                    }
-                }
-                // ------------------------------------------------------------------------------
-                (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::Equal)) => {
-                    if targetValue < value {
-                        return Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), targetValue)]);
-                    }
-
-                    None
-                }
-                (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
-                    if value > targetValue { // <6 and >5
-                        return Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value), (Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)]);
-                    }
-
-                    // <6 and >6
-                    None
-                }
-                (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                    if value > targetValue { // <6 and >=5
-                        return Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value), (Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)]);
-                    }
-
-                    // <6 and >=6  <6 and >=7
-                    None
-                }
-                (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                    if value <= targetValue { // <6 and <=6, <6 and <=7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)])
-                    } else { // <6 and <=5
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::LessThan)) => {
-                    if value <= targetValue { // <6 and <6 , <6 and <7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)])
-                    } else {  // <6 and <5
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)])
-                    }
-                }
-                _ => panic!("impossible")
-            }
-        }
-
-        fn or<'a>(op: Op, value: &'a GraphValue,
-                  targetOp: Op, targetValue: &'a GraphValue) -> Option<Vec<(Op, &'a GraphValue)>> {
-            assert!(op.permitByIndex());
-            assert!(value.isConstant());
-
-            assert!(targetOp.permitByIndex());
-            assert!(targetValue.isConstant());
-
-            match (op, targetOp) {
-                (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::Equal)) => {
-                    if value == targetValue {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), value)])
-                    } else {
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), value), (Op::MathCmpOp(MathCmpOp::Equal), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                    if value >= targetValue { // =6 or >=6
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)])
-                    } else {  // =6 or >=7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), value), (Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
-                    if value == targetValue { // =6 or >6
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)])
-                    } else if value > targetValue { // =6 or >5
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)])
-                    } else { // =6 or >7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), value), (Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                    if value <= targetValue { // =6 or <=6, =6 or <=9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)])
-                    } else { // =6 or <=0
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), value), (Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::LessThan)) => {
-                    if value < targetValue { // =6 or <7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)])
-                    } else if value == targetValue { // =6 or <6
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)])
-                    } else { //  =6 or <0
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), value), (Op::MathCmpOp(MathCmpOp::LessThan), targetValue)])
-                    }
-                }
-                // -----------------------------------------------------------------------------
-                (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::Equal)) => {
-                    if value == targetValue { // >6 or =6
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)])
-                    } else if value > targetValue { // >=6 or =3
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value), (Op::MathCmpOp(MathCmpOp::Equal), targetValue)])
-                    } else { // >6 or =9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
-                    if value >= targetValue { // >6 or >6 , >6 or >3
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)])
-                    } else { // >6 or >7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                    if value >= targetValue { // >6 and >=6, >6 and >=3
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)])
-                    } else { // >3 and >=4
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                    if value <= targetValue { // >6 or <=6 , >6 or <=7 是废话
-                        None
-                    } else { // >6 or <=3
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value), (Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::LessThan)) => {
-                    if value <= targetValue { // >3 or <3 等效not equal, >3 or <4 是废话
-                        None
-                    } else { // >3 or <0
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value), (Op::MathCmpOp(MathCmpOp::LessThan), targetValue)])
-                    }
-                }
-                // -----------------------------------------------------------------------------
-                (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::Equal)) => {
-                    if value <= targetValue { // >=6 or =6, >=6 or =9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)])
-                    } else { // >=6 or =3
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value), (Op::MathCmpOp(MathCmpOp::Equal), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                    if value >= targetValue { // >=6 or >=6 , >=6 or >=0
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)])
-                    } else { // >=6 or >=7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
-                    if value <= targetValue { // >=6 or > 6, >=6 or >7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)])
-                    } else { // >=6 or >0
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                    if value <= targetValue { // >=6 or <=6, >=6 or <=9 废话
-                        None
-                    } else { // >=6 or <=0
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value), (Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::LessThan)) => {
-                    if value <= targetValue { // >=6 or <6, >=6 or <7 废话
-                        None
-                    } else { // >=6 or <5
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value), (Op::MathCmpOp(MathCmpOp::LessThan), targetValue)])
-                    }
-                }
-                // ------------------------------------------------------------------------------
-                (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::Equal)) => {
-                    if value >= targetValue { // <=6 or =6 , <=6 or =5
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)])
-                    } else { // <=6 or =9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value), (Op::MathCmpOp(MathCmpOp::Equal), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
-                    if value >= targetValue { // <=6 and >6, <=6 or >5 废话
-                        None
-                    } else {  // <=6 and >9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value), (Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                    if value >= targetValue { // <=6 or >=6 ,<=6 or >=0 废话
-                        None
-                    } else {  // <=6 and >=9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value), (Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                    if value <= targetValue { // <=6 or <=6 ,<=6 or <=7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)])
-                    } else { // <=6 or <=0
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::LessThan)) => {
-                    if value >= targetValue { // <=6 or <6 ,<=6 or <0
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)])
-                    } else {  // <=6 or <9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)])
-                    }
-                }
-                // ------------------------------------------------------------------------------
-                (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::Equal)) => {
-                    if value == targetValue { // <6 or =6
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)])
-                    } else if value > targetValue {  // <6 or =0
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)])
-                    } else { // <6 or =9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value), (Op::MathCmpOp(MathCmpOp::Equal), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
-                    if value >= targetValue { // <6 or >6 等效not equal, <6 or >3 废话
-                        None
-                    } else { // <6 or >9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value), (Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                    if value >= targetValue { // <6 or >=6, <6 or >=5 废话
-                        None
-                    } else { // <6 or >=9
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value), (Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                    if value <= targetValue { // <6 or <=6, <6 or <=7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)])
-                    } else { // <6 or <=5
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)])
-                    }
-                }
-                (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::LessThan)) => {
-                    if value <= targetValue { // <6 or <6 , <6 or <7
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)])
-                    } else {  // <6 or <5
-                        Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)])
-                    }
-                }
-                _ => panic!("impossible")
-            }
-        }
-
-        fn orMulti<'a>(op: Op, value: &'a GraphValue, previousVec: Vec<(Op, &'a GraphValue)>) -> Option<Vec<(Op, &'a GraphValue)>> {
-            if previousVec.is_empty() {
-                return Some(vec![(op, value)]);
-            }
-
-            for (previousOp,previousValue) in previousVec {
-                
-            }
-
-            None
-        }
-
-        fn andMulti<'a>(op: Op, value: &'a GraphValue, targetVec: Vec<(Op, &'a GraphValue)>) {
-            let mut total = Vec::new();
-            for (targetOp, targetValue) in targetVec {
-                if let Some(partVec) = andSingle(op, value, targetOp, targetValue) {
-                    for part in partVec {
-                        total.push(part);
-                    }
-                }
-            }
-        }
-
         // todo 要是有多个index都能应对tableFilter应该挑选哪个 目前是挑选包含字段多的
-        // 遍历table的index,筛掉不合适的
+        // 遍历table的各个index,筛掉不合适的
         'loopIndex:
         for indexName in &table.indexNames {
-            let dbObject = self.getDBObjectByName(indexName)?;
-            let index = dbObject.asIndex()?;
+            let dbObjectIndex = self.getDBObjectByName(indexName)?;
+            let index = dbObjectIndex.asIndex()?;
 
             // 能用到index的几个字段
             // tableFilter的字段和index的字段就算有交集,tableFilter的字段也兜底要包含index的第1个字段
             // 例如 (b=1 and c=3),虽然index含有字段a,b,c,然而tableFilter未包含打头的a字段 不能使用
             // (a=1 and c=3) 虽然包含了打头的a字段,然而也只能用到index的a字段部分 因为缺了b字段 使得c用不了
-            let mut columnFromIndexUsedCount = 0usize;
+            let mut columnNamesFromIndexUsed = Vec::with_capacity(index.columnNames.len());
 
-            'loopColumnNameFromIndex:
+            // index的各个的column上的表达式的集合
+            let mut opValueVecAcrossIndexColumns = Vec::with_capacity(index.columnNames.len());
+
+            'loopColumnNameFromIndex: // 遍历index的各columnName
             for columnNameFromIndex in &index.columnNames {
                 if columnNamesFromTableFilter.contains(&columnNameFromIndex) == false {
                     break;
                 }
 
                 // 应对废话 a>0  a<=0 如果是第1个那么index失效 如果是第2个那么有效范围到1
-                let op_valuesVec = columnName_op_values.get(columnNameFromIndex).unwrap();
+                let op_valuesVec = columnNameFromTableFilter_opValuesVec.get(columnNameFromIndex).unwrap();
 
-                if isAnd {
-                    // 只会有这么1个
-                    let mut rangeDesc = RangeDesc::default();
+                let mut accumulated = vec![];
 
-                    for (op, values) in op_valuesVec {
-                        assert!(op.permitByIndex());
-                        assert_eq!(values.len(), 1);
+                for (op, values) in op_valuesVec {
+                    assert!(op.permitByIndex());
+                    assert_eq!(values.len(), 1);
 
-                        let value = values.first().unwrap();
-                        assert!(value.isConstant());
+                    let value = values.first().unwrap();
+                    assert!(value.isConstant());
 
-                        match op {
-                            Op::MathCmpOp(MathCmpOp::Equal) => {
-                                let mut pass = true;
+                    let accumulatedNew = if isAnd {
+                        index::andWithAccumulated(*op, value, accumulated)
+                    } else {
+                        index::orWithAccumulated(*op, value, accumulated)
+                    };
 
-                                // >1  应该 >1 , >=1 应该 >=1
-                                match (&rangeDesc.lowerValue, &rangeDesc.upperValue) {
-                                    (Some(lowerValue), Some(upperValue)) => {
-                                        pass = if rangeDesc.lowerInclusive {
-                                            value >= lowerValue
-                                        } else {
-                                            value > lowerValue
-                                        };
-
-                                        pass = if rangeDesc.upperInclusive {
-                                            value <= upperValue
-                                        } else {
-                                            value < upperValue
-                                        };
-                                    }
-                                    (Some(lowerValue), None) => {
-                                        if rangeDesc.lowerInclusive {
-                                            pass = value >= lowerValue;
-                                        } else {
-                                            pass = value > lowerValue;
-                                        };
-                                    }
-                                    (None, Some(upperValue)) => {
-                                        pass = if rangeDesc.upperInclusive {
-                                            value <= upperValue
-                                        } else {
-                                            value < upperValue
-                                        };
-                                    }
-                                    (None, None) => {}
-                                }
-
-                                if pass == false {
-                                    continue 'loopColumnNameFromIndex;
-                                }
-
-                                rangeDesc.lowerValue = Some(value.clone());
-                                rangeDesc.lowerInclusive = true;
-                                rangeDesc.upperValue = Some(value.clone());
-                                rangeDesc.upperInclusive = true;
-                            }
-                            Op::MathCmpOp(MathCmpOp::GreaterThan) => { // >value ,要是通过还要收缩拓展
-                                // 应对可能的 lower border上升
-                                if let Some(lowerValue) = rangeDesc.lowerValue.as_ref() {
-                                    if rangeDesc.lowerInclusive { // >=lower
-                                        if value >= lowerValue { // 需要上升原来的下border
-                                            rangeDesc.lowerValue = Some(value.clone());
-                                            rangeDesc.lowerInclusive = false;
-                                        }
-                                    } else { // >lower
-                                        if value > lowerValue { // 需要提升原来的下border
-                                            rangeDesc.lowerValue = Some(value.clone());
-                                            rangeDesc.lowerInclusive = false;
-                                        }
-                                    }
-                                } else {
-                                    rangeDesc.lowerValue = Some(value.clone());
-                                    rangeDesc.lowerInclusive = false;
-                                }
-
-                                // 应对可能upper上的矛盾 例如 >0 and <0
-                                if let Some(upperValue) = rangeDesc.upperValue.as_ref() {
-                                    if rangeDesc.upperInclusive { // <= upperValue
-                                        if value >= upperValue {
-                                            continue 'loopColumnNameFromIndex;
-                                        }
-                                    } else { // < upperValue
-                                        if value >= upperValue {
-                                            continue 'loopColumnNameFromIndex;
-                                        }
-                                    }
-                                }
-                            }
-                            Op::MathCmpOp(MathCmpOp::GreaterEqual) => { // >=value
-                                // 应对可能的 lower border上升
-                                if let Some(lowerValue) = rangeDesc.lowerValue.as_ref() {
-                                    // 不管原来是 >=lowerValue 还是 >lowerValue ,都如下应对
-                                    if value > lowerValue { // 需要上升原来的下border
-                                        rangeDesc.lowerValue = Some(value.clone());
-                                        rangeDesc.lowerInclusive = true;
-                                    }
-                                } else {
-                                    rangeDesc.lowerValue = Some(value.clone());
-                                    rangeDesc.lowerInclusive = true;
-                                }
-
-                                // 应对可能upper上的矛盾 例如 >0 and <0
-                                if let Some(upperValue) = rangeDesc.upperValue.as_ref() {
-                                    if rangeDesc.upperInclusive { // <= upperValue
-                                        if value > upperValue {
-                                            continue 'loopColumnNameFromIndex;
-                                        }
-
-                                        // <= upperValue , >=value
-                                        if value == upperValue {
-                                            rangeDesc.lowerValue = Some(value.clone());
-                                            rangeDesc.lowerInclusive = true;
-                                            rangeDesc.upperValue = Some(value.clone());
-                                            rangeDesc.upperInclusive = true;
-                                        }
-                                    } else { // < upperValue
-                                        if value >= upperValue {
-                                            continue 'loopColumnNameFromIndex;
-                                        }
-                                    }
-                                }
-                            }
-                            Op::MathCmpOp(MathCmpOp::LessEqual) => { // <= value
-                                // 应对lower上可能的矛盾
-                                if let Some(lowerValue) = rangeDesc.lowerValue.as_ref() {
-                                    if rangeDesc.lowerInclusive { // >= lowerValue
-                                        if lowerValue > value {
-                                            continue 'loopColumnNameFromIndex;
-                                        }
-
-                                        if value == lowerValue {
-                                            rangeDesc.lowerValue = Some(value.clone());
-                                            rangeDesc.lowerInclusive = true;
-                                            rangeDesc.upperValue = Some(value.clone());
-                                            rangeDesc.upperInclusive = true;
-                                        }
-                                    } else { // > lowerValue
-                                        if lowerValue >= value {
-                                            continue 'loopColumnNameFromIndex;
-                                        }
-                                    }
-                                }
-
-                                // 应对upper上可能的下降
-                                if let Some(upperValue) = rangeDesc.upperValue.as_ref() {
-                                    // 不管原来是 <=upperValue 还是 < upperValue 都是如下应对的
-                                    if upperValue > value { // upper下降
-                                        rangeDesc.upperValue = Some(value.clone());
-                                        rangeDesc.upperInclusive = false;
-                                    }
-                                } else {
-                                    rangeDesc.upperValue = Some(value.clone());
-                                    rangeDesc.upperInclusive = false;
-                                }
-                            }
-                            Op::MathCmpOp(MathCmpOp::LessThan) => { // < value
-                                // 应对lower上可能的矛盾
-                                if let Some(lowerValue) = rangeDesc.lowerValue.as_ref() {
-                                    if rangeDesc.lowerInclusive { // >= lowerValue
-                                        if lowerValue >= value {
-                                            continue 'loopColumnNameFromIndex;
-                                        }
-                                    } else { // > lowerValue
-                                        if lowerValue >= value {
-                                            continue 'loopColumnNameFromIndex;
-                                        }
-                                    }
-                                }
-
-                                // 应对upper上可能的下降
-                                if let Some(upperValue) = rangeDesc.upperValue.as_ref() {
-                                    if rangeDesc.upperInclusive { // <= uppervalue
-                                        if upperValue >= value { // upper下降
-                                            rangeDesc.upperValue = Some(value.clone());
-                                            rangeDesc.upperInclusive = false;
-                                        }
-                                    } else { // < upperValue
-                                        if upperValue > value { // upper下降
-                                            rangeDesc.upperValue = Some(value.clone());
-                                            rangeDesc.upperInclusive = false;
-                                        }
-                                    }
-                                } else {
-                                    rangeDesc.upperValue = Some(value.clone());
-                                    rangeDesc.upperInclusive = false;
-                                }
-                            }
-                            _ => panic!("impossible")
-                        }
+                    match accumulatedNew {
+                        Some(accumulatedNew) => accumulated = accumulatedNew,
+                        // 如果and 那么是 a>=0 and a<0 矛盾
+                        // 如果是or 那么是 a>0 or a<=0 这样的废话
+                        None => continue 'loopIndex
                     }
-                } else {
-                    let mut rangeDescVec: Vec<RangeDesc> = Vec::new();
-
-                    for (op, values) in op_valuesVec {
-                        assert!(op.permitByIndex());
-                        assert_eq!(values.len(), 1);
-
-                        let value = values.first().unwrap();
-                        assert!(value.isConstant());
-
-                        let mut rangeDesc = RangeDesc::default();
-
-                        match op {
-                            Op::MathCmpOp(MathCmpOp::Equal) => {
-                                // 要是含有 >=value
-
-                                rangeDesc.lowerValue = Some(value.clone());
-                                rangeDesc.lowerInclusive = true;
-                                rangeDesc.upperValue = Some(value.clone());
-                                rangeDesc.upperInclusive = true;
-                            }
-                            Op::MathCmpOp(MathCmpOp::GreaterThan) => { // > value
-                                // 要是前边含有 < value, <= value 那么失效
-                                for previousRangeDesc in &rangeDescVec {
-                                    let RangeDesc {
-                                        lowerValue,
-                                        lowerInclusive,
-                                        upperValue,
-                                        upperInclusive
-                                    } = previousRangeDesc;
-
-                                    match (lowerValue, upperValue) {
-                                        (Some(lowerValue), Some(upperValue)) => {}
-                                        (None, Some(upperValue)) => {
-                                            // 前边是 <7 ,<=7 ,current是 >7
-                                            if value == upperValue {
-                                                continue 'loopColumnNameFromIndex;
-                                            }
-                                        }
-                                        (Some(lowerValue), None) => {
-                                            // 前边是 >7 , >=7 ,current是 >7,>3 那么continue
-                                            if lowerValue >= value {
-                                                continue;
-                                            }
-                                        }
-                                        (None, None) => panic!("impossible")
-                                    }
-                                }
-
-                                rangeDesc.lowerValue = Some(value.clone());
-                                rangeDesc.lowerInclusive = false;
-                            }
-                            Op::MathCmpOp(MathCmpOp::GreaterEqual) => { // >= value
-                                // 要是前边含有 < value, <= value 那么失效
-                                rangeDesc.lowerValue = Some(value.clone());
-                                rangeDesc.lowerInclusive = true;
-                            }
-                            Op::MathCmpOp(MathCmpOp::LessEqual) => {
-                                rangeDesc.upperValue = Some(value.clone());
-                                rangeDesc.upperInclusive = true;
-                            }
-                            Op::MathCmpOp(MathCmpOp::LessThan) => {
-                                rangeDesc.upperValue = Some(value.clone());
-                                rangeDesc.upperInclusive = false;
-                            }
-                            _ => panic!("impossible")
-                        }
-
-                        rangeDescVec.push(rangeDesc);
-                    }
-
-                    // 应对 a >1 or a<=1 这样的废话
                 }
 
-                suffix_plus_plus!(columnFromIndexUsedCount);
+                let accumulated: Vec<(Op, GraphValue)> = accumulated.into_iter().map(|(op, value)| { (op, value.clone()) }).collect();
+                opValueVecAcrossIndexColumns.push(accumulated);
+
+                columnNamesFromIndexUsed.push(columnNameFromIndex.clone());
             }
 
-            if columnFromIndexUsedCount == 0 {
+            if columnNamesFromIndexUsed.is_empty() {
                 continue;
             }
 
             // 不能直接放index 因为它是来源dbObject的 而for 循环结束后dbObject销毁了
-            candiateInices.push((columnFromIndexUsedCount, dbObject));
+            candiateInices.push((columnNamesFromIndexUsed, dbObjectIndex, opValueVecAcrossIndexColumns));
         }
 
         // columnFromIndexUsedCount 由大到小排序 选大的
@@ -1310,32 +633,32 @@ impl<'session> CommandExecutor<'session> {
         }
 
         // 目前的话实现的比较粗糙,排前头的几个要是columnFromIndexUsedCount大小相同 选第1个
-        let (columnFromIndexUsedCount, index) = candiateInices.remove(0);
+        let (columnNamesFromIndexUsed,
+            dbObjectIndex,
+            opValueVecAcrossIndexColumns) = candiateInices.remove(0);
 
-        let index0 = index.asIndex()?;
-        let mut columnNameValuesVec = Vec::with_capacity(columnFromIndexUsedCount);
-        for columnName in &index0.columnNames[0..=columnFromIndexUsedCount] {
-            let op_values = columnName_op_values.remove(columnName).unwrap();
-
-            // value 和 column的type是不是匹配
+        // value 和 column的type是不是匹配
+        for index in 0..columnNamesFromIndexUsed.len() {
+            let columnNameFromIndexUsed = columnNamesFromIndexUsed.get(index).unwrap();
             for column in &table.columns {
-                if column.name.as_str() == columnName {
-                    for (op, values) in &op_values {
-                        for value in values {
-                            if column.type0.compatible(value) == false {
-                                throwFormat!("table: {}, column:{}, type:{} is not compatible with value:{}", table.name, columnName, column.type0, value)
-                            }
-                        }
+                if column.name.as_str() != columnNameFromIndexUsed {
+                    continue;
+                }
+
+                let opValueVec = opValueVecAcrossIndexColumns.get(index).unwrap();
+
+                for (_, value) in opValueVec {
+                    if column.type0.compatible(value) == false {
+                        throwFormat!("table: {}, column:{}, type:{} is not compatible with value:{}",
+                                table.name, columnNameFromIndexUsed, column.type0, value)
                     }
                 }
             }
-
-            columnNameValuesVec.push((columnName.clone(), op_values));
         }
 
         let indexSearch = IndexSearch {
-            index,
-            columnNameValuesVec,
+            dbObjectIndex,
+            opValueVecAcrossIndexColumns,
             isAnd,
         };
 
@@ -1631,33 +954,200 @@ impl<'session> CommandExecutor<'session> {
 
     /// index本身也是1个table 保存的不过是dataKey
     fn searchByIndex(&self, indexSearch: IndexSearch) -> Result<()> {
-        let index = indexSearch.index.asIndex()?;
+        let index = indexSearch.dbObjectIndex.asIndex()?;
         let snapshot = self.session.getSnapshot()?;
 
         let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
-        let rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&indexColumnFamily);
+        let mut dbRawIterator: DBRawIterator = snapshot.raw_iterator_cf(&indexColumnFamily);
 
         let tableObject = self.getDBObjectByName(index.tableName.as_str())?;
         let table = tableObject.asTable()?;
 
-        // 遍index各个column上的values
-        for (columnName, values) in &indexSearch.columnNameValuesVec {
-            // 遍历column上的value
-            for (op, values) in values {
+        // seek那都是要以index的第1个column为切入的, 后边的column是在index数据基础上的筛选
+        let opValueVecOnIndex1stColumn = indexSearch.opValueVecAcrossIndexColumns.first().unwrap();
+
+        let mut dataKeys: Vec<DataKey> = Vec::new();
+
+        if indexSearch.isAnd {
+            // 需要框选 上下的范围
+            assert!(opValueVecOnIndex1stColumn.len() <= 2);
+
+            let mut lowerValue = None;
+            let mut lowerInclusive = false;
+            let mut upperValue = None;
+            let mut upperInclusive = false;
+
+            for (op, value) in opValueVecOnIndex1stColumn {
                 assert!(op.permitByIndex());
+                assert!(value.isConstant());
 
                 match op {
-                    Op::MathCmpOp(matchCmpOp) => {
-                        let value = values.first().unwrap();
-                        assert!(value.isConstant());
+                    Op::MathCmpOp(MathCmpOp::Equal) => {
+                        lowerValue = Some(value);
+                        lowerInclusive = true;
+                        upperValue = Some(value);
+                        upperInclusive = true;
                     }
-                    Op::SqlOp(SqlOp::In) => {}
+                    Op::MathCmpOp(MathCmpOp::GreaterThan) => {
+                        lowerValue = Some(value);
+                        lowerInclusive = false;
+                    }
+                    Op::MathCmpOp(MathCmpOp::GreaterEqual) => {
+                        lowerValue = Some(value);
+                        lowerInclusive = true;
+                    }
+                    Op::MathCmpOp(MathCmpOp::LessEqual) => {
+                        upperValue = Some(value);
+                        upperInclusive = true;
+                    }
+                    Op::MathCmpOp(MathCmpOp::LessThan) => {
+                        upperValue = Some(value);
+                        upperInclusive = false;
+                    }
                     _ => panic!("impossible")
+                }
+            }
+
+            let mut lowerValueBuffer = BytesMut::new();
+            let mut upperValueBuffer = BytesMut::new();
+
+            let mut hasBeyondLower = false;
+            let mut hasBeyondUpper = false;
+
+            match (lowerValue, upperValue) {
+                (Some(lowerValue), Some(upperValue)) => {
+                    lowerValue.encode(&mut lowerValueBuffer)?;
+                    upperValue.encode(&mut upperValueBuffer)?;
+
+                    dbRawIterator.seek(lowerValueBuffer.as_ref());
+
+                    loop {
+                        let key = dbRawIterator.key();
+                        if key.is_none() {
+                            break;
+                        }
+
+                        let key = key.unwrap();
+
+                        // lowerInclusive应对
+                        if hasBeyondLower == false { //  可以不用都调用 降低成本
+                            if key.starts_with(lowerValueBuffer.as_ref()) {
+                                if lowerInclusive == false {
+                                    dbRawIterator.next();
+                                    continue;
+                                }
+                            } else {
+                                hasBeyondLower = true;
+                            }
+
+                            // 处理
+                            self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
+
+                            dbRawIterator.next();
+                            continue;
+                        }
+
+                        // 有没有到了上限了
+                        if hasBeyondUpper == false {
+                            if key.starts_with(upperValueBuffer.as_ref()) {
+                                if upperInclusive == false {
+                                    break;
+                                }
+
+                                // 处理
+                                self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
+                            } else {
+                                hasBeyondUpper = true;
+                            }
+                        } else {
+                            break;
+                        }
+
+                        dbRawIterator.next();
+                    }
+                }
+                (Some(lowerValue), None) => {
+                    lowerValue.encode(&mut lowerValueBuffer)?;
+
+                    dbRawIterator.seek(lowerValueBuffer.as_ref());
+
+                    loop {
+                        let key = dbRawIterator.key();
+                        if key.is_none() {
+                            break;
+                        }
+
+                        let key = key.unwrap();
+
+                        if hasBeyondLower == false {
+                            if key.starts_with(lowerValueBuffer.as_ref()) {
+                                if lowerInclusive == false {
+                                    dbRawIterator.next();
+                                    continue;
+                                }
+                            } else {
+                                hasBeyondLower = true
+                            }
+
+                            self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
+                        }
+
+
+                        dbRawIterator.next()
+                    }
+                }
+                (None, Some(upperValue)) => {}
+                (None, None) => panic!("impossible")
+            }
+        } else {}
+
+        Ok(())
+    }
+
+    // filterOnRemainingIndexColumns 纵向排列
+    // b>=1 ,c >=0 and c<=6
+    fn processKey(&self, key: &[Byte], isAnd: bool,
+                  opValueVecAcrossIndexColumns: &[Vec<(Op, GraphValue)>]) -> Result<Option<DataKey>> {
+        // key的末尾是dataKey
+        let dataKey = &key[(key.len() - meta::DATA_KEY_BYTE_LEN)..];
+        let dataKey = byte_slice_to_u64!(dataKey) as DataKey;
+
+        // index只有1个的column
+        if opValueVecAcrossIndexColumns.len() == 1 {
+            return Ok(Some(dataKey));
+        }
+
+        // index以表数据读取
+        let indexRowData = &key[..(key.len() - meta::DATA_KEY_BYTE_LEN)];
+        let mut myBytesRowData = MyBytes::from(Bytes::from(Vec::from(indexRowData)));
+        let columnValues = Vec::try_from(&mut myBytesRowData)?;
+        let remainingIndexColValues = &columnValues[1..];
+
+        let opValueVecOnRemaingIndexCols = &opValueVecAcrossIndexColumns[1..];
+
+        assert_eq!(remainingIndexColValues.len(), opValueVecOnRemaingIndexCols.len());
+
+        for (remainingIndexColValue,
+            opValueVecOnRemaingIndexCol) in remainingIndexColValues.iter().zip(opValueVecOnRemaingIndexCols) {
+            for (op, value) in opValueVecOnRemaingIndexCol {
+                let satisfy = remainingIndexColValue.calcOneToOne(*op, value)?.asBoolean()?;
+                if isAnd {
+                    if satisfy == false {
+                        return Ok(None);
+                    }
+                } else {
+                    if satisfy {
+                        return Ok(Some(dataKey));
+                    }
                 }
             }
         }
 
-        Ok(())
+        if isAnd {
+            Ok(Some(dataKey))
+        } else {
+            Ok(None)
+        }
     }
 }
 

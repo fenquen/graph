@@ -77,21 +77,21 @@ impl Expr {
                 let graphValueIndex = leftValue.calc0(op.clone(), &rightValues)?;
 
                 if let GraphValue::IndexUseful { ref columnName, op, ref values } = graphValueIndex {
-                    let mut op_valuesVec = dest.getMutWithDefault(columnName);
+                    let mut opValuesVec = dest.getMutWithDefault(columnName);
 
                     // 拆分掉in
                     if let Op::SqlOp(SqlOp::In) = op {
                         if values.len() == 1 {
-                            op_valuesVec.push((Op::MathCmpOp(MathCmpOp::Equal), values.clone()));
+                            opValuesVec.push((Op::MathCmpOp(MathCmpOp::Equal), values.clone()));
                         } else {  // 要是in有多个的话 需要是or
                             *isAnd = false;
 
                             for value in values {
-                                op_valuesVec.push((Op::MathCmpOp(MathCmpOp::Equal), vec![value.clone()]));
+                                opValuesVec.push((Op::MathCmpOp(MathCmpOp::Equal), vec![value.clone()]));
                             }
                         }
                     } else {
-                        op_valuesVec.push((op, values.clone()));
+                        opValuesVec.push((op, values.clone()));
                     }
                 }
 

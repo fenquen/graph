@@ -184,6 +184,8 @@ impl GraphValue {
     pub const POINT_DESC: GraphValueType = 5;
     pub const NULL: GraphValueType = 6;
 
+    pub const GRAPH_VALUE_DUMMY: GraphValue = GraphValue::Null;
+
     pub fn getDefaultValue(graphValueType: GraphValueType) -> Result<GraphValue> {
         match graphValueType {
             GraphValue::STRING => Ok(GraphValue::String(global::EMPTY_STR.to_owned())),
@@ -280,7 +282,7 @@ impl GraphValue {
     }
 
     /// 目前对不兼容的type之间的大小比较返回false
-    fn calcOneToOne(&self, op: Op, rightValue: &GraphValue) -> Result<GraphValue> {
+    pub fn calcOneToOne(&self, op: Op, rightValue: &GraphValue) -> Result<GraphValue> {
         match op {
             Op::MathCmpOp(mathCmpOp) => {
                 match mathCmpOp {
@@ -457,7 +459,6 @@ impl PartialEq for GraphValue {
 
 impl PartialOrd for GraphValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-
         match (self, other) {
             (GraphValue::String(s), GraphValue::String(s0)) => Some(s.cmp(s0)),
             (GraphValue::Boolean(b), GraphValue::Boolean(b0)) => Some(b.cmp(b0)),

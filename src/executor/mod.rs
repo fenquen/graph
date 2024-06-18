@@ -23,6 +23,7 @@ mod store;
 mod mvcc;
 mod vaccum;
 mod manage;
+mod index;
 
 #[macro_export]
 macro_rules! JSON_ENUM_UNTAGGED {
