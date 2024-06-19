@@ -204,14 +204,14 @@ fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
 }
 
 pub(in crate::executor) fn andWithAccumulated<'a>(op: Op, value: &'a GraphValue,
-                                                  previousAccumulated: Vec<(Op, &'a GraphValue)>) -> Option<Vec<(Op, &'a GraphValue)>> {
+                                                  previousAccumulated: Vec<(Op, &'a GraphValue)>) -> (Option<Vec<(Op, &'a GraphValue)>>, bool) {
+    let mut merged = false;
+
     if previousAccumulated.is_empty() {
-        return Some(vec![(op, value)]);
+        return (Some(vec![(op, value)]), merged);
     }
 
     let mut accumulated = Vec::new();
-
-    let mut merged = false;
 
     // 原先是 [6,16] 来了 a<=7,a>9
     for (previousOp, previousValue) in previousAccumulated {
@@ -220,7 +220,7 @@ pub(in crate::executor) fn andWithAccumulated<'a>(op: Op, value: &'a GraphValue,
         }
 
         match andWithSingle(op, value, previousOp, previousValue) {
-            None => return None, // 说明有 a>0 and a<=0
+            None => return (None, merged), // 说明有 a>0 and a<=0
             Some(andResult) => {
                 if andResult.len() == 1 { // 说明能融合
                     accumulated.push(andResult[0]);
@@ -236,5 +236,5 @@ pub(in crate::executor) fn andWithAccumulated<'a>(op: Op, value: &'a GraphValue,
         accumulated.push((op, value));
     }
 
-    Some(accumulated)
+    (Some(accumulated), merged)
 }

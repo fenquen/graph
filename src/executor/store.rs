@@ -22,6 +22,7 @@ use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUn
 use anyhow::Result;
 use dashmap::mapref::one::Ref;
 use lazy_static::lazy_static;
+use crate::executor::index::AndDesc;
 use crate::executor::mvcc::BytesMutExt;
 use crate::parser::op::{LogicalOp, MathCmpOp, Op, SqlOp};
 use crate::session::Session;
@@ -586,28 +587,92 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 // 应对废话 a>0  a<=0 如果是第1个那么index失效 如果是第2个那么有效范围到1
-                let op_valuesVec = columnNameFromTableFilter_opValuesVec.get(columnNameFromIndex).unwrap();
+                let opValuesVec = columnNameFromTableFilter_opValuesVec.get(columnNameFromIndex).unwrap();
 
-                let mut accumulated = vec![];
+                let mut accumulated = Vec::new();
 
-                for (op, values) in op_valuesVec {
-                    assert!(op.permitByIndex());
-                    assert_eq!(values.len(), 1);
+                if isAnd {
+                    let mut ancestor = AndDesc::default();
+                    // and(opValuesVec, &mut ancestor.children);
+                } else {
+                    for (op, values) in opValuesVec {
+                        assert!(op.permitByIndex());
+                        assert_eq!(values.len(), 1);
 
-                    let value = values.first().unwrap();
-                    assert!(value.isConstant());
+                        let value = values.first().unwrap();
+                        assert!(value.isConstant());
 
-                    let accumulatedNew = if isAnd {
-                        index::andWithAccumulated(*op, value, accumulated)
-                    } else {
-                        index::orWithAccumulated(*op, value, accumulated)
-                    };
+                        let accumulatedNew = if isAnd {
+                            index::andWithAccumulated(*op, value, accumulated)
+                        } else {
+                            index::orWithAccumulated(*op, value, accumulated)
+                        };
 
-                    match accumulatedNew {
-                        Some(accumulatedNew) => accumulated = accumulatedNew,
-                        // 如果and 那么是 a>=0 and a<0 矛盾
-                        // 如果是or 那么是 a>0 or a<=0 这样的废话
-                        None => continue 'loopIndex
+                        match accumulatedNew {
+                            Some(accumulatedNew) => accumulated = accumulatedNew,
+                            // 如果and 那么是 a>=0 and a<0 矛盾
+                            // 如果是or 那么是 a>0 or a<=0 这样的废话
+                            None => continue 'loopIndex
+                        }
+                    }
+                }
+
+
+                fn and(opValuesVec: &[(Op, Vec<GraphValue>)], parent: &AndDesc, dest: &mut Vec<AndDesc>) {
+                    //  let mut index = 0usize;
+
+                    for (op, values) in opValuesVec {
+                        if values.len() > 1 {
+                            assert_eq!(op, Op::SqlOp(SqlOp::In));
+
+                            // 如果in出现在了 and 体系 那么 各个单独的脉络是and 且result必然是equal 脉络之间是and
+                            for value in values {
+                                let mut andDesc = AndDesc::default();
+                                andDesc.parent = Some(parent);
+                                andDesc.op = Some(Op::MathCmpOp(MathCmpOp::Equal));
+                                andDesc.value = Some(value.clone());
+
+                                // 不是last元素
+                                if opValuesVec.len() - 1 > 0 {
+                                    // 收纳小弟
+                                    and(&opValuesVec[1..], &andDesc, dest);
+                                } else {
+                                    dest.push(andDesc);
+                                }
+
+                                //   belongingChildren.push(Box::new(andDesc));
+
+                                // and脉络
+                                // if let (Some(accumulatedNew), _) = index::andWithAccumulated(Op::MathCmpOp(MathCmpOp::Equal), value, accumulated.clone()) {
+                                //   assert_eq!(accumulatedNew.len(), 1);
+
+                                // let (op, value) = accumulatedNew[0];
+                                //assert_eq!(op, Op::MathCmpOp(MathCmpOp::Equal));
+                                //}
+                            }
+                        } else {
+                            assert_eq!(values.len(), 1);
+                            let value = values.first().unwrap();
+                            assert!(value.isConstant());
+
+                            let mut andDesc = AndDesc::default();
+                            andDesc.parent = Some(parent);
+                            andDesc.op = Some(*op);
+                            andDesc.value = Some(value.clone());
+
+                            // 不是last元素
+                            if opValuesVec.len() - 1 > 0 {
+                                // 收纳小弟
+                                and(&opValuesVec[1..], &andDesc, dest);
+                            } else {
+                                dest.push(andDesc);
+                            }
+
+
+                            //index::andWithAccumulated(*op, value, accumulated)
+                        }
+
+                        //  suffix_plus_plus!(index);
                     }
                 }
 
@@ -1011,8 +1076,18 @@ impl<'session> CommandExecutor<'session> {
             let mut lowerValueBuffer = BytesMut::new();
             let mut upperValueBuffer = BytesMut::new();
 
-            let mut hasBeyondLower = false;
-            let mut hasBeyondUpper = false;
+            macro_rules! getKeyIfSome {
+                ($dbRawIterator:expr) => {
+                    {
+                        let key = $dbRawIterator.key();
+                        if key.is_none() {
+                            break;
+                        }
+
+                        key.unwrap()
+                    }
+                };
+            }
 
             match (lowerValue, upperValue) {
                 (Some(lowerValue), Some(upperValue)) => {
@@ -1021,63 +1096,54 @@ impl<'session> CommandExecutor<'session> {
 
                     dbRawIterator.seek(lowerValueBuffer.as_ref());
 
-                    loop {
-                        let key = dbRawIterator.key();
-                        if key.is_none() {
-                            break;
-                        }
+                    let mut hasBeyondLower = false;
 
-                        let key = key.unwrap();
+                    loop {
+                        let key = getKeyIfSome!(dbRawIterator);
 
                         // lowerInclusive应对
-                        if hasBeyondLower == false { //  可以不用都调用 降低成本
+                        // 使用这个变量的原因是 减少遍历过程中对start_with的调用 要是两边都很大的话成本不小
+                        if hasBeyondLower == false {
                             if key.starts_with(lowerValueBuffer.as_ref()) {
                                 if lowerInclusive == false {
                                     dbRawIterator.next();
                                     continue;
                                 }
-                            } else {
-                                hasBeyondLower = true;
-                            }
-
-                            // 处理
-                            self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
-
-                            dbRawIterator.next();
-                            continue;
-                        }
-
-                        // 有没有到了上限了
-                        if hasBeyondUpper == false {
-                            if key.starts_with(upperValueBuffer.as_ref()) {
-                                if upperInclusive == false {
-                                    break;
-                                }
 
                                 // 处理
                                 self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
+
+                                dbRawIterator.next();
+                                continue;
                             } else {
-                                hasBeyondUpper = true;
+                                // 应该经历下边的upper上限的check
+                                hasBeyondLower = true;
+                            }
+                        }
+
+                        // 有没有到了上限了
+                        if key.starts_with(upperValueBuffer.as_ref()) {
+                            if upperInclusive == false {
+                                break;
                             }
                         } else {
                             break;
                         }
+
+                        // 处理
+                        self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
 
                         dbRawIterator.next();
                     }
                 }
                 (Some(lowerValue), None) => {
                     lowerValue.encode(&mut lowerValueBuffer)?;
-
                     dbRawIterator.seek(lowerValueBuffer.as_ref());
 
-                    loop {
-                        let key = dbRawIterator.key();
-                        if key.is_none() {
-                            break;
-                        }
+                    let mut hasBeyondLower = false;
 
-                        let key = key.unwrap();
+                    loop {
+                        let key = getKeyIfSome!(dbRawIterator);
 
                         if hasBeyondLower == false {
                             if key.starts_with(lowerValueBuffer.as_ref()) {
@@ -1088,18 +1154,48 @@ impl<'session> CommandExecutor<'session> {
                             } else {
                                 hasBeyondLower = true
                             }
-
-                            self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
                         }
 
+                        self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
 
                         dbRawIterator.next()
                     }
                 }
-                (None, Some(upperValue)) => {}
+                (None, Some(upperValue)) => {
+                    upperValue.encode(&mut upperValueBuffer)?;
+                    dbRawIterator.seek_for_prev(upperValueBuffer.as_ref());
+
+                    let mut startWithUpper = true;
+
+                    loop {
+                        let key = getKeyIfSome!(dbRawIterator);
+
+                        if startWithUpper {
+                            if key.starts_with(upperValueBuffer.as_ref()) {
+                                if upperInclusive == false {
+                                    dbRawIterator.next();
+                                    continue;
+                                }
+                            } else {
+                                startWithUpper = false;
+                            }
+                        }
+
+                        self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
+
+                        dbRawIterator.prev();
+                    }
+                }
                 (None, None) => panic!("impossible")
             }
-        } else {}
+        } else {
+            for (op, value) in opValueVecOnIndex1stColumn {
+                assert!(op.permitByIndex());
+                match op {
+                    _ => {}
+                }
+            }
+        }
 
         Ok(())
     }

@@ -79,16 +79,16 @@ impl Expr {
                 if let GraphValue::IndexUseful { ref columnName, op, ref values } = graphValueIndex {
                     let mut opValuesVec = dest.getMutWithDefault(columnName);
 
-                    // 拆分掉in
                     if let Op::SqlOp(SqlOp::In) = op {
+                        // 如果in的对象只有1个 那么是equal
                         if values.len() == 1 {
                             opValuesVec.push((Op::MathCmpOp(MathCmpOp::Equal), values.clone()));
-                        } else {  // 要是in有多个的话 需要是or
-                            *isAnd = false;
-
+                        } else if *isAnd == false {
                             for value in values {
                                 opValuesVec.push((Op::MathCmpOp(MathCmpOp::Equal), vec![value.clone()]));
                             }
+                        } else {
+                            opValuesVec.push((op, values.clone()));
                         }
                     } else {
                         opValuesVec.push((op, values.clone()));

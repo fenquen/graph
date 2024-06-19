@@ -204,28 +204,28 @@ fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
 }
 
 pub(in crate::executor) fn orWithAccumulated<'a>(op: Op, value: &'a GraphValue,
-                                                 previousAccumulated: Vec<(Op, &'a GraphValue)>) -> Option<Vec<(Op, &'a GraphValue)>> {
+                                                 previousAccumulated: Vec<(Op, &'a GraphValue)>) -> (Option<Vec<(Op, &'a GraphValue)>>, bool) {
+    let mut merged = false;
+
     // 第1趟
     if previousAccumulated.is_empty() {
-        return Some(vec![(op, value)]);
+        return (Some(vec![(op, value)]), merged);
     }
 
     let mut accumulated = Vec::with_capacity(previousAccumulated.len());
 
-    let mut hasMerged = false;
-
     for (previousOp, previousValue) in previousAccumulated {
-        if hasMerged {
+        if merged {
             accumulated.push((previousOp, previousValue));
             continue;
         }
 
         match orWithSingle(op, value, previousOp, previousValue) {
-            None => return None, // 说明有 a<0 or a>=0 类似的废话出现了
+            None => return (None, merged), // 说明有 a<0 or a>=0 类似的废话出现了
             Some(orResult) => {
                 if orResult.len() == 1 { // 说明能融合
                     accumulated.push(orResult[0]);
-                    hasMerged = true;
+                    merged = true;
                 } else {
                     accumulated.push((previousOp, previousValue));
                 }
@@ -233,9 +233,9 @@ pub(in crate::executor) fn orWithAccumulated<'a>(op: Op, value: &'a GraphValue,
         }
     }
 
-    if hasMerged == false {
+    if merged == false {
         accumulated.push((op, value));
     }
 
-    Some(accumulated)
+    (Some(accumulated), merged)
 }
