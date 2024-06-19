@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Range, RangeFrom};
 use std::sync::atomic::Ordering;
 use std::{mem, thread};
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
 use bytes::{Bytes, BytesMut};
@@ -29,11 +30,11 @@ use crate::session::Session;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
 pub(super) struct ScanHooks<A, B, C, D>
-where
-    A: ScanCommittedPreProcessor,
-    B: ScanCommittedPostProcessor,
-    C: ScanUncommittedPreProcessor,
-    D: ScanUncommittedPostProcessor,
+    where
+        A: ScanCommittedPreProcessor,
+        B: ScanCommittedPostProcessor,
+        C: ScanUncommittedPreProcessor,
+        D: ScanUncommittedPostProcessor,
 {
     /// 融合filter读取到committed RowData 前
     pub(super) scanCommittedPreProcessor: Option<A>,
@@ -62,9 +63,9 @@ impl Default for ScanHooks<
 }
 
 pub struct SearchPointerKeyHooks<A, B>
-where
-    A: CommittedPointerKeyProcessor,
-    B: UncommittedPointerKeyProcessor,
+    where
+        A: CommittedPointerKeyProcessor,
+        B: UncommittedPointerKeyProcessor,
 {
     pub(super) committedPointerKeyProcessor: Option<A>,
     pub(super) uncommittedPointerKeyProcessor: Option<B>,
@@ -208,11 +209,11 @@ impl<'session> CommandExecutor<'session> {
                                                 scanParams: ScanParams,
                                                 select: bool,
                                                 mut scanHooks: ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
-    where
-        A: ScanCommittedPreProcessor,
-        B: ScanCommittedPostProcessor,
-        C: ScanUncommittedPreProcessor,
-        D: ScanUncommittedPostProcessor,
+        where
+            A: ScanCommittedPreProcessor,
+            B: ScanCommittedPostProcessor,
+            C: ScanUncommittedPreProcessor,
+            D: ScanUncommittedPostProcessor,
     {
 
         // todo 使用table id 为 column family 标识
@@ -580,7 +581,7 @@ impl<'session> CommandExecutor<'session> {
             // index的各个的column上的表达式的集合
             let mut opValueVecAcrossIndexColumns = Vec::with_capacity(index.columnNames.len());
 
-            'loopColumnNameFromIndex: // 遍历index的各columnName
+            // 遍历index的各columnName
             for columnNameFromIndex in &index.columnNames {
                 if columnNamesFromTableFilter.contains(&columnNameFromIndex) == false {
                     break;
@@ -591,9 +592,36 @@ impl<'session> CommandExecutor<'session> {
 
                 let mut accumulated = Vec::new();
 
+                // 收集了全部的leaf node到时候遍历溯源
+                let mut dest = Vec::new();
+                let mut opValueVecVec = Vec::new();
+
                 if isAnd {
-                    let mut ancestor = AndDesc::default();
-                    // and(opValuesVec, &mut ancestor.children);
+                    let ancestor = Rc::new(AndDesc::default());
+
+                    and(opValuesVec, ancestor, &mut dest);
+
+                    // 对各个的leaf遍历
+                    for leaf in &dest {
+                        let mut opValueVec = Vec::new();
+
+                        let mut current = leaf;
+
+                        if let (Some(op), Some(value)) = (current.op, &current.value) {
+                            opValueVec.push((op, value))
+                        }
+
+                        while let Some(parent) = current.parent.as_ref() {
+                            if let (Some(op), Some(value)) = (parent.op, &parent.value) {
+                                opValueVec.push((op, value))
+                            }
+
+                            current = parent;
+                        }
+
+                        // 各个的opValueVec 它们之间是or的,opValueVec的各个元素是and的
+                        opValueVecVec.push(opValueVec)
+                    }
                 } else {
                     for (op, values) in opValuesVec {
                         assert!(op.permitByIndex());
@@ -602,7 +630,7 @@ impl<'session> CommandExecutor<'session> {
                         let value = values.first().unwrap();
                         assert!(value.isConstant());
 
-                        let accumulatedNew = if isAnd {
+                        let (accumulatedNew, merged) = if isAnd {
                             index::andWithAccumulated(*op, value, accumulated)
                         } else {
                             index::orWithAccumulated(*op, value, accumulated)
@@ -617,61 +645,44 @@ impl<'session> CommandExecutor<'session> {
                     }
                 }
 
-                fn and(opValuesVec: &[(Op, Vec<GraphValue>)], parent: &AndDesc, dest: &mut Vec<AndDesc>) {
-                    //  let mut index = 0usize;
-
+                // 生成向上溯源的树 因为它只有parent
+                fn and(opValuesVec: &[(Op, Vec<GraphValue>)], parent: Rc<AndDesc>, dest: &mut Vec<AndDesc>) {
                     for (op, values) in opValuesVec {
                         if values.len() > 1 {
-                            assert_eq!(op, Op::SqlOp(SqlOp::In));
+                            // assert_eq!(*op, Op::SqlOp(SqlOp::In));
 
                             // 如果in出现在了 and 体系 那么 各个单独的脉络是and 且result必然是equal 脉络之间是and
                             for value in values {
                                 let mut andDesc = AndDesc::default();
-                                andDesc.parent = Some(parent);
+                                andDesc.parent = Some(parent.clone());
                                 andDesc.op = Some(Op::MathCmpOp(MathCmpOp::Equal));
                                 andDesc.value = Some(value.clone());
 
                                 // 不是last元素
-                                if opValuesVec.len() - 1 > 0 {
+                                if opValuesVec.len() > 1 {
                                     // 收纳小弟
-                                    and(&opValuesVec[1..], &andDesc, dest);
+                                    and(&opValuesVec[1..], Rc::new(andDesc), dest);
                                 } else {
                                     dest.push(andDesc);
                                 }
-
-                                //   belongingChildren.push(Box::new(andDesc));
-
-                                // and脉络
-                                // if let (Some(accumulatedNew), _) = index::andWithAccumulated(Op::MathCmpOp(MathCmpOp::Equal), value, accumulated.clone()) {
-                                //   assert_eq!(accumulatedNew.len(), 1);
-
-                                // let (op, value) = accumulatedNew[0];
-                                //assert_eq!(op, Op::MathCmpOp(MathCmpOp::Equal));
-                                //}
                             }
                         } else {
-                            assert_eq!(values.len(), 1);
                             let value = values.first().unwrap();
                             assert!(value.isConstant());
 
                             let mut andDesc = AndDesc::default();
-                            andDesc.parent = Some(parent);
+                            andDesc.parent = Some(parent.clone());
                             andDesc.op = Some(*op);
                             andDesc.value = Some(value.clone());
 
                             // 不是last元素
-                            if opValuesVec.len() - 1 > 0 {
+                            if opValuesVec.len() > 1 {
                                 // 收纳小弟
-                                and(&opValuesVec[1..], &andDesc, dest);
+                                and(&opValuesVec[1..], Rc::new(andDesc), dest);
                             } else {
                                 dest.push(andDesc);
                             }
-
-
-                            //index::andWithAccumulated(*op, value, accumulated)
                         }
-
-                        //  suffix_plus_plus!(index);
                     }
                 }
 
@@ -894,9 +905,9 @@ impl<'session> CommandExecutor<'session> {
     // todo pointerKey应该同时到committed和uncommitted去搜索
     pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
-    where
-        A: CommittedPointerKeyProcessor,
-        B: UncommittedPointerKeyProcessor,
+        where
+            A: CommittedPointerKeyProcessor,
+            B: UncommittedPointerKeyProcessor,
     {
         let mut keys = Vec::new();
 

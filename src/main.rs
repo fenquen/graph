@@ -29,10 +29,7 @@ use crate::session::Session;
 #[tokio::main]
 pub async fn main() -> Result<()> {
     log4rs::init_file(config::CONFIG.log4RsYamlPath.as_str(), Default::default())?;
-
     meta::init()?;
-
     ws::init().await?;
-
     Ok(())
 }

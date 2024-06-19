@@ -1,6 +1,7 @@
 pub(super) mod or;
 pub(super) mod and;
 
+use std::rc::Rc;
 use serde_json::Value;
 pub(super) use and::andWithAccumulated;
 pub(super) use or::orWithAccumulated;
@@ -70,8 +71,8 @@ fn a(opValueVec: &[(Op, GraphValue)], logical: Logical) -> Option<Vec<(Op, &Grap
 }
 
 #[derive(Default)]
-pub struct AndDesc<'a> {
-    pub parent: Option<&'a AndDesc<'a>>,
+pub struct AndDesc {
+    pub parent: Option<Rc<AndDesc>>,
     pub op: Option<Op>,
     pub value: Option<GraphValue>,
    // pub children: Vec<Box<AndDesc<'a>>>,
