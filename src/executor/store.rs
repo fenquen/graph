@@ -617,7 +617,6 @@ impl<'session> CommandExecutor<'session> {
                     }
                 }
 
-
                 fn and(opValuesVec: &[(Op, Vec<GraphValue>)], parent: &AndDesc, dest: &mut Vec<AndDesc>) {
                     //  let mut index = 0usize;
 
