@@ -1,6 +1,7 @@
 pub(super) mod or;
 pub(super) mod and;
 
+use std::ops::Deref;
 use std::rc::Rc;
 use serde_json::Value;
 pub(super) use and::andWithAccumulated;
@@ -17,15 +18,15 @@ pub enum Logical {
     And,
 }
 
-pub fn aa(selfOpValueVec: &[(Op, GraphValue)], selfLogical: Logical,
+pub fn aa<T: Deref<Target=GraphValue>>(selfOpValueVec: &[(Op, T)], selfLogical: Logical,
           betweenLogical: Logical,
-          targetOpValueVec: &[(Op, GraphValue)], targerLogical: Logical) {
-    let selfOpValueVec = match a(selfOpValueVec, selfLogical) {
+          targetOpValueVec: &[(Op, T)], targerLogical: Logical) {
+    let selfOpValueVec = match accumulate(selfOpValueVec, selfLogical) {
         Some(selfOpValueVec) => selfOpValueVec,
         None => return
     };
 
-    let targetOpValueVec = match a(targetOpValueVec, targerLogical) {
+    let targetOpValueVec = match accumulate(targetOpValueVec, targerLogical) {
         Some(targetOpValueVec) => targetOpValueVec,
         None => return
     };
@@ -46,16 +47,24 @@ pub fn aa(selfOpValueVec: &[(Op, GraphValue)], selfLogical: Logical,
     }
 }
 
-fn a(opValueVec: &[(Op, GraphValue)], logical: Logical) -> Option<Vec<(Op, &GraphValue)>> {
+pub(super) fn accumulateOr<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Option<Vec<(Op, &GraphValue)>> {
+    accumulate(opValueVec, Logical::Or)
+}
+
+pub(super) fn accumulateAnd<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Option<Vec<(Op, &GraphValue)>> {
+    accumulate(opValueVec, Logical::And)
+}
+
+fn accumulate<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)], logical: Logical) -> Option<Vec<(Op, &GraphValue)>> {
     let mut selfAccumulated = Vec::new();
 
-    for (selfOp, selfValue) in opValueVec {
+    for (op, value) in opValueVec {
         let (selfAccumulatedNew, _) = match logical {
             Logical::Or => {
-                orWithAccumulated(*selfOp, selfValue, selfAccumulated)
+                orWithAccumulated(*op, &**value, selfAccumulated)
             }
             Logical::And => {
-                andWithAccumulated(*selfOp, selfValue, selfAccumulated)
+                andWithAccumulated(*op, &**value, selfAccumulated)
             }
         };
 
@@ -71,11 +80,11 @@ fn a(opValueVec: &[(Op, GraphValue)], logical: Logical) -> Option<Vec<(Op, &Grap
 }
 
 #[derive(Default)]
-pub struct AndDesc {
-    pub parent: Option<Rc<AndDesc>>,
+pub struct AndDesc<'a> {
+    pub parent: Option<Rc<AndDesc<'a>>>,
     pub op: Option<Op>,
-    pub value: Option<GraphValue>,
-   // pub children: Vec<Box<AndDesc<'a>>>,
+    pub value: Option<&'a GraphValue>,
+    // pub children: Vec<Box<AndDesc<'a>>>,
 }
 
 #[derive(Default)]
@@ -107,4 +116,14 @@ impl<'a, T> Iterator for VirtualSlice<'a, T> {
             None => None,
         }
     }
+}
+
+#[macro_export]
+macro_rules! extractDataKeyFromIndexKey {
+    ($indexKey: expr) => {
+        {
+            let dataKey = &$indexKey[($indexKey.len() - meta::DATA_KEY_BYTE_LEN)..];
+            byte_slice_to_u64!(dataKey) as types::DataKey
+        }
+    };
 }

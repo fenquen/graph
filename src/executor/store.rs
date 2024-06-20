@@ -10,7 +10,7 @@ use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, index, IterationCmd};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey};
+use crate::{byte_slice_to_u64, extractDataKeyFromIndexKey, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey};
 use crate::{keyPrefixAddRowId, suffix_plus_plus, throw, u64ToByteArrRef, prefix_plus_plus, throwFormat};
 use crate::{global, meta, types, utils};
 use crate::codec::{BinaryCodec, MyBytes};
@@ -30,11 +30,11 @@ use crate::session::Session;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
 pub(super) struct ScanHooks<A, B, C, D>
-    where
-        A: ScanCommittedPreProcessor,
-        B: ScanCommittedPostProcessor,
-        C: ScanUncommittedPreProcessor,
-        D: ScanUncommittedPostProcessor,
+where
+    A: ScanCommittedPreProcessor,
+    B: ScanCommittedPostProcessor,
+    C: ScanUncommittedPreProcessor,
+    D: ScanUncommittedPostProcessor,
 {
     /// 融合filter读取到committed RowData 前
     pub(super) scanCommittedPreProcessor: Option<A>,
@@ -63,9 +63,9 @@ impl Default for ScanHooks<
 }
 
 pub struct SearchPointerKeyHooks<A, B>
-    where
-        A: CommittedPointerKeyProcessor,
-        B: UncommittedPointerKeyProcessor,
+where
+    A: CommittedPointerKeyProcessor,
+    B: UncommittedPointerKeyProcessor,
 {
     pub(super) committedPointerKeyProcessor: Option<A>,
     pub(super) uncommittedPointerKeyProcessor: Option<B>,
@@ -110,7 +110,7 @@ impl<'Table> Default for ScanParams<'Table, '_, '_> {
 struct IndexSearch<'a> {
     dbObjectIndex: Ref<'a, String, DBObject>,
     /// 包含的grapgValue 只可能是 IndexUseful
-    opValueVecAcrossIndexColumns: Vec<Vec<(Op, GraphValue)>>,
+    opValueVecVecAcrossIndexColumns: Vec<Vec<Vec<(Op, GraphValue)>>>,
     isAnd: bool,
 }
 
@@ -209,11 +209,11 @@ impl<'session> CommandExecutor<'session> {
                                                 scanParams: ScanParams,
                                                 select: bool,
                                                 mut scanHooks: ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
-        where
-            A: ScanCommittedPreProcessor,
-            B: ScanCommittedPostProcessor,
-            C: ScanUncommittedPreProcessor,
-            D: ScanUncommittedPostProcessor,
+    where
+        A: ScanCommittedPreProcessor,
+        B: ScanCommittedPostProcessor,
+        C: ScanUncommittedPreProcessor,
+        D: ScanUncommittedPostProcessor,
     {
 
         // todo 使用table id 为 column family 标识
@@ -579,7 +579,7 @@ impl<'session> CommandExecutor<'session> {
             let mut columnNamesFromIndexUsed = Vec::with_capacity(index.columnNames.len());
 
             // index的各个的column上的表达式的集合
-            let mut opValueVecAcrossIndexColumns = Vec::with_capacity(index.columnNames.len());
+            let mut opValueVecVecAcrossIndexColumns = Vec::with_capacity(index.columnNames.len());
 
             // 遍历index的各columnName
             for columnNameFromIndex in &index.columnNames {
@@ -588,65 +588,88 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 // 应对废话 a>0  a<=0 如果是第1个那么index失效 如果是第2个那么有效范围到1
+                // 它是下边的&Graph源头
                 let opValuesVec = columnNameFromTableFilter_opValuesVec.get(columnNameFromIndex).unwrap();
 
-                let mut accumulated = Vec::new();
-
-                // 收集了全部的leaf node到时候遍历溯源
-                let mut dest = Vec::new();
-                let mut opValueVecVec = Vec::new();
 
                 if isAnd {
+                    // 收集了全部的leaf node到时候遍历溯源
+                    let mut leafVec = Vec::new();
+                    // and体系下的各个的and脉络 对应 opValueVecVec 的各个 opValueVec ,opValueVec之间是or
+                    let mut opValueVecVec = Vec::new();
+
                     let ancestor = Rc::new(AndDesc::default());
 
-                    and(opValuesVec, ancestor, &mut dest);
+                    and(opValuesVec, ancestor, &mut leafVec);
 
                     // 对各个的leaf遍历
-                    for leaf in &dest {
+                    for leaf in &leafVec {
                         let mut opValueVec = Vec::new();
 
                         let mut current = leaf;
 
                         if let (Some(op), Some(value)) = (current.op, &current.value) {
-                            opValueVec.push((op, value))
+                            opValueVec.push((op, *value))
                         }
 
+                        // 不断的向上
                         while let Some(parent) = current.parent.as_ref() {
                             if let (Some(op), Some(value)) = (parent.op, &parent.value) {
-                                opValueVec.push((op, value))
+                                opValueVec.push((op, *value))
                             }
 
                             current = parent;
                         }
 
-                        // 各个的opValueVec 它们之间是or的,opValueVec的各个元素是and的
-                        opValueVecVec.push(opValueVec)
+                        // 各个的opValueVec 它们之间是or的,opValueVec内部的各个元素是and的
+                        opValueVecVec.push(opValueVec);
                     }
+
+                    //  对麾下的各个的and脉络压缩
+                    let opValueVecVec: Vec<Vec<(Op, &GraphValue)>> =
+                        opValueVecVec.iter().filter_map(|opValueVec| index::accumulateAnd(opValueVec.as_slice())).collect();
+
+                    if opValueVecVec.is_empty() {
+                        continue 'loopIndex;
+                    }
+
+                    // 如果到这边打算收场的话 莫忘了将&GraphValue变为GraphValue
+                    let opValueVecVec: Vec<Vec<(Op, GraphValue)>> =
+                        opValueVecVec.iter().map(|opValueVec| {
+                            opValueVec.iter().map(|(op, &value)| {
+                                (*op, value.clone())
+                            }).collect()
+                        }).collect();
+
+                    opValueVecVecAcrossIndexColumns.push(opValueVecVec);
+
+                    // 尝试or压缩 (a and b) or (c and d) 不太容易 应对 (a and b)和(c and d) 之间重复的部分
                 } else {
-                    for (op, values) in opValuesVec {
+                    let opValueVec: Vec<(Op, &GraphValue)> = opValuesVec.iter().map(|(op, values)| {
                         assert!(op.permitByIndex());
                         assert_eq!(values.len(), 1);
 
                         let value = values.first().unwrap();
                         assert!(value.isConstant());
 
-                        let (accumulatedNew, merged) = if isAnd {
-                            index::andWithAccumulated(*op, value, accumulated)
-                        } else {
-                            index::orWithAccumulated(*op, value, accumulated)
-                        };
+                        (*op, value)
+                    }).collect();
 
-                        match accumulatedNew {
-                            Some(accumulatedNew) => accumulated = accumulatedNew,
-                            // 如果and 那么是 a>=0 and a<0 矛盾
-                            // 如果是or 那么是 a>0 or a<=0 这样的废话
-                            None => continue 'loopIndex
-                        }
-                    }
+                    let accumulatedOr = match index::accumulateOr(opValueVec.as_slice()) {
+                        Some(accumulated) => accumulated,
+                        // 如果and 那么是 a>=0 and a<0 矛盾
+                        // 如果是or 那么是 a>0 or a<=0 这样的废话
+                        None => continue 'loopIndex
+                    };
+
+                    let accumulatedOr: Vec<(Op, GraphValue)> = accumulatedOr.into_iter().map(|(op, value)| { (op, value.clone()) }).collect();
+                    opValueVecVecAcrossIndexColumns.push(vec![accumulatedOr]);
+
+                    columnNamesFromIndexUsed.push(columnNameFromIndex.clone());
                 }
 
                 // 生成向上溯源的树 因为它只有parent
-                fn and(opValuesVec: &[(Op, Vec<GraphValue>)], parent: Rc<AndDesc>, dest: &mut Vec<AndDesc>) {
+                fn and<'a>(opValuesVec: &'a [(Op, Vec<GraphValue>)], parent: Rc<AndDesc<'a>>, leafVec: &mut Vec<AndDesc<'a>>) {
                     for (op, values) in opValuesVec {
                         if values.len() > 1 {
                             // assert_eq!(*op, Op::SqlOp(SqlOp::In));
@@ -656,14 +679,14 @@ impl<'session> CommandExecutor<'session> {
                                 let mut andDesc = AndDesc::default();
                                 andDesc.parent = Some(parent.clone());
                                 andDesc.op = Some(Op::MathCmpOp(MathCmpOp::Equal));
-                                andDesc.value = Some(value.clone());
+                                andDesc.value = Some(value);
 
                                 // 不是last元素
                                 if opValuesVec.len() > 1 {
                                     // 收纳小弟
-                                    and(&opValuesVec[1..], Rc::new(andDesc), dest);
+                                    and(&opValuesVec[1..], Rc::new(andDesc), leafVec);
                                 } else {
-                                    dest.push(andDesc);
+                                    leafVec.push(andDesc);
                                 }
                             }
                         } else {
@@ -673,23 +696,18 @@ impl<'session> CommandExecutor<'session> {
                             let mut andDesc = AndDesc::default();
                             andDesc.parent = Some(parent.clone());
                             andDesc.op = Some(*op);
-                            andDesc.value = Some(value.clone());
+                            andDesc.value = Some(value);
 
                             // 不是last元素
                             if opValuesVec.len() > 1 {
                                 // 收纳小弟
-                                and(&opValuesVec[1..], Rc::new(andDesc), dest);
+                                and(&opValuesVec[1..], Rc::new(andDesc), leafVec);
                             } else {
-                                dest.push(andDesc);
+                                leafVec.push(andDesc);
                             }
                         }
                     }
                 }
-
-                let accumulated: Vec<(Op, GraphValue)> = accumulated.into_iter().map(|(op, value)| { (op, value.clone()) }).collect();
-                opValueVecAcrossIndexColumns.push(accumulated);
-
-                columnNamesFromIndexUsed.push(columnNameFromIndex.clone());
             }
 
             if columnNamesFromIndexUsed.is_empty() {
@@ -697,20 +715,20 @@ impl<'session> CommandExecutor<'session> {
             }
 
             // 不能直接放index 因为它是来源dbObject的 而for 循环结束后dbObject销毁了
-            candiateInices.push((columnNamesFromIndexUsed, dbObjectIndex, opValueVecAcrossIndexColumns));
+            candiateInices.push((columnNamesFromIndexUsed, dbObjectIndex, opValueVecVecAcrossIndexColumns));
         }
-
-        // columnFromIndexUsedCount 由大到小排序 选大的
-        candiateInices.sort_by(|a, b| { b.0.cmp(&a.0) });
 
         if candiateInices.is_empty() {
             return Ok(None);
         }
 
+        // columnFromIndexUsedCount 由大到小排序 选大的
+        candiateInices.sort_by(|a, b| { b.0.len().cmp(&a.0.len()) });
+
         // 目前的话实现的比较粗糙,排前头的几个要是columnFromIndexUsedCount大小相同 选第1个
         let (columnNamesFromIndexUsed,
             dbObjectIndex,
-            opValueVecAcrossIndexColumns) = candiateInices.remove(0);
+            opValueVecVecAcrossIndexColumns) = candiateInices.remove(0);
 
         // value 和 column的type是不是匹配
         for index in 0..columnNamesFromIndexUsed.len() {
@@ -720,12 +738,14 @@ impl<'session> CommandExecutor<'session> {
                     continue;
                 }
 
-                let opValueVec = opValueVecAcrossIndexColumns.get(index).unwrap();
+                let opValueVecVec = opValueVecVecAcrossIndexColumns.get(index).unwrap();
 
-                for (_, value) in opValueVec {
-                    if column.type0.compatible(value) == false {
-                        throwFormat!("table: {}, column:{}, type:{} is not compatible with value:{}",
+                for opValueVec in opValueVecVec {
+                    for (_, value) in opValueVec {
+                        if column.type0.compatible(value) == false {
+                            throwFormat!("table: {}, column:{}, type:{} is not compatible with value:{}",
                                 table.name, columnNameFromIndexUsed, column.type0, value)
+                        }
                     }
                 }
             }
@@ -733,7 +753,7 @@ impl<'session> CommandExecutor<'session> {
 
         let indexSearch = IndexSearch {
             dbObjectIndex,
-            opValueVecAcrossIndexColumns,
+            opValueVecVecAcrossIndexColumns,
             isAnd,
         };
 
@@ -905,9 +925,9 @@ impl<'session> CommandExecutor<'session> {
     // todo pointerKey应该同时到committed和uncommitted去搜索
     pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
-        where
-            A: CommittedPointerKeyProcessor,
-            B: UncommittedPointerKeyProcessor,
+    where
+        A: CommittedPointerKeyProcessor,
+        B: UncommittedPointerKeyProcessor,
     {
         let mut keys = Vec::new();
 
@@ -1039,170 +1059,219 @@ impl<'session> CommandExecutor<'session> {
         let table = tableObject.asTable()?;
 
         // seek那都是要以index的第1个column为切入的, 后边的column是在index数据基础上的筛选
-        let opValueVecOnIndex1stColumn = indexSearch.opValueVecAcrossIndexColumns.first().unwrap();
+        let opValueVecVecOnIndex1stColumn = indexSearch.opValueVecVecAcrossIndexColumns.first().unwrap();
 
-        let mut dataKeys: Vec<DataKey> = Vec::new();
+        let mut dataKeys: HashSet<DataKey> = HashSet::new();
 
-        if indexSearch.isAnd {
-            // 需要框选 上下的范围
-            assert!(opValueVecOnIndex1stColumn.len() <= 2);
+        // 需要框选 上下的范围
+        // assert!(opValueVecVecOnIndex1stColumn.len() <= 2);
 
-            let mut lowerValue = None;
-            let mut lowerInclusive = false;
-            let mut upperValue = None;
-            let mut upperInclusive = false;
+        let mut lowerValueBuffer = BytesMut::new();
+        let mut upperValueBuffer = BytesMut::new();
 
-            for (op, value) in opValueVecOnIndex1stColumn {
-                assert!(op.permitByIndex());
-                assert!(value.isConstant());
+        let mut buffer = BytesMut::new();
 
-                match op {
-                    Op::MathCmpOp(MathCmpOp::Equal) => {
-                        lowerValue = Some(value);
-                        lowerInclusive = true;
-                        upperValue = Some(value);
-                        upperInclusive = true;
+        // opValueVecOnIndex1stColumn 之间不管isAnd如何都是 or
+        for opValueVecOnIndex1stColumn in opValueVecVecOnIndex1stColumn {
+            // opValueVecOnIndex1stColumn 的各个元素(opValueVec)之间是 and 还是 or 取决 isAnd
+            if indexSearch.isAnd {
+                let mut lowerValue = None;
+                let mut lowerInclusive = false;
+                let mut upperValue = None;
+                let mut upperInclusive = false;
+
+                // opValueVec 上的各个筛选条件之间是and 而且已经压缩过的了
+                for (op, value) in opValueVecOnIndex1stColumn {
+                    assert!(op.permitByIndex());
+                    assert!(value.isConstant());
+
+                    match op {
+                        Op::MathCmpOp(MathCmpOp::Equal) => {
+                            lowerValue = Some(value);
+                            lowerInclusive = true;
+                            upperValue = Some(value);
+                            upperInclusive = true;
+                        }
+                        Op::MathCmpOp(MathCmpOp::GreaterThan) => {
+                            lowerValue = Some(value);
+                            lowerInclusive = false;
+                        }
+                        Op::MathCmpOp(MathCmpOp::GreaterEqual) => {
+                            lowerValue = Some(value);
+                            lowerInclusive = true;
+                        }
+                        Op::MathCmpOp(MathCmpOp::LessEqual) => {
+                            upperValue = Some(value);
+                            upperInclusive = true;
+                        }
+                        Op::MathCmpOp(MathCmpOp::LessThan) => {
+                            upperValue = Some(value);
+                            upperInclusive = false;
+                        }
+                        _ => panic!("impossible")
                     }
-                    Op::MathCmpOp(MathCmpOp::GreaterThan) => {
-                        lowerValue = Some(value);
-                        lowerInclusive = false;
-                    }
-                    Op::MathCmpOp(MathCmpOp::GreaterEqual) => {
-                        lowerValue = Some(value);
-                        lowerInclusive = true;
-                    }
-                    Op::MathCmpOp(MathCmpOp::LessEqual) => {
-                        upperValue = Some(value);
-                        upperInclusive = true;
-                    }
-                    Op::MathCmpOp(MathCmpOp::LessThan) => {
-                        upperValue = Some(value);
-                        upperInclusive = false;
-                    }
-                    _ => panic!("impossible")
                 }
-            }
 
-            let mut lowerValueBuffer = BytesMut::new();
-            let mut upperValueBuffer = BytesMut::new();
-
-            macro_rules! getKeyIfSome {
-                ($dbRawIterator:expr) => {
-                    {
-                        let key = $dbRawIterator.key();
-                        if key.is_none() {
-                            break;
-                        }
-
-                        key.unwrap()
-                    }
-                };
-            }
-
-            match (lowerValue, upperValue) {
-                (Some(lowerValue), Some(upperValue)) => {
-                    lowerValue.encode(&mut lowerValueBuffer)?;
-                    upperValue.encode(&mut upperValueBuffer)?;
-
-                    dbRawIterator.seek(lowerValueBuffer.as_ref());
-
-                    let mut hasBeyondLower = false;
-
-                    loop {
-                        let key = getKeyIfSome!(dbRawIterator);
-
-                        // lowerInclusive应对
-                        // 使用这个变量的原因是 减少遍历过程中对start_with的调用 要是两边都很大的话成本不小
-                        if hasBeyondLower == false {
-                            if key.starts_with(lowerValueBuffer.as_ref()) {
-                                if lowerInclusive == false {
-                                    dbRawIterator.next();
-                                    continue;
-                                }
-
-                                // 处理
-                                self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
-
-                                dbRawIterator.next();
-                                continue;
-                            } else {
-                                // 应该经历下边的upper上限的check
-                                hasBeyondLower = true;
-                            }
-                        }
-
-                        // 有没有到了上限了
-                        if key.starts_with(upperValueBuffer.as_ref()) {
-                            if upperInclusive == false {
+                macro_rules! getKeyIfSome {
+                    ($dbRawIterator:expr) => {
+                        {
+                            let key = $dbRawIterator.key();
+                            if key.is_none() {
                                 break;
                             }
-                        } else {
-                            break;
+
+                            key.unwrap()
                         }
-
-                        // 处理
-                        self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
-
-                        dbRawIterator.next();
-                    }
+                    };
                 }
-                (Some(lowerValue), None) => {
-                    lowerValue.encode(&mut lowerValueBuffer)?;
-                    dbRawIterator.seek(lowerValueBuffer.as_ref());
 
-                    let mut hasBeyondLower = false;
+                match (lowerValue, upperValue) {
+                    (Some(lowerValue), Some(upperValue)) => {
+                        lowerValue.encode(&mut lowerValueBuffer)?;
+                        upperValue.encode(&mut upperValueBuffer)?;
 
-                    loop {
-                        let key = getKeyIfSome!(dbRawIterator);
+                        dbRawIterator.seek(lowerValueBuffer.as_ref());
 
-                        if hasBeyondLower == false {
-                            if key.starts_with(lowerValueBuffer.as_ref()) {
-                                if lowerInclusive == false {
+                        let mut hasBeyondLower = false;
+
+                        loop {
+                            let key = getKeyIfSome!(dbRawIterator);
+
+                            // lowerInclusive应对
+                            // 使用这个变量的原因是 减少遍历过程中对start_with的调用 要是两边都很大的话成本不小
+                            if hasBeyondLower == false {
+                                if key.starts_with(lowerValueBuffer.as_ref()) {
+                                    if lowerInclusive == false {
+                                        dbRawIterator.next();
+                                        continue;
+                                    }
+
+                                    // 处理
+                                    self.further(key, &indexSearch)?;
+
                                     dbRawIterator.next();
                                     continue;
+                                } else {
+                                    // 应该经历下边的upper上限的check
+                                    hasBeyondLower = true;
                                 }
-                            } else {
-                                hasBeyondLower = true
                             }
-                        }
 
-                        self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
-
-                        dbRawIterator.next()
-                    }
-                }
-                (None, Some(upperValue)) => {
-                    upperValue.encode(&mut upperValueBuffer)?;
-                    dbRawIterator.seek_for_prev(upperValueBuffer.as_ref());
-
-                    let mut startWithUpper = true;
-
-                    loop {
-                        let key = getKeyIfSome!(dbRawIterator);
-
-                        if startWithUpper {
+                            // 有没有到了上限了
                             if key.starts_with(upperValueBuffer.as_ref()) {
                                 if upperInclusive == false {
-                                    dbRawIterator.next();
-                                    continue;
+                                    break;
                                 }
                             } else {
-                                startWithUpper = false;
+                                break;
+                            }
+
+                            // 处理
+                            self.further(key, &indexSearch)?;
+
+                            dbRawIterator.next();
+                        }
+                    }
+                    (Some(lowerValue), None) => {
+                        lowerValue.encode(&mut lowerValueBuffer)?;
+                        dbRawIterator.seek(lowerValueBuffer.as_ref());
+
+                        let mut hasBeyondLower = false;
+
+                        loop {
+                            let key = getKeyIfSome!(dbRawIterator);
+
+                            if hasBeyondLower == false {
+                                if key.starts_with(lowerValueBuffer.as_ref()) {
+                                    if lowerInclusive == false {
+                                        dbRawIterator.next();
+                                        continue;
+                                    }
+                                } else {
+                                    hasBeyondLower = true
+                                }
+                            }
+
+                            self.further(key, &indexSearch)?;
+
+                            dbRawIterator.next()
+                        }
+                    }
+                    (None, Some(upperValue)) => {
+                        upperValue.encode(&mut upperValueBuffer)?;
+                        dbRawIterator.seek_for_prev(upperValueBuffer.as_ref());
+
+                        let mut startWithUpper = true;
+
+                        loop {
+                            let key = getKeyIfSome!(dbRawIterator);
+
+                            if startWithUpper {
+                                if key.starts_with(upperValueBuffer.as_ref()) {
+                                    if upperInclusive == false {
+                                        dbRawIterator.next();
+                                        continue;
+                                    }
+                                } else {
+                                    startWithUpper = false;
+                                }
+                            }
+
+                            self.further(key, &indexSearch)?;
+
+                            dbRawIterator.prev();
+                        }
+                    }
+                    (None, None) => panic!("impossible")
+                }
+            } else {
+                macro_rules! getKeyIfSome {
+                    ($dbRawIterator:expr) => {
+                        {
+                            let key = $dbRawIterator.key();
+                            if key.is_none() {
+                                continue;
+                            }
+
+                            key.unwrap()
+                        }
+                    };
+                }
+
+                // opValueVec 上的各个筛选条件之间是 or 而且已经压缩过的了
+                for (op, value) in opValueVecOnIndex1stColumn {
+                    assert!(op.permitByIndex());
+                    assert!(value.isConstant());
+
+                    value.encode(&mut buffer)?;
+
+                    match op {
+                        Op::MathCmpOp(MathCmpOp::Equal) => {
+                            dbRawIterator.seek(buffer.as_ref());
+
+                            let key = getKeyIfSome!(dbRawIterator);
+
+                            // 说明satisfy
+                            if key.starts_with(buffer.as_ref()) {
+                                dataKeys.insert(extractDataKeyFromIndexKey!(key));
+                            } else {
+                                if let Some(dataKey) = self.further(key, &indexSearch)? {
+                                    dataKeys.insert(dataKey);
+                                }
                             }
                         }
+                        Op::MathCmpOp(MathCmpOp::GreaterEqual) => {
+                            dbRawIterator.seek(buffer.as_ref());
 
-                        self.processKey(key, true, indexSearch.opValueVecAcrossIndexColumns.as_slice())?;
+                            let key = getKeyIfSome!(dbRawIterator);
 
-                        dbRawIterator.prev();
+
+                        }
+                        Op::MathCmpOp(MathCmpOp::GreaterThan) => {}
+                        Op::MathCmpOp(MathCmpOp::LessEqual) => {}
+                        Op::MathCmpOp(MathCmpOp::LessThan) => {}
+                        _ => panic!("impossible")
                     }
-                }
-                (None, None) => panic!("impossible")
-            }
-        } else {
-            for (op, value) in opValueVecOnIndex1stColumn {
-                assert!(op.permitByIndex());
-                match op {
-                    _ => {}
                 }
             }
         }
@@ -1210,16 +1279,14 @@ impl<'session> CommandExecutor<'session> {
         Ok(())
     }
 
-    // filterOnRemainingIndexColumns 纵向排列
-    // b>=1 ,c >=0 and c<=6
-    fn processKey(&self, key: &[Byte], isAnd: bool,
-                  opValueVecAcrossIndexColumns: &[Vec<(Op, GraphValue)>]) -> Result<Option<DataKey>> {
+    // 对and来说  前边的column已经满足了 还需要进1步测试
+    // 对or来说 前边的column没有satisfy 到这里来试试 opValueVecVecAcrossIndexColumns: &[Vec<Vec<(Op, GraphValue)>>]
+    fn further(&self, key: &[Byte], indexSearch: &IndexSearch) -> Result<Option<DataKey>> {
         // key的末尾是dataKey
-        let dataKey = &key[(key.len() - meta::DATA_KEY_BYTE_LEN)..];
-        let dataKey = byte_slice_to_u64!(dataKey) as DataKey;
+        let dataKey = extractDataKeyFromIndexKey!(key);
 
         // index只有1个的column
-        if opValueVecAcrossIndexColumns.len() == 1 {
+        if indexSearch.opValueVecVecAcrossIndexColumns.len() == 1 {
             return Ok(Some(dataKey));
         }
 
@@ -1229,27 +1296,46 @@ impl<'session> CommandExecutor<'session> {
         let columnValues = Vec::try_from(&mut myBytesRowData)?;
         let remainingIndexColValues = &columnValues[1..];
 
-        let opValueVecOnRemaingIndexCols = &opValueVecAcrossIndexColumns[1..];
+        let opValueVecVecOnRemaingIndexCols = &indexSearch.opValueVecVecAcrossIndexColumns[1..];
 
-        assert_eq!(remainingIndexColValues.len(), opValueVecOnRemaingIndexCols.len());
+        assert_eq!(remainingIndexColValues.len(), opValueVecVecOnRemaingIndexCols.len());
 
-        for (remainingIndexColValue,
-            opValueVecOnRemaingIndexCol) in remainingIndexColValues.iter().zip(opValueVecOnRemaingIndexCols) {
-            for (op, value) in opValueVecOnRemaingIndexCol {
-                let satisfy = remainingIndexColValue.calcOneToOne(*op, value)?.asBoolean()?;
-                if isAnd {
-                    if satisfy == false {
-                        return Ok(None);
+        // opValueVecOnRemaingIndexCols 之间 or
+        for (remainingIndexColValue, opValueVecVecOnRemaingIndexCol) in remainingIndexColValues.iter().zip(opValueVecVecOnRemaingIndexCols) {
+            let mut satisfyInOneOpValueVec = false;
+
+            // 元素之间 是 and 还是 or 取决 isAnd
+            'opValueVecVecOnRemaingIndexCol:
+            for opValueVecOnRemaingIndexCol in opValueVecVecOnRemaingIndexCol {
+                for (op, value) in opValueVecOnRemaingIndexCol {
+                    let satisfy = remainingIndexColValue.calcOneToOne(*op, value)?.asBoolean()?;
+                    if indexSearch.isAnd {
+                        if satisfy == false {
+                            // 切换到下个 opValueVec
+                            continue 'opValueVecVecOnRemaingIndexCol;
+                        }
+                    } else {
+                        if satisfy {
+                            return Ok(Some(dataKey));
+                        }
                     }
-                } else {
-                    if satisfy {
-                        return Ok(Some(dataKey));
-                    }
+                }
+
+                if indexSearch.isAnd { // 如果是and 到了这边 说明 opValueVecOnRemaingIndexCol 上的筛选全都通过了(它们之间是and)
+                    satisfyInOneOpValueVec = true;
+                    break 'opValueVecVecOnRemaingIndexCol;
+                }
+            }
+
+            if indexSearch.isAnd {
+                // 当前这个的column上彻底失败了
+                if satisfyInOneOpValueVec == false {
+                    return Ok(None);
                 }
             }
         }
 
-        if isAnd {
+        if indexSearch.isAnd {
             Ok(Some(dataKey))
         } else {
             Ok(None)
