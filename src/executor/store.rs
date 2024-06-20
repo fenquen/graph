@@ -30,11 +30,11 @@ use crate::session::Session;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
 pub(super) struct ScanHooks<A, B, C, D>
-where
-    A: ScanCommittedPreProcessor,
-    B: ScanCommittedPostProcessor,
-    C: ScanUncommittedPreProcessor,
-    D: ScanUncommittedPostProcessor,
+    where
+        A: ScanCommittedPreProcessor,
+        B: ScanCommittedPostProcessor,
+        C: ScanUncommittedPreProcessor,
+        D: ScanUncommittedPostProcessor,
 {
     /// 融合filter读取到committed RowData 前
     pub(super) scanCommittedPreProcessor: Option<A>,
@@ -63,9 +63,9 @@ impl Default for ScanHooks<
 }
 
 pub struct SearchPointerKeyHooks<A, B>
-where
-    A: CommittedPointerKeyProcessor,
-    B: UncommittedPointerKeyProcessor,
+    where
+        A: CommittedPointerKeyProcessor,
+        B: UncommittedPointerKeyProcessor,
 {
     pub(super) committedPointerKeyProcessor: Option<A>,
     pub(super) uncommittedPointerKeyProcessor: Option<B>,
@@ -110,7 +110,7 @@ impl<'Table> Default for ScanParams<'Table, '_, '_> {
 struct IndexSearch<'a> {
     dbObjectIndex: Ref<'a, String, DBObject>,
     /// 包含的grapgValue 只可能是 IndexUseful
-    opValueVecVecAcrossIndexColumns: Vec<Vec<Vec<(Op, GraphValue)>>>,
+    opValueVecVecAcrossUsedIndexColumns: Vec<Vec<Vec<(Op, GraphValue)>>>,
     isAnd: bool,
 }
 
@@ -209,11 +209,11 @@ impl<'session> CommandExecutor<'session> {
                                                 scanParams: ScanParams,
                                                 select: bool,
                                                 mut scanHooks: ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
-    where
-        A: ScanCommittedPreProcessor,
-        B: ScanCommittedPostProcessor,
-        C: ScanUncommittedPreProcessor,
-        D: ScanUncommittedPostProcessor,
+        where
+            A: ScanCommittedPreProcessor,
+            B: ScanCommittedPostProcessor,
+            C: ScanUncommittedPreProcessor,
+            D: ScanUncommittedPostProcessor,
     {
 
         // todo 使用table id 为 column family 标识
@@ -555,12 +555,21 @@ impl<'session> CommandExecutor<'session> {
         let mut isAnd = true;
         tableFilter.collectColNameValue(&mut columnNameFromTableFilter_opValuesVec, &mut isAnd)?;
 
-        // 说明tableFilter上未写column名
+        // 说明tableFilter上未写column名,那么tableFilter是可以直接计算的
         if columnNameFromTableFilter_opValuesVec.is_empty() {
             return Ok(None);
         }
 
         let columnNamesFromTableFilter: Vec<&String> = columnNameFromTableFilter_opValuesVec.keys().collect();
+
+        // 对or来说对话 要想使用index 先要满足 tableFilter只能有1个字段,然后 该字段得是某个index的打头字段
+        // 例如 有个index包含 a和b两个字段 对 a=1 or b=2 来说 是用不了该index的 因为应对不了b=2 它不是index的打头部分
+        if isAnd == false {
+            // 有多个字段 用不了index
+            if columnNamesFromTableFilter.len() > 1 {
+                return Ok(None);
+            }
+        }
 
         // 候选名单
         let mut candiateInices = Vec::with_capacity(table.indexNames.len());
@@ -578,8 +587,8 @@ impl<'session> CommandExecutor<'session> {
             // (a=1 and c=3) 虽然包含了打头的a字段,然而也只能用到index的a字段部分 因为缺了b字段 使得c用不了
             let mut columnNamesFromIndexUsed = Vec::with_capacity(index.columnNames.len());
 
-            // index的各个的column上的表达式的集合
-            let mut opValueVecVecAcrossIndexColumns = Vec::with_capacity(index.columnNames.len());
+            // index的各个用到的column上的表达式的集合
+            let mut opValueVecVecAcrossUsedIndexColumns = Vec::with_capacity(index.columnNames.len());
 
             // 遍历index的各columnName
             for columnNameFromIndex in &index.columnNames {
@@ -591,7 +600,7 @@ impl<'session> CommandExecutor<'session> {
                 // 它是下边的&Graph源头
                 let opValuesVec = columnNameFromTableFilter_opValuesVec.get(columnNameFromIndex).unwrap();
 
-
+                // and 体系 单个字段上的过滤条件之间是and 字段和字段之间是and
                 if isAnd {
                     // 收集了全部的leaf node到时候遍历溯源
                     let mut leafVec = Vec::new();
@@ -636,15 +645,15 @@ impl<'session> CommandExecutor<'session> {
                     // 如果到这边打算收场的话 莫忘了将&GraphValue变为GraphValue
                     let opValueVecVec: Vec<Vec<(Op, GraphValue)>> =
                         opValueVecVec.iter().map(|opValueVec| {
-                            opValueVec.iter().map(|(op, &value)| {
-                                (*op, value.clone())
-                            }).collect()
-                        }).collect();
+                            opValueVec.iter().map(|(op,  value)| {
+                                (*op, (*value).clone())
+                            }).collect::<Vec<(Op, GraphValue)>>()
+                        }).collect::<>();
 
-                    opValueVecVecAcrossIndexColumns.push(opValueVecVec);
+                    opValueVecVecAcrossUsedIndexColumns.push(opValueVecVec);
 
                     // 尝试or压缩 (a and b) or (c and d) 不太容易 应对 (a and b)和(c and d) 之间重复的部分
-                } else {
+                } else { // 单个字段上的过滤条件之间是or 字段和字段之间是or
                     let opValueVec: Vec<(Op, &GraphValue)> = opValuesVec.iter().map(|(op, values)| {
                         assert!(op.permitByIndex());
                         assert_eq!(values.len(), 1);
@@ -663,7 +672,7 @@ impl<'session> CommandExecutor<'session> {
                     };
 
                     let accumulatedOr: Vec<(Op, GraphValue)> = accumulatedOr.into_iter().map(|(op, value)| { (op, value.clone()) }).collect();
-                    opValueVecVecAcrossIndexColumns.push(vec![accumulatedOr]);
+                    opValueVecVecAcrossUsedIndexColumns.push(vec![accumulatedOr]);
 
                     columnNamesFromIndexUsed.push(columnNameFromIndex.clone());
                 }
@@ -715,7 +724,7 @@ impl<'session> CommandExecutor<'session> {
             }
 
             // 不能直接放index 因为它是来源dbObject的 而for 循环结束后dbObject销毁了
-            candiateInices.push((columnNamesFromIndexUsed, dbObjectIndex, opValueVecVecAcrossIndexColumns));
+            candiateInices.push((columnNamesFromIndexUsed, dbObjectIndex, opValueVecVecAcrossUsedIndexColumns));
         }
 
         if candiateInices.is_empty() {
@@ -728,7 +737,7 @@ impl<'session> CommandExecutor<'session> {
         // 目前的话实现的比较粗糙,排前头的几个要是columnFromIndexUsedCount大小相同 选第1个
         let (columnNamesFromIndexUsed,
             dbObjectIndex,
-            opValueVecVecAcrossIndexColumns) = candiateInices.remove(0);
+            opValueVecVecAcrossUsedIndexColumns) = candiateInices.remove(0);
 
         // value 和 column的type是不是匹配
         for index in 0..columnNamesFromIndexUsed.len() {
@@ -738,7 +747,7 @@ impl<'session> CommandExecutor<'session> {
                     continue;
                 }
 
-                let opValueVecVec = opValueVecVecAcrossIndexColumns.get(index).unwrap();
+                let opValueVecVec = opValueVecVecAcrossUsedIndexColumns.get(index).unwrap();
 
                 for opValueVec in opValueVecVec {
                     for (_, value) in opValueVec {
@@ -753,7 +762,7 @@ impl<'session> CommandExecutor<'session> {
 
         let indexSearch = IndexSearch {
             dbObjectIndex,
-            opValueVecVecAcrossIndexColumns,
+            opValueVecVecAcrossUsedIndexColumns,
             isAnd,
         };
 
@@ -925,9 +934,9 @@ impl<'session> CommandExecutor<'session> {
     // todo pointerKey应该同时到committed和uncommitted去搜索
     pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
-    where
-        A: CommittedPointerKeyProcessor,
-        B: UncommittedPointerKeyProcessor,
+        where
+            A: CommittedPointerKeyProcessor,
+            B: UncommittedPointerKeyProcessor,
     {
         let mut keys = Vec::new();
 
@@ -1058,8 +1067,12 @@ impl<'session> CommandExecutor<'session> {
         let tableObject = self.getDBObjectByName(index.tableName.as_str())?;
         let table = tableObject.asTable()?;
 
+        if indexSearch.isAnd == false {
+            assert_eq!(indexSearch.opValueVecVecAcrossUsedIndexColumns.len(), 1);
+        }
+
         // seek那都是要以index的第1个column为切入的, 后边的column是在index数据基础上的筛选
-        let opValueVecVecOnIndex1stColumn = indexSearch.opValueVecVecAcrossIndexColumns.first().unwrap();
+        let opValueVecVecOnIndex1stColumn = indexSearch.opValueVecVecAcrossUsedIndexColumns.first().unwrap();
 
         let mut dataKeys: HashSet<DataKey> = HashSet::new();
 
@@ -1070,6 +1083,19 @@ impl<'session> CommandExecutor<'session> {
         let mut upperValueBuffer = BytesMut::new();
 
         let mut buffer = BytesMut::new();
+
+        macro_rules! getKeyIfSome {
+                    ($dbRawIterator:expr) => {
+                        {
+                            let key = $dbRawIterator.key();
+                            if key.is_none() {
+                                break;
+                            }
+
+                            key.unwrap()
+                        }
+                    };
+        }
 
         // opValueVecOnIndex1stColumn 之间不管isAnd如何都是 or
         for opValueVecOnIndex1stColumn in opValueVecVecOnIndex1stColumn {
@@ -1110,19 +1136,6 @@ impl<'session> CommandExecutor<'session> {
                         }
                         _ => panic!("impossible")
                     }
-                }
-
-                macro_rules! getKeyIfSome {
-                    ($dbRawIterator:expr) => {
-                        {
-                            let key = $dbRawIterator.key();
-                            if key.is_none() {
-                                break;
-                            }
-
-                            key.unwrap()
-                        }
-                    };
                 }
 
                 match (lowerValue, upperValue) {
@@ -1225,19 +1238,7 @@ impl<'session> CommandExecutor<'session> {
                     (None, None) => panic!("impossible")
                 }
             } else {
-                macro_rules! getKeyIfSome {
-                    ($dbRawIterator:expr) => {
-                        {
-                            let key = $dbRawIterator.key();
-                            if key.is_none() {
-                                continue;
-                            }
-
-                            key.unwrap()
-                        }
-                    };
-                }
-
+                // or的时候 要用上index tableFilter只能有1个字段 且是这个index的打头字段
                 // opValueVec 上的各个筛选条件之间是 or 而且已经压缩过的了
                 for (op, value) in opValueVecOnIndex1stColumn {
                     assert!(op.permitByIndex());
@@ -1249,27 +1250,71 @@ impl<'session> CommandExecutor<'session> {
                         Op::MathCmpOp(MathCmpOp::Equal) => {
                             dbRawIterator.seek(buffer.as_ref());
 
-                            let key = getKeyIfSome!(dbRawIterator);
+                            loop {
+                                let key = getKeyIfSome!(dbRawIterator);
 
-                            // 说明satisfy
-                            if key.starts_with(buffer.as_ref()) {
-                                dataKeys.insert(extractDataKeyFromIndexKey!(key));
-                            } else {
-                                if let Some(dataKey) = self.further(key, &indexSearch)? {
-                                    dataKeys.insert(dataKey);
+                                // 说明satisfy
+                                if key.starts_with(buffer.as_ref()) == false {
+                                    break;
                                 }
+
+                                dataKeys.insert(extractDataKeyFromIndexKey!(key));
+
+                                dbRawIterator.next();
                             }
                         }
-                        Op::MathCmpOp(MathCmpOp::GreaterEqual) => {
+                        Op::MathCmpOp(MathCmpOp::GreaterEqual) => { // 应对 >= 是简单的 1路到底什么inclusive等都不用管
                             dbRawIterator.seek(buffer.as_ref());
 
-                            let key = getKeyIfSome!(dbRawIterator);
+                            loop {
+                                let key = getKeyIfSome!(dbRawIterator);
+                                dataKeys.insert(extractDataKeyFromIndexKey!(key));
 
-
+                                dbRawIterator.next()
+                            }
                         }
-                        Op::MathCmpOp(MathCmpOp::GreaterThan) => {}
-                        Op::MathCmpOp(MathCmpOp::LessEqual) => {}
-                        Op::MathCmpOp(MathCmpOp::LessThan) => {}
+                        Op::MathCmpOp(MathCmpOp::GreaterThan) => {
+                            dbRawIterator.seek(buffer.as_ref());
+
+                            loop {
+                                let key = getKeyIfSome!(dbRawIterator);
+
+                                if key.starts_with(buffer.as_ref()) {
+                                    dbRawIterator.next();
+                                    continue;
+                                }
+
+                                dataKeys.insert(extractDataKeyFromIndexKey!(key));
+
+                                dbRawIterator.next()
+                            }
+                        }
+                        Op::MathCmpOp(MathCmpOp::LessEqual) => {
+                            dbRawIterator.seek_for_prev(buffer.as_ref());
+
+                            loop {
+                                let key = getKeyIfSome!(dbRawIterator);
+                                dataKeys.insert(extractDataKeyFromIndexKey!(key));
+
+                                dbRawIterator.prev();
+                            }
+                        }
+                        Op::MathCmpOp(MathCmpOp::LessThan) => {
+                            dbRawIterator.seek_for_prev(buffer.as_ref());
+
+                            loop {
+                                let key = getKeyIfSome!(dbRawIterator);
+
+                                if key.starts_with(buffer.as_ref()) {
+                                    dbRawIterator.prev();
+                                    continue;
+                                }
+
+                                dataKeys.insert(extractDataKeyFromIndexKey!(key));
+
+                                dbRawIterator.prev();
+                            }
+                        }
                         _ => panic!("impossible")
                     }
                 }
@@ -1285,8 +1330,8 @@ impl<'session> CommandExecutor<'session> {
         // key的末尾是dataKey
         let dataKey = extractDataKeyFromIndexKey!(key);
 
-        // index只有1个的column
-        if indexSearch.opValueVecVecAcrossIndexColumns.len() == 1 {
+        // index用到的只有1个的column
+        if indexSearch.opValueVecVecAcrossUsedIndexColumns.len() == 1 {
             return Ok(Some(dataKey));
         }
 
@@ -1294,15 +1339,14 @@ impl<'session> CommandExecutor<'session> {
         let indexRowData = &key[..(key.len() - meta::DATA_KEY_BYTE_LEN)];
         let mut myBytesRowData = MyBytes::from(Bytes::from(Vec::from(indexRowData)));
         let columnValues = Vec::try_from(&mut myBytesRowData)?;
-        let remainingIndexColValues = &columnValues[1..];
+        // 因为table的filter可能不会用光index上的全部的字段
+        let remainingIndexColValues = &columnValues[1..=indexSearch.opValueVecVecAcrossUsedIndexColumns.len()];
 
-        let opValueVecVecOnRemaingIndexCols = &indexSearch.opValueVecVecAcrossIndexColumns[1..];
-
-        assert_eq!(remainingIndexColValues.len(), opValueVecVecOnRemaingIndexCols.len());
+        let opValueVecVecOnRemaingIndexCols = &indexSearch.opValueVecVecAcrossUsedIndexColumns[1..];
 
         // opValueVecOnRemaingIndexCols 之间 or
         for (remainingIndexColValue, opValueVecVecOnRemaingIndexCol) in remainingIndexColValues.iter().zip(opValueVecVecOnRemaingIndexCols) {
-            let mut satisfyInOneOpValueVec = false;
+            let mut satisfyOneOpValueVec = false;
 
             // 元素之间 是 and 还是 or 取决 isAnd
             'opValueVecVecOnRemaingIndexCol:
@@ -1322,14 +1366,14 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 if indexSearch.isAnd { // 如果是and 到了这边 说明 opValueVecOnRemaingIndexCol 上的筛选全都通过了(它们之间是and)
-                    satisfyInOneOpValueVec = true;
+                    satisfyOneOpValueVec = true;
                     break 'opValueVecVecOnRemaingIndexCol;
                 }
             }
 
             if indexSearch.isAnd {
                 // 当前这个的column上彻底失败了
-                if satisfyInOneOpValueVec == false {
+                if satisfyOneOpValueVec == false {
                     return Ok(None);
                 }
             }
