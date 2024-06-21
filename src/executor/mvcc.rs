@@ -9,12 +9,12 @@ use anyhow::Result;
 
 impl<'session> CommandExecutor<'session> {
     // 对data对应的mvccKey的visibility筛选
-    pub(super) fn checkCommittedDataVisibilityWithoutTxMutations(&self,
-                                                                 mvccKeyBuffer: &mut BytesMut,
-                                                                 rawIterator: &mut DBRawIterator,
-                                                                 dataKey: DataKey,
-                                                                 columnFamily: &ColumnFamily,
-                                                                 tableName: &String) -> Result<bool> {
+    pub(super) fn checkCommittedDataVisiWithoutTxMutations(&self,
+                                                           mvccKeyBuffer: &mut BytesMut,
+                                                           rawIterator: &mut DBRawIterator,
+                                                           dataKey: DataKey,
+                                                           columnFamily: &ColumnFamily,
+                                                           tableName: &String) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // xmin
@@ -59,10 +59,10 @@ impl<'session> CommandExecutor<'session> {
         Ok(meta::isVisible(currentTxId, xmin, xmax))
     }
 
-    pub(super) fn checkCommittedDataVisibilityWithTxMutations(&self,
-                                                              tableMutations: &TableMutations,
-                                                              mvccKeyBuffer: &mut BytesMut,
-                                                              dataKey: DataKey) -> Result<bool> {
+    pub(super) fn checkCommittedDataVisiWithTxMutations(&self,
+                                                        tableMutations: &TableMutations,
+                                                        mvccKeyBuffer: &mut BytesMut,
+                                                        dataKey: DataKey) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 要看落地的有没有被当前的tx上的干掉  只要读取相应的xmax的mvccKey
