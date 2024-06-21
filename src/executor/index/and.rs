@@ -1,8 +1,8 @@
 use crate::graph_value::GraphValue;
 use crate::parser::op::{MathCmpOp, Op};
 
-fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
-                     targetOp: Op, targetValue: &'a GraphValue) -> Option<Vec<(Op, &'a GraphValue)>> {
+pub(super) fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
+                                targetOp: Op, targetValue: &'a GraphValue) -> Option<Vec<(Op, &'a GraphValue)>> {
     assert!(op.permitByIndex());
     assert!(value.isConstant());
 
@@ -201,40 +201,4 @@ fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
         }
         _ => panic!("impossible")
     }
-}
-
-pub(in crate::executor) fn andWithAccumulated<'a>(op: Op, value: &'a GraphValue,
-                                                  previousAccumulated: Vec<(Op, &'a GraphValue)>) -> (Option<Vec<(Op, &'a GraphValue)>>, bool) {
-    let mut merged = false;
-
-    if previousAccumulated.is_empty() {
-        return (Some(vec![(op, value)]), merged);
-    }
-
-    let mut accumulated = Vec::new();
-
-    // 原先是 [6,16] 来了 a<=7,a>9
-    for (previousOp, previousValue) in previousAccumulated {
-        if merged {
-            accumulated.push((previousOp, previousValue));
-        }
-
-        match andWithSingle(op, value, previousOp, previousValue) {
-            None => return (None, merged), // 说明有 a>0 and a<=0
-            Some(andResult) => {
-                if andResult.len() == 1 { // 说明能融合
-                    accumulated.push(andResult[0]);
-                    merged = true;
-                } else { // 不能融合 还是原样到vec
-                    accumulated.push((previousOp, previousValue));
-                }
-            }
-        }
-    }
-
-    if merged == false {
-        accumulated.push((op, value));
-    }
-
-    (Some(accumulated), merged)
 }

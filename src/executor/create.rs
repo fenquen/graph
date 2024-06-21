@@ -55,7 +55,7 @@ impl<'session> CommandExecutor<'session> {
         }
         let mut targetTable = targetTable.unwrap();
         // 隐含了index的对象需要是table
-        let mut targetTable = targetTable.asTableMut()?;
+        let  targetTable = targetTable.asTableMut()?;
 
         let tableColumnNames: Vec<&str> = targetTable.columns.iter().map(|tableColumn| tableColumn.name.as_str()).collect();
 

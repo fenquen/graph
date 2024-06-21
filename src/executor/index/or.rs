@@ -3,8 +3,8 @@ use crate::parser::op::{MathCmpOp, Op};
 
 /// 如果能融合的话 得到的vec的len是1 不然是2
 /// 融合是相当有必要的 不然后续index搜索的时候会重复的
-fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
-                    targetOp: Op, targetValue: &'a GraphValue) -> Option<Vec<(Op, &'a GraphValue)>> {
+pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
+                               targetOp: Op, targetValue: &'a GraphValue) -> Option<Vec<(Op, &'a GraphValue)>> {
     assert!(op.permitByIndex());
     assert!(value.isConstant());
 
@@ -201,41 +201,4 @@ fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
         }
         _ => panic!("impossible")
     }
-}
-
-pub(in crate::executor) fn orWithAccumulated<'a>(op: Op, value: &'a GraphValue,
-                                                 previousAccumulated: Vec<(Op, &'a GraphValue)>) -> (Option<Vec<(Op, &'a GraphValue)>>, bool) {
-    let mut merged = false;
-
-    // 第1趟
-    if previousAccumulated.is_empty() {
-        return (Some(vec![(op, value)]), merged);
-    }
-
-    let mut accumulated = Vec::with_capacity(previousAccumulated.len());
-
-    for (previousOp, previousValue) in previousAccumulated {
-        if merged {
-            accumulated.push((previousOp, previousValue));
-            continue;
-        }
-
-        match orWithSingle(op, value, previousOp, previousValue) {
-            None => return (None, merged), // 说明有 a<0 or a>=0 类似的废话出现了
-            Some(orResult) => {
-                if orResult.len() == 1 { // 说明能融合
-                    accumulated.push(orResult[0]);
-                    merged = true;
-                } else {
-                    accumulated.push((previousOp, previousValue));
-                }
-            }
-        }
-    }
-
-    if merged == false {
-        accumulated.push((op, value));
-    }
-
-    (Some(accumulated), merged)
 }

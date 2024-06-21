@@ -6,6 +6,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, RandomState};
 use anyhow::format_err;
+use crate::suffix_plus_plus;
 
 /// 越过了rust的兜底 以不可变引用对外提供像原来的c/c++ java那样 <br>
 /// 使用它的时候需要知道风险
@@ -109,6 +110,37 @@ impl<K: Eq + Hash, V, S: BuildHasher> HashMapExt<K, V, S> for HashMap<K, V, S> {
             self.insert(k.clone().into(), V::default());
         }
         self.get_mut(k).unwrap()
+    }
+}
+
+#[derive(Default)]
+pub struct VirtualSlice<'a, T> {
+    pub content: Vec<&'a [T]>,
+    currentVecIndex: usize,
+    currentIndex: usize,
+}
+
+impl<'a, T> Iterator for VirtualSlice<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.content.get(self.currentVecIndex) {
+            Some(&slice) => {
+                match slice.get(self.currentIndex) {
+                    Some(t) => {
+                        suffix_plus_plus!(self.currentIndex);
+                        Some(t)
+                    }
+                    None => {
+                        suffix_plus_plus!(self.currentVecIndex);
+                        self.currentIndex = 0;
+
+                        self.next()
+                    }
+                }
+            }
+            None => None,
+        }
     }
 }
 
