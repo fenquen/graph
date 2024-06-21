@@ -3,7 +3,6 @@ use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use dashmap::DashMap;
-use lazy_static::lazy_static;
 use tokio::fs::File;
 use tokio::sync::RwLock;
 use crate::graph_error::GraphError;
