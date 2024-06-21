@@ -77,7 +77,7 @@ impl Expr {
                 let graphValueIndex = leftValue.calc0(op.clone(), &rightValues)?;
 
                 if let GraphValue::IndexUseful { ref columnName, op, ref values } = graphValueIndex {
-                    let mut opValuesVec = dest.getMutWithDefault(columnName);
+                    let  opValuesVec = dest.getMutWithDefault(columnName);
 
                     if let Op::SqlOp(SqlOp::In) = op {
                         // 如果in的对象只有1个 那么是equal

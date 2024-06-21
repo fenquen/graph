@@ -333,27 +333,6 @@ pub enum Mutation {
 
 }
 
-#[derive(Default)]
-pub struct TxMutation {
-    pub tableName_tableMutation: HashMap<String, TableMutation>,
-}
-
-impl TxMutation {
-    pub fn clear(&mut self) {
-        self.tableName_tableMutation.clear();
-    }
-}
-
-#[derive(Default)]
-pub struct TableMutation {
-    /// 原样
-    pub totalMutations: Vec<Arc<Mutation>>,
-    pub addDataMutations: Vec<Arc<Mutation>>,
-    pub modifyOldDataMutations: Vec<Arc<Mutation>>,
-    pub addPointerMutations: Vec<Arc<Mutation>>,
-    pub modifyOldPointerMutations: Vec<Arc<Mutation>>,
-}
-
 #[cfg(test)]
 mod test {
     use serde::{Deserialize, Serialize};
