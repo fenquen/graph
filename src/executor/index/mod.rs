@@ -13,11 +13,12 @@ use crate::parser::op::{MathCmpOp, Op};
 use crate::executor::{CommandExecutor, index};
 use crate::expr::Expr;
 use crate::meta::{DBObject, Table};
-use crate::{meta, suffix_plus_plus, throwFormat, byte_slice_to_u64};
+use crate::{meta, suffix_plus_plus, throwFormat, byte_slice_to_u64, global};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::executor::store;
 use crate::session::Session;
 use crate::types::{Byte, DataKey, DBRawIterator, RowData};
+use anyhow::Result;
 
 #[derive(Clone, Copy)]
 pub enum Logical {
@@ -36,6 +37,9 @@ pub(super) fn accumulateAnd<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)])
 fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logical: Logical) -> Option<Vec<(Op, &'a GraphValue)>> {
     let mut selfAccumulated = Vec::new();
 
+    // 要是这个闭包的那个&GraphValue 不去标生命周期参数的话会报错,
+    // 原因是 编译器认为那个reference 它跑到了外边的Vec<(Op, &graphValue)> 了 产生了dangling
+    // 然而事实上不是这样的 然而编译器是不知道的 需要手动的标上
     let mut accumulate = |op: Op, value: &'a GraphValue| {
         let mut merged = false;
 
@@ -103,6 +107,7 @@ pub(in crate::executor) struct IndexSearch<'a> {
     pub(in crate::executor) dbObjectIndex: Ref<'a, String, DBObject>,
     /// 包含的grapgValue 只可能是 IndexUseful
     pub(in crate::executor) opValueVecVecAcrossIndexFilteredCols: Vec<Vec<Vec<(Op, GraphValue)>>>,
+    /// 如果说index能够 包含filter的全部字段 和 包含select的全部字段,那么就不用到原表上再搜索了,能够直接就地应对
     pub(in crate::executor) indexLocalSearch: bool,
     pub(in crate::executor) selectedColNames: Option<&'a [String]>,
     pub(in crate::executor) isAnd: bool,
@@ -414,9 +419,8 @@ impl<'session> CommandExecutor<'session> {
         let opValueVecVecOnIndex1stColumn = indexSearch.opValueVecVecAcrossIndexFilteredCols.first().unwrap();
 
         let mut dataKeys: HashSet<DataKey> = HashSet::new();
-        let mut rowDatas: HashSet<RowData> = HashSet::new();
 
-        let mut a: HashMap<DataKey, RowData> = HashMap::new();
+        let mut rowDatas: HashMap<DataKey, Option<RowData>> = HashMap::new();
 
         let mut lowerValueBuffer = BytesMut::new();
         let mut upperValueBuffer = BytesMut::new();
@@ -431,22 +435,21 @@ impl<'session> CommandExecutor<'session> {
                         break;
                     }
 
-                    key.unwrap()
+                    key.unwrap() as &[Byte]
                 }
             };
         }
 
         // todo 如果是indexLocal的话 还是要应对重复数据 不像应对datakey那样容易
-        let mut process1stColSatisfied = |indexKey: &[Byte]| {
+        let mut processWhen1stColSatisfied = |indexKey: &[Byte]| {
             if let Some(indexSearchResult) = self.further(indexKey, &indexSearch)? {
                 match indexSearchResult {
-                    // IndexSearchResult::Direct(rowData) => rowDatas.insert(rowData),
-                    _ => { true }
-                    IndexSearchResult::Redirect(dataKey) => dataKeys.insert(dataKey),
+                    IndexSearchResult::Direct((dataKey, rowData)) => rowDatas.insert(dataKey, Some(rowData)),
+                    IndexSearchResult::Redirect(dataKey) => rowDatas.insert(dataKey, None),
                 };
             }
 
-            anyhow::Result::<()>::Ok(())
+            Result::<()>::Ok(())
         };
 
         // opValueVecOnIndex1stColumn 之间不管isAnd如何都是 or
@@ -512,7 +515,7 @@ impl<'session> CommandExecutor<'session> {
                                     }
 
                                     // 处理
-                                    process1stColSatisfied(indexKey)?;
+                                    processWhen1stColSatisfied(indexKey)?;
 
                                     dbRawIterator.next();
                                     continue;
@@ -532,7 +535,7 @@ impl<'session> CommandExecutor<'session> {
                             }
 
                             // 处理
-                            process1stColSatisfied(indexKey)?;
+                            processWhen1stColSatisfied(indexKey)?;
 
                             dbRawIterator.next();
                         }
@@ -557,7 +560,7 @@ impl<'session> CommandExecutor<'session> {
                                 }
                             }
 
-                            process1stColSatisfied(indexKey)?;
+                            processWhen1stColSatisfied(indexKey)?;
 
                             dbRawIterator.next()
                         }
@@ -582,7 +585,7 @@ impl<'session> CommandExecutor<'session> {
                                 }
                             }
 
-                            process1stColSatisfied(indexKey)?;
+                            processWhen1stColSatisfied(indexKey)?;
 
                             dbRawIterator.prev();
                         }
@@ -610,7 +613,7 @@ impl<'session> CommandExecutor<'session> {
                                     break;
                                 }
 
-                                process1stColSatisfied(indexKey)?;
+                                processWhen1stColSatisfied(indexKey)?;
 
                                 dbRawIterator.next();
                             }
@@ -620,7 +623,7 @@ impl<'session> CommandExecutor<'session> {
 
                             loop {
                                 let indexKey = getKeyIfSome!(dbRawIterator);
-                                process1stColSatisfied(indexKey)?;
+                                processWhen1stColSatisfied(indexKey)?;
 
                                 dbRawIterator.next()
                             }
@@ -636,7 +639,7 @@ impl<'session> CommandExecutor<'session> {
                                     continue;
                                 }
 
-                                process1stColSatisfied(indexKey)?;
+                                processWhen1stColSatisfied(indexKey)?;
 
                                 dbRawIterator.next()
                             }
@@ -646,7 +649,7 @@ impl<'session> CommandExecutor<'session> {
 
                             loop {
                                 let indexKey = getKeyIfSome!(dbRawIterator);
-                                process1stColSatisfied(indexKey)?;
+                                processWhen1stColSatisfied(indexKey)?;
 
                                 dbRawIterator.prev();
                             }
@@ -662,7 +665,7 @@ impl<'session> CommandExecutor<'session> {
                                     continue;
                                 }
 
-                                process1stColSatisfied(indexKey)?;
+                                processWhen1stColSatisfied(indexKey)?;
 
                                 dbRawIterator.prev();
                             }
@@ -690,8 +693,10 @@ impl<'session> CommandExecutor<'session> {
         // index用到的只有1个的column
         if indexSearch.opValueVecVecAcrossIndexFilteredCols.len() == 1 {
             if indexSearch.indexLocalSearch {
-                let rowData = self.indexLocalSearch(columnValues, dataKey, indexSearch)?;
-                return Ok(Some(IndexSearchResult::Direct(rowData)));
+                match self.indexLocalSearch(columnValues, dataKey, indexSearch)? {
+                    Some(rowData) => return Ok(Some(IndexSearchResult::Direct((dataKey, rowData)))),
+                    None => return Ok(None)
+                }
             }
 
             return Ok(Some(IndexSearchResult::Redirect(dataKey)));
@@ -739,8 +744,10 @@ impl<'session> CommandExecutor<'session> {
 
         if indexSearch.isAnd {
             if indexSearch.indexLocalSearch {
-                let rowData = self.indexLocalSearch(columnValues, dataKey, indexSearch)?;
-                return Ok(Some(IndexSearchResult::Direct(rowData)));
+                match self.indexLocalSearch(columnValues, dataKey, indexSearch)? {
+                    Some(rowData) => return Ok(Some(IndexSearchResult::Direct((dataKey, rowData)))),
+                    None => return Ok(None)
+                }
             }
 
             Ok(Some(IndexSearchResult::Redirect(dataKey)))
@@ -749,13 +756,30 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
+    /// 调用该函数的时候已然是通过了 filter的测试 还需要通过mvcc visibility测试
     fn indexLocalSearch(&self,
                         columnValues: Vec<GraphValue>, // index上的全部的column的data
                         datakey: DataKey,
-                        indexSearch: &IndexSearch) -> anyhow::Result<RowData> {
+                        indexSearch: &IndexSearch) -> Result<Option<RowData>> {
         let index = indexSearch.dbObjectIndex.asIndex()?;
 
-        // 对dataKey实施mvcc visibility 测试
+        // mvcc visibility筛选
+       // if self.checkCommittedDataVisiWithoutTxMutations(&mut mvccKeyBuffer,
+         //                                                &mut rawIterator,
+           //                                              dataKey,
+             //                                            &columnFamily,
+               //                                          &scanParams.table.name)? == false {
+          //  return Ok(None);
+        //}
+
+        // 以上是全都在已落地的维度内的visibility check
+        // 还要结合当前事务上的尚未提交的mutations,看已落地的是不是应该干掉
+        //if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
+          //  if self.checkCommittedDataVisiWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
+            //    return Ok(None);
+            //}
+        //}
+
 
         let mut rowData: RowData = HashMap::with_capacity(index.columnNames.len());
 
@@ -764,11 +788,11 @@ impl<'session> CommandExecutor<'session> {
         }
 
         let rowData = store::pruneRowData(rowData, indexSearch.selectedColNames)?;
-        Ok(rowData)
+        Ok(Some(rowData))
     }
 }
 
 pub(in crate::executor) enum IndexSearchResult {
-    Direct(RowData),
+    Direct((DataKey, RowData)),
     Redirect(DataKey),
 }

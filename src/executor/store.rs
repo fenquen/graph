@@ -135,7 +135,7 @@ impl<'session> CommandExecutor<'session> {
                 // 习惯的套路和scan函数相同 都是先搜索committed然后是uncommitted 这对scan来说是可以的
                 // 对这边的直接通过datakey获取有点不合适了 搜索uncommitted逻辑要到前边,要是有的话可以提前return
                 if let Some(tableMutations) = tableMutations {
-                    if self.checkUncommittedDataVisibility(tableMutations, mvccKeyBuffer, dataKey)? {
+                    if self.checkUncommittedDataVisi(tableMutations, mvccKeyBuffer, dataKey)? {
                         // 是不是不会是none
                         if let Some(addedValueBinary) = tableMutations.get(u64ToByteArrRef!(dataKey).as_ref()) {
                             if let Some(rowData) = self.readRowDataBinary(table, addedValueBinary.as_slice(), tableFilter, selectedColNames)? {
@@ -414,7 +414,7 @@ impl<'session> CommandExecutor<'session> {
                     for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(meta::DATA_KEY_PATTERN, Direction::Forward)) {
                         let (dataKeyBinary, rowDataBinary) = iterResult?;
 
-                        // prefix iterator原理只是seek到prefix对应的key而已 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
+                        // prefix iterator原理只是seek到prefix对应的key而已, 到后边可能会超过范围 https://www.jianshu.com/p/9848a376d41d
                         // 前4个bit的值是不是 KEY_PREFIX_DATA
                         if extractPrefixFromKeySlice!(dataKeyBinary) != meta::KEY_PREFIX_DATA {
                             break;
@@ -422,7 +422,7 @@ impl<'session> CommandExecutor<'session> {
 
                         let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
 
-                        // mvcc的visibility筛选
+                        // mvcc visibility筛选
                         if self.checkCommittedDataVisiWithoutTxMutations(&mut mvccKeyBuffer,
                                                                          &mut rawIterator,
                                                                          dataKey,
@@ -439,6 +439,7 @@ impl<'session> CommandExecutor<'session> {
                             }
                         }
 
+                        // pre processor
                         if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
                             if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
                                 continue;
@@ -447,6 +448,7 @@ impl<'session> CommandExecutor<'session> {
 
                         // mvcc筛选过了 对rowData本身的筛选
                         if let Some(rowData) = self.readRowDataBinary(scanParams.table, &*rowDataBinary, scanParams.tableFilter, scanParams.selectedColumnNames)? {
+                            // post processor
                             if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
                                 if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
                                     continue;
@@ -511,7 +513,7 @@ impl<'session> CommandExecutor<'session> {
             for (addedDataKeyBinaryCurrentTx, addRowDataBinaryCurrentTx) in addedDataCurrentTxRange {
                 let addedDataKeyCurrentTx: DataKey = byte_slice_to_u64!(addedDataKeyBinaryCurrentTx);
 
-                if self.checkUncommittedDataVisibility(tableMutationsCurrentTx, &mut mvccKeyBuffer, addedDataKeyCurrentTx)? == false {
+                if self.checkUncommittedDataVisi(tableMutationsCurrentTx, &mut mvccKeyBuffer, addedDataKeyCurrentTx)? == false {
                     continue;
                 }
 

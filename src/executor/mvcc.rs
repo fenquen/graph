@@ -47,7 +47,7 @@ impl<'session> CommandExecutor<'session> {
             // 能确保会至少有xmax是0的 mvcc条目
             // 得知本tx可视范围内该条老data是recently被哪个tx干掉的
             let originDataXmax = extractTxIdFromMvccKey!( rawIterator.key().unwrap());
-            // 要和本条data的xmin比较 如果不相等的话抛弃
+            // 要和本条data的xmin比较 如果不相等的话 该条因为update产生的data不是第1手的
             if xmin != originDataXmax {
                 // todo 还需要把这条因为update产生的多的new data 干掉 完成
                 let xmax = self.generateDeleteDataXmax(mvccKeyBuffer, dataKey)?;
@@ -72,10 +72,10 @@ impl<'session> CommandExecutor<'session> {
         Ok(tableMutations.get(mvccKeyBuffer.as_ref()).is_none())
     }
 
-    pub(super) fn checkUncommittedDataVisibility(&self,
-                                                 tableMutations: &TableMutations,
-                                                 mvccKeyBuffer: &mut BytesMut,
-                                                 addedDataKeyCurrentTx: DataKey) -> anyhow::Result<bool> {
+    pub(super) fn checkUncommittedDataVisi(&self,
+                                           tableMutations: &TableMutations,
+                                           mvccKeyBuffer: &mut BytesMut,
+                                           addedDataKeyCurrentTx: DataKey) -> anyhow::Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 检验当前tx上新add的话 只要检验相应的xmax便可以了 就算有xmax那对应的txId也只会是currentTx
