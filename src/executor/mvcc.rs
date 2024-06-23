@@ -8,28 +8,44 @@ use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, RowId
 use anyhow::Result;
 
 impl<'session> CommandExecutor<'session> {
+    pub(super) fn committedDataVisible(&self,
+                                       mvccKeyBuffer: &mut BytesMut,
+                                       dbRawIterator: &mut DBRawIterator,
+                                       dataKey: DataKey,
+                                       columnFamily: &ColumnFamily,
+                                       tableName: &String,
+                                       tableMutations: Option<&TableMutations>) -> Result<bool> {
+        if self.committedDataVisibleWithoutTxMutations(mvccKeyBuffer, dbRawIterator, dataKey, columnFamily, tableName)? == false {
+            return Ok(false);
+        }
+
+        // 以上是全都在已落地的维度内的visibility check
+        // 还要结合当前事务上的尚未提交的mutations,看已落地的是不是应该干掉
+        self.committedDataVisibleWithTxMutations(tableMutations, mvccKeyBuffer, dataKey)
+    }
+
     // 对data对应的mvccKey的visibility筛选
-    pub(super) fn checkCommittedDataVisiWithoutTxMutations(&self,
-                                                           mvccKeyBuffer: &mut BytesMut,
-                                                           rawIterator: &mut DBRawIterator,
-                                                           dataKey: DataKey,
-                                                           columnFamily: &ColumnFamily,
-                                                           tableName: &String) -> Result<bool> {
+    fn committedDataVisibleWithoutTxMutations(&self,
+                                              mvccKeyBuffer: &mut BytesMut,
+                                              dbRawIterator: &mut DBRawIterator,
+                                              dataKey: DataKey,
+                                              columnFamily: &ColumnFamily,
+                                              tableName: &String) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // xmin
         // 当vaccum时候会变为 TX_ID_FROZEN 别的时候不会变动 只会有1条
         mvccKeyBuffer.writeDataMvccXmin(dataKey, meta::TX_ID_FROZEN);
-        rawIterator.seek(mvccKeyBuffer.as_ref());
+        dbRawIterator.seek(mvccKeyBuffer.as_ref());
         // rawIterator生成的时候可以通过readOption设置bound 要是越过的话iterator.valid()为false
-        let mvccKeyXmin = rawIterator.key().unwrap();
+        let mvccKeyXmin = dbRawIterator.key().unwrap();
         let xmin = extractTxIdFromMvccKey!(mvccKeyXmin);
 
         // xmax
         mvccKeyBuffer.writeDataMvccXmax(dataKey, currentTxId);
-        rawIterator.seek_for_prev(mvccKeyBuffer.as_ref());
+        dbRawIterator.seek_for_prev(mvccKeyBuffer.as_ref());
         // 能确保会至少有xmax是0的 mvcc条目
-        let mvccKeyXmax = rawIterator.key().unwrap();
+        let mvccKeyXmax = dbRawIterator.key().unwrap();
         let xmax = extractTxIdFromMvccKey!(mvccKeyXmax);
 
         let snapshot = self.session.getSnapshot()?;
@@ -42,11 +58,11 @@ impl<'session> CommandExecutor<'session> {
         if meta::DATA_KEY_INVALID != originDataKey {
             // 探寻originDataKey对应的mvcc xmax记录
             mvccKeyBuffer.writeDataMvccXmax(originDataKey, currentTxId);
-            rawIterator.seek_for_prev(mvccKeyBuffer.as_ref());
+            dbRawIterator.seek_for_prev(mvccKeyBuffer.as_ref());
 
             // 能确保会至少有xmax是0的 mvcc条目
             // 得知本tx可视范围内该条老data是recently被哪个tx干掉的
-            let originDataXmax = extractTxIdFromMvccKey!( rawIterator.key().unwrap());
+            let originDataXmax = extractTxIdFromMvccKey!( dbRawIterator.key().unwrap());
             // 要和本条data的xmin比较 如果不相等的话 该条因为update产生的data不是第1手的
             if xmin != originDataXmax {
                 // todo 还需要把这条因为update产生的多的new data 干掉 完成
@@ -59,10 +75,16 @@ impl<'session> CommandExecutor<'session> {
         Ok(meta::isVisible(currentTxId, xmin, xmax))
     }
 
-    pub(super) fn checkCommittedDataVisiWithTxMutations(&self,
-                                                        tableMutations: &TableMutations,
-                                                        mvccKeyBuffer: &mut BytesMut,
-                                                        dataKey: DataKey) -> Result<bool> {
+    fn committedDataVisibleWithTxMutations(&self,
+                                           tableMutations: Option<&TableMutations>,
+                                           mvccKeyBuffer: &mut BytesMut,
+                                           dataKey: DataKey) -> Result<bool> {
+        if tableMutations.is_none() {
+            return Ok(true);
+        }
+
+        let tableMutations = tableMutations.unwrap();
+
         let currentTxId = self.session.getTxId()?;
 
         // 要看落地的有没有被当前的tx上的干掉  只要读取相应的xmax的mvccKey
@@ -75,7 +97,7 @@ impl<'session> CommandExecutor<'session> {
     pub(super) fn checkUncommittedDataVisi(&self,
                                            tableMutations: &TableMutations,
                                            mvccKeyBuffer: &mut BytesMut,
-                                           addedDataKeyCurrentTx: DataKey) -> anyhow::Result<bool> {
+                                           addedDataKeyCurrentTx: DataKey) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 检验当前tx上新add的话 只要检验相应的xmax便可以了 就算有xmax那对应的txId也只会是currentTx
