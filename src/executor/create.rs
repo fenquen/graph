@@ -38,7 +38,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(CommandExecResult::DdlResult)
     }
 
-    // todo 对非unique的index如何应对重复的value
+    // todo 对非unique的index如何应对重复的value,后边添加dataKey 完成
     pub(super) fn createIndex(&self, mut index: Index) -> Result<CommandExecResult> {
         if meta::NAME_DB_OBJ.contains_key(index.name.as_str()) {
             if index.createIfNotExist == false {

@@ -242,7 +242,7 @@ impl<'session> CommandExecutor<'session> {
 
                     //  对麾下的各个的and脉络压缩
                     let opValueVecVec: Vec<Vec<(Op, &GraphValue)>> =
-                        opValueVecVec.iter().filter_map(|opValueVec| index::accumulateAnd(opValueVec.as_slice())).collect();
+                        opValueVecVec.iter().filter_map(|opValueVec| accumulateAnd(opValueVec.as_slice())).collect();
 
                     if opValueVecVec.is_empty() {
                         continue 'loopIndex;
@@ -700,12 +700,8 @@ impl<'session> CommandExecutor<'session> {
         }
 
         let dataKeys: Vec<DataKey> = dataKeys.into_iter().collect();
+        let rowDatas = self.getRowDatasByDataKeys(dataKeys.as_slice(), indexSearch.scanParams)?;
 
-        let rowDatas =
-            self.getRowDatasByDataKeys(dataKeys.as_slice(),
-                                       indexSearch.scanParams.table,
-                                       indexSearch.scanParams.tableFilter,
-                                       indexSearch.scanParams.selectedColumnNames)?;
         Ok(rowDatas)
     }
 

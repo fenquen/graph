@@ -109,26 +109,22 @@ impl<'Table> Default for ScanParams<'Table, '_, '_> {
 
 impl<'session> CommandExecutor<'session> {
     // todo 实现不实际捞取数据的
-    // todo getRowDatasByDataKeys 也要有hook 因为scan时候的index搜索得到dataKeys会调用到该函数
+    // todo getRowDatasByDataKeys 也要有hook 因为scan时候的index搜索得到dataKeys后会调用到该函数
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
-    pub(super) fn getRowDatasByDataKeys(&self,
-                                        dataKeys: &[DataKey],
-                                        table: &Table,
-                                        tableFilter: Option<&Expr>,
-                                        selectedColNames: Option<&Vec<String>>) -> Result<Vec<(DataKey, RowData)>> {
+    pub(super) fn getRowDatasByDataKeys(&self, dataKeys: &[DataKey], scanParams: &ScanParams) -> Result<Vec<(DataKey, RowData)>> {
         if dataKeys.is_empty() {
             return Ok(Vec::new());
         }
 
         let mut rowDatas = Vec::with_capacity(dataKeys.len());
 
-        let columnFamily = Session::getColFamily(&table.name)?;
+        let columnFamily = Session::getColFamily(&scanParams.table.name)?;
 
         let mut mvccKeyBuffer = &mut BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
-        let mut rawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
+        let mut rawIterator: DBRawIterator = self.session.getDBRawIterator(&columnFamily)?;
 
         let tableName_mutationsOnTable = self.session.tableName_mutations.read().unwrap();
-        let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(&table.name);
+        let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(&scanParams.table.name);
 
         let mut processDataKey =
             |dataKey: DataKey, sender: Option<SyncSender<(DataKey, RowData)>>| -> Result<()> {
@@ -139,7 +135,7 @@ impl<'session> CommandExecutor<'session> {
                     if self.checkUncommittedDataVisi(tableMutations, mvccKeyBuffer, dataKey)? {
                         // 是不是不会是none
                         if let Some(addedValueBinary) = tableMutations.get(u64ToByteArrRef!(dataKey).as_ref()) {
-                            if let Some(rowData) = self.readRowDataBinary(table, addedValueBinary.as_slice(), tableFilter, selectedColNames)? {
+                            if let Some(rowData) = self.readRowDataBinary(addedValueBinary.as_slice(), scanParams)? {
                                 rowDatas.push((dataKey, rowData));
                                 return Ok(());
                             }
@@ -151,7 +147,7 @@ impl<'session> CommandExecutor<'session> {
                 // mvcc的visibility筛选
                 if self.committedDataVisible(&mut mvccKeyBuffer, &mut rawIterator,
                                              dataKey, &columnFamily,
-                                             &table.name, tableMutations)? == false {
+                                             &scanParams.table.name, tableMutations)? == false {
                     return Ok(());
                 }
 
@@ -161,7 +157,7 @@ impl<'session> CommandExecutor<'session> {
                         None => return Ok(()), // 有可能
                     };
 
-                if let Some(rowData) = self.readRowDataBinary(table, rowDataBinary.as_slice(), tableFilter, selectedColNames)? {
+                if let Some(rowData) = self.readRowDataBinary(rowDataBinary.as_slice(), scanParams)? {
                     match sender {
                         Some(sender) => sender.send((dataKey, rowData))?,
                         None => rowDatas.push((dataKey, rowData)),
@@ -341,7 +337,12 @@ impl<'session> CommandExecutor<'session> {
                                                 }
                                             }
 
-                                            if let Some(rowData) = commandExecutor.readRowDataBinary(table, &*rowDataBinary, tableFilter, selectedColumnNames)? {
+                                            let mut scanParams = ScanParams::default();
+                                            scanParams.table = table;
+                                            scanParams.tableFilter = tableFilter;
+                                            scanParams.selectedColumnNames = selectedColumnNames;
+
+                                            if let Some(rowData) = commandExecutor.readRowDataBinary(&*rowDataBinary, &scanParams)? {
                                                 // committed post
                                                 if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
                                                     if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
@@ -431,7 +432,7 @@ impl<'session> CommandExecutor<'session> {
                         }
 
                         // mvcc筛选过了 对rowData本身的筛选
-                        if let Some(rowData) = self.readRowDataBinary(scanParams.table, &*rowDataBinary, scanParams.tableFilter, scanParams.selectedColumnNames)? {
+                        if let Some(rowData) = self.readRowDataBinary(&*rowDataBinary, &scanParams)? {
                             // post processor
                             if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
                                 if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
@@ -508,7 +509,7 @@ impl<'session> CommandExecutor<'session> {
                     }
                 }
 
-                if let Some(rowData) = self.readRowDataBinary(scanParams.table, addRowDataBinaryCurrentTx, scanParams.tableFilter, scanParams.selectedColumnNames)? {
+                if let Some(rowData) = self.readRowDataBinary(addRowDataBinaryCurrentTx, &scanParams)? {
                     if let Some(ref mut scanUncommittedPostProcessor) = scanHooks.scanUncommittedPostProcessor {
                         if scanUncommittedPostProcessor(tableMutationsCurrentTx, addedDataKeyCurrentTx, &rowData)? == false {
                             continue;
@@ -523,13 +524,9 @@ impl<'session> CommandExecutor<'session> {
         Ok(satisfiedRows)
     }
 
-    fn readRowDataBinary(&self,
-                         table: &Table,
-                         rowBinary: &[Byte],
-                         tableFilter: Option<&Expr>,
-                         selectedColumnNames: Option<&Vec<String>>) -> Result<Option<RowData>> {
+    fn readRowDataBinary(&self, rowBinary: &[Byte], scanParams: &ScanParams) -> Result<Option<RowData>> {
         // todo 使用meta对象的引用来控制ddl
-        let columnNames = table.columns.iter().map(|column| column.name.clone()).collect::<Vec<String>>();
+        let columnNames = scanParams.table.columns.iter().map(|column| column.name.clone()).collect::<Vec<String>>();
 
         // todo 如何不去的copy
         let mut myBytesRowData = MyBytes::from(Bytes::from(Vec::from(rowBinary)));
@@ -545,17 +542,17 @@ impl<'session> CommandExecutor<'session> {
             rowData.insert(columnName, columnValue);
         }
 
-        let rowData = if selectedColumnNames.is_some() {
-            pruneRowData(rowData, selectedColumnNames)?
+        let rowData = if scanParams.selectedColumnNames.is_some() {
+            pruneRowData(rowData, scanParams.selectedColumnNames)?
         } else {
             rowData
         };
 
-        if tableFilter.is_none() {
+        if scanParams.tableFilter.is_none() {
             return Ok(Some(rowData));
         }
 
-        if let GraphValue::Boolean(satisfy) = tableFilter.unwrap().calc(Some(&rowData))? {
+        if let GraphValue::Boolean(satisfy) = scanParams.tableFilter.unwrap().calc(Some(&rowData))? {
             if satisfy {
                 Ok(Some(rowData))
             } else {
@@ -789,7 +786,12 @@ impl<'session> CommandExecutor<'session> {
 
         self.searchPointerKeyByPrefix(src.name.as_str(), pointerKeyBuffer.as_ref(), searchPointerKeyHooks)?;
 
-        let relationDatas = self.getRowDatasByDataKeys(targetRelationDataKeys.as_slice(), dest, destFilter, None)?;
+        let mut scanParams = ScanParams::default();
+        scanParams.table = dest;
+        scanParams.tableFilter = destFilter;
+        scanParams.selectedColumnNames = None;
+
+        let relationDatas = self.getRowDatasByDataKeys(targetRelationDataKeys.as_slice(), &scanParams)?;
 
         Ok(relationDatas)
     }

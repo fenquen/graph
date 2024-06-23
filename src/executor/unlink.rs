@@ -69,17 +69,17 @@ impl<'session> CommandExecutor<'session> {
                     // relation的src dest 的dataKey
                     let targetDataKey = extractTargetDataKeyFromPointerKey!(&*relPointerKey);
 
+                    let mut scanParams = ScanParams::default();
+                    scanParams.table = srcTable;
+                    scanParams.tableFilter = if processSrc {
+                        unlinkLinkStyle.srcTableFilterExpr.as_ref()
+                    } else {
+                        unlinkLinkStyle.destTableFilterExpr.as_ref()
+                    };
+                    scanParams.selectedColumnNames = None;
+
                     // 是不是符合src dest上的筛选expr
-
-
-                    if self.getRowDatasByDataKeys(&[targetDataKey],
-                                                  srcTable,
-                                                  if processSrc {
-                                                      unlinkLinkStyle.srcTableFilterExpr.as_ref()
-                                                  } else {
-                                                      unlinkLinkStyle.destTableFilterExpr.as_ref()
-                                                  },
-                                                  None)?.is_empty() {
+                    if self.getRowDatasByDataKeys(&[targetDataKey], &scanParams)?.is_empty() {
                         continue;
                     }
 

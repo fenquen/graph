@@ -358,7 +358,10 @@ impl<'session> CommandExecutor<'session> {
 
         // 应对对当前的data条目的 对某个relDesc的相应要求
         let mut processRelDesc =
-            |nodeDataKey: DataKey, pointerKeyTag: KeyTag, relDesc: &RelDesc, relation: &Table| {
+            |nodeDataKey: DataKey,
+             pointerKeyTag: KeyTag,
+             relDesc: &RelDesc,
+             relation: &Table| {
                 let mut found = false;
 
                 // 钩子
@@ -371,11 +374,13 @@ impl<'session> CommandExecutor<'session> {
                         // 得到relation数据的dataKey
                         let targetRelationDataKey = extractTargetDataKeyFromPointerKey!(pointerKey);
 
+                        let mut scanParams = ScanParams::default();
+                        scanParams.table = relation;
+                        scanParams.tableFilter = relDesc.relationFliter.as_ref();
+                        scanParams.selectedColumnNames = None;
+
                         // relation数据是不是满足relationFliter
-                        if self.getRowDatasByDataKeys(&[targetRelationDataKey],
-                                                      relation,
-                                                      relDesc.relationFliter.as_ref(),
-                                                      None)?.len() > 0 {
+                        if self.getRowDatasByDataKeys(&[targetRelationDataKey], &scanParams)?.len() > 0 {
                             found = true;
                             return Result::<IterationCmd>::Ok(IterationCmd::Return);
                         }
@@ -419,7 +424,7 @@ impl<'session> CommandExecutor<'session> {
                 // 遍历relDesc,看data是不是都能满足
                 for relDesc in &selectTableUnderRels.relDescVec {
                     let relation = self.getDBObjectByName(relDesc.relationName.as_str())?;
-                    let relation  = relation.asRelation()?;
+                    let relation = relation.asRelation()?;
 
                     // 是不是能满足当前relDesc要求
                     let satisfyRelDesc =
