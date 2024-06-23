@@ -19,7 +19,7 @@ use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
 use tokio::io::AsyncWriteExt;
 use crate::executor::CommandExecutor;
 use crate::parser::command::Command;
-use crate::types::{Byte, ColumnFamily, KV, SelectResultToFront, Snapshot, TableMutations, TxId};
+use crate::types::{Byte, ColumnFamily, DBRawIterator, KV, SelectResultToFront, Snapshot, TableMutations, TxId};
 use crate::utils::HashMapExt;
 
 pub struct Session {
@@ -177,10 +177,10 @@ impl Session {
         }
     }
 
-    pub fn getColFamily(colFamilyName: &str) -> Result<ColumnFamily> {
-        match meta::STORE.dataStore.cf_handle(colFamilyName) {
+    pub fn getColFamily(columnFamilyName: &str) -> Result<ColumnFamily> {
+        match meta::STORE.dataStore.cf_handle(columnFamilyName) {
             Some(cf) => Ok(cf),
-            None => throw!(&format!("column family:{} not exist", colFamilyName))
+            None => throw!(&format!("column family:{} not exist", columnFamilyName))
         }
     }
 
@@ -189,6 +189,10 @@ impl Session {
             Some(ref snapshot) => Ok(snapshot),
             None => throw!("not in a transaction")
         }
+    }
+
+    pub fn getDBRawIterator(&self, columnFamily: &ColumnFamily) -> Result<DBRawIterator> {
+        Ok(self.getSnapshot()?.raw_iterator_cf(columnFamily))
     }
 
     pub fn createColFamily(&self, columnFamilyName: &str) -> Result<()> {
