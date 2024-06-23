@@ -46,3 +46,5 @@ pub type TableMutations = BTreeMap<Vec<Byte>, Vec<Byte>>;
 
 /// 起点只会是indclude 终点只会是include unbound
 pub type RelationDepth = (Bound<usize>, Bound<usize>);
+
+pub type Pointer = u64;

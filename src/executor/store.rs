@@ -18,7 +18,7 @@ use crate::graph_value::GraphValue;
 use crate::meta::{Column, DBObject, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, KeyTag, RowId};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, KeyTag, RowId, Pointer};
 use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
 use anyhow::Result;
 use dashmap::mapref::one::Ref;
@@ -90,7 +90,7 @@ pub(super) struct ScanParams<'Table, 'TableFilter, 'SelectedColumnNames> {
 }
 
 lazy_static! {
-    static ref T: Table = Table::default();
+    static ref DUMMY_TABLE: Table = Table::default();
 }
 
 // 如何对含有引用的struct生成default
@@ -98,7 +98,7 @@ lazy_static! {
 impl<'Table> Default for ScanParams<'Table, '_, '_> {
     fn default() -> Self {
         ScanParams {
-            table: &T,
+            table: &DUMMY_TABLE,
             tableFilter: None,
             selectedColumnNames: None,
             limit: None,
@@ -109,6 +109,7 @@ impl<'Table> Default for ScanParams<'Table, '_, '_> {
 
 impl<'session> CommandExecutor<'session> {
     // todo 实现不实际捞取数据的
+    // todo getRowDatasByDataKeys 也要有hook 因为scan时候的index搜索得到dataKeys会调用到该函数
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
     pub(super) fn getRowDatasByDataKeys(&self,
                                         dataKeys: &[DataKey],
@@ -148,18 +149,10 @@ impl<'session> CommandExecutor<'session> {
 
                 // todo getRowDatasByDataKeys() 也要mvcc筛选 完成
                 // mvcc的visibility筛选
-                if self.checkCommittedDataVisiWithoutTxMutations(&mut mvccKeyBuffer,
-                                                                 &mut rawIterator,
-                                                                 dataKey,
-                                                                 &columnFamily,
-                                                                 &table.name)? == false {
+                if self.committedDataVisible(&mut mvccKeyBuffer, &mut rawIterator,
+                                             dataKey, &columnFamily,
+                                             &table.name, tableMutations)? == false {
                     return Ok(());
-                }
-
-                if let Some(tableMutations) = tableMutations {
-                    if self.checkCommittedDataVisiWithTxMutations(tableMutations, &mut mvccKeyBuffer, dataKey)? == false {
-                        return Ok(());
-                    }
                 }
 
                 let rowDataBinary =
@@ -206,8 +199,7 @@ impl<'session> CommandExecutor<'session> {
             A: ScanCommittedPreProcessor,
             B: ScanCommittedPostProcessor,
             C: ScanUncommittedPreProcessor,
-            D: ScanUncommittedPostProcessor,
-    {
+            D: ScanUncommittedPostProcessor {
 
         // todo 使用table id 为 column family 标识
         let columnFamily = Session::getColFamily(&scanParams.table.name)?;
@@ -219,19 +211,32 @@ impl<'session> CommandExecutor<'session> {
 
         let mut satisfiedRows =
             if scanParams.tableFilter.is_some() || select {
-                if let Some(tableFilter) = scanParams.tableFilter {
-                    let seletedColNames = scanParams.selectedColumnNames.map(|a| a.as_slice());
-                    if let Some(indexSearch) = self.getMostSuitableIndex(scanParams.table, tableFilter, seletedColNames)? {
-                        self.searchByIndex(indexSearch)?;
+                let mut satisfiedRows = Vec::new();
+
+                let mut scanSearch = false;
+
+                if scanParams.tableFilter.is_some() {
+                    if let Some(mut indexSearch) = self.getMostSuitableIndex(&scanParams)? {
+                        indexSearch.columnFamily = &columnFamily;
+                        indexSearch.tableMutationsCurrentTx = tableMutationsCurrentTx;
+
+                        indexSearch.mvccKeyBufferPtr = utils::refMut2Ptr(&mut mvccKeyBuffer);
+
+                        let mut dbRawIterator = self.session.getDBRawIterator(&columnFamily)?;
+                        indexSearch.dbRawIteratorPtr = utils::refMut2Ptr(&mut dbRawIterator);
+
+                        indexSearch.scanHooksPtr = utils::refMut2Ptr(&mut scanHooks);
+
+                        satisfiedRows = self.searchByIndex::<A, B, C, D>(indexSearch)?;
+
+                        scanSearch = false;
                     }
                 }
-
-                let mut satisfiedRows = Vec::new();
 
                 let mut serialScan = true;
 
                 // 如果设置 scanConcurrency >1 说明是有 concurrent可能,到底是不是还要看下边的
-                if self.session.scanConcurrency > 1 {
+                if scanSearch && self.session.scanConcurrency > 1 {
                     const COUNT_PER_THREAD: u64 = 2;
 
                     // todo 需要添加统计功能记录表有多少条data
@@ -311,7 +316,6 @@ impl<'session> CommandExecutor<'session> {
                                         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
                                         let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
 
-                                        // let mut rowDatas = Vec::new();
                                         let mut readCount = 0usize;
 
                                         for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(u64ToByteArrRef!(dataKeyStart), Direction::Forward)) {
@@ -324,20 +328,10 @@ impl<'session> CommandExecutor<'session> {
                                             }
 
                                             // visibility
-                                            if commandExecutor.checkCommittedDataVisiWithoutTxMutations(&mut mvccKeyBuffer,
-                                                                                                        &mut rawIterator,
-                                                                                                        dataKey,
-                                                                                                        &columnFamily,
-                                                                                                        &table.name)? == false {
+                                            if commandExecutor.committedDataVisible(&mut mvccKeyBuffer, &mut rawIterator,
+                                                                                    dataKey, &columnFamily,
+                                                                                    &table.name, tableMutationsCurrentTx)? == false {
                                                 continue;
-                                            }
-
-                                            // visibility
-                                            if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
-                                                if commandExecutor.checkCommittedDataVisiWithTxMutations(mutationsRawCurrentTx,
-                                                                                                         &mut mvccKeyBuffer, dataKey)? == false {
-                                                    continue;
-                                                }
                                             }
 
                                             // committed pre
@@ -401,7 +395,7 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 // 虽然设置了可以对线程scan 然而可能因为实际的数据量不够还是用不到
-                if serialScan {
+                if scanSearch && serialScan {
                     let snapshot = self.session.getSnapshot()?;
 
                     // mvcc的visibility筛选
@@ -423,20 +417,10 @@ impl<'session> CommandExecutor<'session> {
                         let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
 
                         // mvcc visibility筛选
-                        if self.checkCommittedDataVisiWithoutTxMutations(&mut mvccKeyBuffer,
-                                                                         &mut rawIterator,
-                                                                         dataKey,
-                                                                         &columnFamily,
-                                                                         &scanParams.table.name)? == false {
+                        if self.committedDataVisible(&mut mvccKeyBuffer, &mut rawIterator,
+                                                     dataKey, &columnFamily,
+                                                     &scanParams.table.name, tableMutationsCurrentTx)? == false {
                             continue;
-                        }
-
-                        // 以上是全都在已落地的维度内的visibility check
-                        // 还要结合当前事务上的尚未提交的mutations,看已落地的是不是应该干掉
-                        if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
-                            if self.checkCommittedDataVisiWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
-                                continue;
-                            }
                         }
 
                         // pre processor
@@ -475,6 +459,7 @@ impl<'session> CommandExecutor<'session> {
                         }
                     }
                 }
+
                 satisfiedRows
             } else { // 说明是link 且尚未写filter
                 let mut rawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
@@ -561,7 +546,7 @@ impl<'session> CommandExecutor<'session> {
         }
 
         let rowData = if selectedColumnNames.is_some() {
-            pruneRowData(rowData, selectedColumnNames.map(|vec| vec.as_slice()))?
+            pruneRowData(rowData, selectedColumnNames)?
         } else {
             rowData
         };
@@ -811,7 +796,7 @@ impl<'session> CommandExecutor<'session> {
 }
 
 pub(super) fn pruneRowData(mut rowData: RowData,
-                           selectedColName: Option<&[String]>) -> Result<RowData> {
+                           selectedColName: Option<&Vec<String>>) -> Result<RowData> {
     let mut prunedRowData: RowData = HashMap::with_capacity(rowData.len());
 
     for selectedColName in selectedColName.unwrap() {

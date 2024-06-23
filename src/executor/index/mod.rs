@@ -1,6 +1,7 @@
 pub(super) mod or;
 pub(super) mod and;
 
+use std::cell::RefCell;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
@@ -13,12 +14,14 @@ use crate::parser::op::{MathCmpOp, Op};
 use crate::executor::{CommandExecutor, index};
 use crate::expr::Expr;
 use crate::meta::{DBObject, Table};
-use crate::{meta, suffix_plus_plus, throwFormat, byte_slice_to_u64, global};
+use crate::{meta, suffix_plus_plus, throwFormat, byte_slice_to_u64, global, utils};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::executor::store;
 use crate::session::Session;
-use crate::types::{Byte, DataKey, DBRawIterator, RowData};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, Pointer, RowData, TableMutations};
 use anyhow::Result;
+use crate::executor::store::{ScanHooks, ScanParams};
+use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
 
 #[derive(Clone, Copy)]
 pub enum Logical {
@@ -104,21 +107,28 @@ macro_rules! extractDataKeyFromIndexKey {
 }
 
 pub(in crate::executor) struct IndexSearch<'a> {
-    pub(in crate::executor) dbObjectIndex: Ref<'a, String, DBObject>,
+    pub dbObjectIndex: Ref<'a, String, DBObject>,
     /// 包含的grapgValue 只可能是 IndexUseful
-    pub(in crate::executor) opValueVecVecAcrossIndexFilteredCols: Vec<Vec<Vec<(Op, GraphValue)>>>,
+    pub opValueVecVecAcrossIndexFilteredCols: Vec<Vec<Vec<(Op, GraphValue)>>>,
     /// 如果说index能够 包含filter的全部字段 和 包含select的全部字段,那么就不用到原表上再搜索了,能够直接就地应对
-    pub(in crate::executor) indexLocalSearch: bool,
-    pub(in crate::executor) selectedColNames: Option<&'a [String]>,
-    pub(in crate::executor) isAnd: bool,
+    pub indexLocalSearch: bool,
+    // pub(in crate::executor) selectedColNames: Option<&'a [String]>,
+    pub isAnd: bool,
+    pub scanParams: &'a ScanParams<'a, 'a, 'a>,
+    // 以下的2个的字段算是拖油瓶的,不想让函数的参数写的长长的1串,都纳入到IndexSearch麾下
+    pub columnFamily: &'a ColumnFamily<'a>,
+    pub tableMutationsCurrentTx: Option<&'a TableMutations>,
+    // mvccKeyBufferPtr, dbRawIteratorPtr, scanHooksPtr 是透传到indexLocalSearch使用的
+    pub mvccKeyBufferPtr: Pointer,
+    pub dbRawIteratorPtr: Pointer,
+    pub scanHooksPtr: Pointer,
 }
 
 impl<'session> CommandExecutor<'session> {
     // todo table对应的index列表 是不是应该融入到table对象 完成
     pub(super) fn getMostSuitableIndex<'a>(&'a self, // 对self使用 'a的原因是 dbObjectIndex是通过 self.getDBObjectByName() 得到 含有的生命周期是 'session
-                                           table: &Table, tableFilter: &Expr,
-                                           selectedColNames: Option<&'a [String]>) -> anyhow::Result<Option<IndexSearch<'a>>> {
-        if table.indexNames.is_empty() {
+                                           scanParams: &'a ScanParams) -> Result<Option<IndexSearch<'a>>> {
+        if scanParams.table.indexNames.is_empty() {
             return Ok(None);
         }
 
@@ -129,7 +139,8 @@ impl<'session> CommandExecutor<'session> {
         let mut isAnd = true;
 
         // 扫描filter 写入
-        tableFilter.collectColNameValue(&mut tableFilterColName_opValuesVec, &mut isAnd)?;
+        assert!(scanParams.tableFilter.is_some());
+        scanParams.tableFilter.as_ref().unwrap().collectColNameValue(&mut tableFilterColName_opValuesVec, &mut isAnd)?;
 
         // 说明tableFilter上未写column名,那么tableFilter是可以直接计算的
         if tableFilterColName_opValuesVec.is_empty() {
@@ -148,7 +159,7 @@ impl<'session> CommandExecutor<'session> {
         }
 
         // 候选的index名单
-        let mut candiateInices = Vec::with_capacity(table.indexNames.len());
+        let mut candiateInices = Vec::with_capacity(scanParams.table.indexNames.len());
 
         // todo 要是有多个index都能应对tableFilter应该挑选哪个 需要考虑 select和filter的涵盖
         // 挑选index 目前的原则有  index的本身能涵盖多少selectedColName, index能涵盖多少过滤条件
@@ -156,7 +167,7 @@ impl<'session> CommandExecutor<'session> {
         // 要是不能的话 都得要去原始的表上 还是优先 覆盖过滤条件多的
         // 遍历table的各个index,筛掉不合适的
         'loopIndex:
-        for indexName in &table.indexNames {
+        for indexName in &scanParams.table.indexNames {
             let dbObjectIndex = self.getDBObjectByName(indexName)?;
             let index = dbObjectIndex.asIndex()?;
 
@@ -178,7 +189,7 @@ impl<'session> CommandExecutor<'session> {
                     break;
                 }
 
-                if let Some(selectedColNames) = selectedColNames {
+                if let Some(selectedColNames) = scanParams.selectedColumnNames {
                     if selectedColNames.contains(indexColName) {
                         suffix_plus_plus!(indexSelectedColCount);
                     }
@@ -353,7 +364,7 @@ impl<'session> CommandExecutor<'session> {
         // value 和 column的type是不是匹配
         for index in 0..indexFilteredColNames.len() {
             let columnNameFromIndexUsed = indexFilteredColNames.get(index).unwrap();
-            for column in &table.columns {
+            for column in &scanParams.table.columns {
                 if column.name.as_str() != columnNameFromIndexUsed {
                     continue;
                 }
@@ -364,7 +375,7 @@ impl<'session> CommandExecutor<'session> {
                     for (_, value) in opValueVec {
                         if column.type0.compatible(value) == false {
                             throwFormat!("table: {}, column:{}, type:{} is not compatible with value:{}",
-                                table.name, columnNameFromIndexUsed, column.type0, value)
+                                scanParams.table.name, columnNameFromIndexUsed, column.type0, value)
                         }
                     }
                 }
@@ -374,7 +385,7 @@ impl<'session> CommandExecutor<'session> {
         let indexLocalSearch = {
             let mut indexLocalSearch = false;
 
-            if let Some(selectedColNames) = selectedColNames {
+            if let Some(selectedColNames) = scanParams.selectedColumnNames {
                 // 覆盖全部的select 字段
                 if indexSelectedColCount == selectedColNames.len() {
                     // 覆盖全部的过滤字段
@@ -391,24 +402,32 @@ impl<'session> CommandExecutor<'session> {
             dbObjectIndex,
             opValueVecVecAcrossIndexFilteredCols,
             indexLocalSearch,
-            selectedColNames,
+            // selectedColNames,
             isAnd,
+            scanParams,
+            columnFamily: utils::getDummyRef(),
+            tableMutationsCurrentTx: None,
+            mvccKeyBufferPtr: Default::default(),
+            dbRawIteratorPtr: Default::default(),
+            scanHooksPtr: Default::default(),
         };
 
         Ok(Some(indexSearch))
     }
 
     // todo 如果index本身能包含要select的全部字段 那么直接index读取了
-    /// index本身也是1个table 保存的不过是dataKey
-    pub(in crate::executor) fn searchByIndex(&self, indexSearch: IndexSearch) -> anyhow::Result<()> {
+    /// index本身也是个table 只不过可以是实际的data加上dataKey
+    pub(in crate::executor) fn searchByIndex<A, B, C, D>(&self, indexSearch: IndexSearch) -> Result<Vec<(DataKey, RowData)>>
+        where
+            A: ScanCommittedPreProcessor,
+            B: ScanCommittedPostProcessor,
+            C: ScanUncommittedPreProcessor,
+            D: ScanUncommittedPostProcessor {
         let index = indexSearch.dbObjectIndex.asIndex()?;
         let snapshot = self.session.getSnapshot()?;
 
         let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
-        let mut dbRawIterator: DBRawIterator = snapshot.raw_iterator_cf(&indexColumnFamily);
-
-        let tableObject = self.getDBObjectByName(index.tableName.as_str())?;
-        let table = tableObject.asTable()?;
+        let mut indexDBRawIterator: DBRawIterator = snapshot.raw_iterator_cf(&indexColumnFamily);
 
         // or的情况要使用index的话, 过滤条件的字段只能是1个 且是 idnex的打头字段
         if indexSearch.isAnd == false {
@@ -418,9 +437,8 @@ impl<'session> CommandExecutor<'session> {
         // seek那都是要以index的第1个column为切入的, 后边的column是在index数据基础上的筛选
         let opValueVecVecOnIndex1stColumn = indexSearch.opValueVecVecAcrossIndexFilteredCols.first().unwrap();
 
+        let mut rowDatas: HashMap<DataKey, (DataKey, RowData)> = HashMap::new();
         let mut dataKeys: HashSet<DataKey> = HashSet::new();
-
-        let mut rowDatas: HashMap<DataKey, Option<RowData>> = HashMap::new();
 
         let mut lowerValueBuffer = BytesMut::new();
         let mut upperValueBuffer = BytesMut::new();
@@ -440,12 +458,12 @@ impl<'session> CommandExecutor<'session> {
             };
         }
 
-        // todo 如果是indexLocal的话 还是要应对重复数据 不像应对datakey那样容易
+        // todo 如果是indexLocal的话 还是要应对重复数据 不像应对datakey那样容易 使用hashMap 完成
         let mut processWhen1stColSatisfied = |indexKey: &[Byte]| {
-            if let Some(indexSearchResult) = self.further(indexKey, &indexSearch)? {
+            if let Some(indexSearchResult) = self.further::<A, B, C, D>(indexKey, &indexSearch)? {
                 match indexSearchResult {
-                    IndexSearchResult::Direct((dataKey, rowData)) => rowDatas.insert(dataKey, Some(rowData)),
-                    IndexSearchResult::Redirect(dataKey) => rowDatas.insert(dataKey, None),
+                    IndexSearchResult::Direct((dataKey, rowData)) => { rowDatas.insert(dataKey, (dataKey, rowData)); }
+                    IndexSearchResult::Redirect(dataKey) => { dataKeys.insert(dataKey); }
                 };
             }
 
@@ -498,26 +516,26 @@ impl<'session> CommandExecutor<'session> {
                         lowerValue.encode(&mut lowerValueBuffer)?;
                         upperValue.encode(&mut upperValueBuffer)?;
 
-                        dbRawIterator.seek(lowerValueBuffer.as_ref());
+                        indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
                         let mut hasBeyondLower = false;
 
                         loop {
-                            let indexKey = getKeyIfSome!(dbRawIterator);
+                            let indexKey = getKeyIfSome!(indexDBRawIterator);
 
                             // lowerInclusive应对
                             // 使用这个变量的原因是 减少遍历过程中对start_with的调用 要是两边都很大的话成本不小
                             if hasBeyondLower == false {
                                 if indexKey.starts_with(lowerValueBuffer.as_ref()) {
                                     if lowerInclusive == false {
-                                        dbRawIterator.next();
+                                        indexDBRawIterator.next();
                                         continue;
                                     }
 
                                     // 处理
                                     processWhen1stColSatisfied(indexKey)?;
 
-                                    dbRawIterator.next();
+                                    indexDBRawIterator.next();
                                     continue;
                                 } else {
                                     // 应该经历下边的upper上限的check
@@ -537,22 +555,22 @@ impl<'session> CommandExecutor<'session> {
                             // 处理
                             processWhen1stColSatisfied(indexKey)?;
 
-                            dbRawIterator.next();
+                            indexDBRawIterator.next();
                         }
                     }
                     (Some(lowerValue), None) => {
                         lowerValue.encode(&mut lowerValueBuffer)?;
-                        dbRawIterator.seek(lowerValueBuffer.as_ref());
+                        indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
                         let mut hasBeyondLower = false;
 
                         loop {
-                            let indexKey = getKeyIfSome!(dbRawIterator);
+                            let indexKey = getKeyIfSome!(indexDBRawIterator);
 
                             if hasBeyondLower == false {
                                 if indexKey.starts_with(lowerValueBuffer.as_ref()) {
                                     if lowerInclusive == false {
-                                        dbRawIterator.next();
+                                        indexDBRawIterator.next();
                                         continue;
                                     }
                                 } else {
@@ -562,22 +580,22 @@ impl<'session> CommandExecutor<'session> {
 
                             processWhen1stColSatisfied(indexKey)?;
 
-                            dbRawIterator.next()
+                            indexDBRawIterator.next()
                         }
                     }
                     (None, Some(upperValue)) => {
                         upperValue.encode(&mut upperValueBuffer)?;
-                        dbRawIterator.seek_for_prev(upperValueBuffer.as_ref());
+                        indexDBRawIterator.seek_for_prev(upperValueBuffer.as_ref());
 
                         let mut startWithUpper = true;
 
                         loop {
-                            let indexKey = getKeyIfSome!(dbRawIterator);
+                            let indexKey = getKeyIfSome!(indexDBRawIterator);
 
                             if startWithUpper {
                                 if indexKey.starts_with(upperValueBuffer.as_ref()) {
                                     if upperInclusive == false {
-                                        dbRawIterator.next();
+                                        indexDBRawIterator.next();
                                         continue;
                                     }
                                 } else {
@@ -587,7 +605,7 @@ impl<'session> CommandExecutor<'session> {
 
                             processWhen1stColSatisfied(indexKey)?;
 
-                            dbRawIterator.prev();
+                            indexDBRawIterator.prev();
                         }
                     }
                     (None, None) => panic!("impossible")
@@ -603,10 +621,10 @@ impl<'session> CommandExecutor<'session> {
 
                     match op {
                         Op::MathCmpOp(MathCmpOp::Equal) => {
-                            dbRawIterator.seek(buffer.as_ref());
+                            indexDBRawIterator.seek(buffer.as_ref());
 
                             loop {
-                                let indexKey = getKeyIfSome!(dbRawIterator);
+                                let indexKey = getKeyIfSome!(indexDBRawIterator);
 
                                 // 说明satisfy
                                 if indexKey.starts_with(buffer.as_ref()) == false {
@@ -615,59 +633,59 @@ impl<'session> CommandExecutor<'session> {
 
                                 processWhen1stColSatisfied(indexKey)?;
 
-                                dbRawIterator.next();
+                                indexDBRawIterator.next();
                             }
                         }
                         Op::MathCmpOp(MathCmpOp::GreaterEqual) => { // 应对 >= 是简单的 1路到底什么inclusive等都不用管
-                            dbRawIterator.seek(buffer.as_ref());
+                            indexDBRawIterator.seek(buffer.as_ref());
 
                             loop {
-                                let indexKey = getKeyIfSome!(dbRawIterator);
+                                let indexKey = getKeyIfSome!(indexDBRawIterator);
                                 processWhen1stColSatisfied(indexKey)?;
 
-                                dbRawIterator.next()
+                                indexDBRawIterator.next()
                             }
                         }
                         Op::MathCmpOp(MathCmpOp::GreaterThan) => {
-                            dbRawIterator.seek(buffer.as_ref());
+                            indexDBRawIterator.seek(buffer.as_ref());
 
                             loop {
-                                let indexKey = getKeyIfSome!(dbRawIterator);
+                                let indexKey = getKeyIfSome!(indexDBRawIterator);
 
                                 if indexKey.starts_with(buffer.as_ref()) {
-                                    dbRawIterator.next();
+                                    indexDBRawIterator.next();
                                     continue;
                                 }
 
                                 processWhen1stColSatisfied(indexKey)?;
 
-                                dbRawIterator.next()
+                                indexDBRawIterator.next()
                             }
                         }
                         Op::MathCmpOp(MathCmpOp::LessEqual) => {
-                            dbRawIterator.seek_for_prev(buffer.as_ref());
+                            indexDBRawIterator.seek_for_prev(buffer.as_ref());
 
                             loop {
-                                let indexKey = getKeyIfSome!(dbRawIterator);
+                                let indexKey = getKeyIfSome!(indexDBRawIterator);
                                 processWhen1stColSatisfied(indexKey)?;
 
-                                dbRawIterator.prev();
+                                indexDBRawIterator.prev();
                             }
                         }
                         Op::MathCmpOp(MathCmpOp::LessThan) => {
-                            dbRawIterator.seek_for_prev(buffer.as_ref());
+                            indexDBRawIterator.seek_for_prev(buffer.as_ref());
 
                             loop {
-                                let indexKey = getKeyIfSome!(dbRawIterator);
+                                let indexKey = getKeyIfSome!(indexDBRawIterator);
 
                                 if indexKey.starts_with(buffer.as_ref()) {
-                                    dbRawIterator.prev();
+                                    indexDBRawIterator.prev();
                                     continue;
                                 }
 
                                 processWhen1stColSatisfied(indexKey)?;
 
-                                dbRawIterator.prev();
+                                indexDBRawIterator.prev();
                             }
                         }
                         _ => panic!("impossible")
@@ -676,12 +694,31 @@ impl<'session> CommandExecutor<'session> {
             }
         }
 
-        Ok(())
+        if indexSearch.indexLocalSearch {
+            let rowDatas = rowDatas.into_values().collect::<Vec<(DataKey, RowData)>>();
+            return Ok(rowDatas);
+        }
+
+        let dataKeys: Vec<DataKey> = dataKeys.into_iter().collect();
+
+        let rowDatas =
+            self.getRowDatasByDataKeys(dataKeys.as_slice(),
+                                       indexSearch.scanParams.table,
+                                       indexSearch.scanParams.tableFilter,
+                                       indexSearch.scanParams.selectedColumnNames)?;
+        Ok(rowDatas)
     }
 
     // 对and来说  前边的column已经满足了 还需要进1步测试
     // 对or来说 不会调用该函数了 因为 要使用index的话 表的过滤条件的字段只能单个 且 要是 index的打头字段
-    fn further(&self, indexKey: &[Byte], indexSearch: &IndexSearch) -> anyhow::Result<Option<IndexSearchResult>> {
+    fn further<A, B, C, D>(&self, indexKey: &[Byte],
+                           indexSearch: &IndexSearch) -> Result<Option<IndexSearchResult>>
+        where
+            A: ScanCommittedPreProcessor,
+            B: ScanCommittedPostProcessor,
+            C: ScanUncommittedPreProcessor,
+            D: ScanUncommittedPostProcessor {
+
         // key的末尾是dataKey
         let dataKey = extractDataKeyFromIndexKey!(indexKey);
 
@@ -693,7 +730,7 @@ impl<'session> CommandExecutor<'session> {
         // index用到的只有1个的column
         if indexSearch.opValueVecVecAcrossIndexFilteredCols.len() == 1 {
             if indexSearch.indexLocalSearch {
-                match self.indexLocalSearch(columnValues, dataKey, indexSearch)? {
+                match self.indexLocalSearch::<A, B, C, D>(columnValues, dataKey, indexSearch)? {
                     Some(rowData) => return Ok(Some(IndexSearchResult::Direct((dataKey, rowData)))),
                     None => return Ok(None)
                 }
@@ -744,7 +781,7 @@ impl<'session> CommandExecutor<'session> {
 
         if indexSearch.isAnd {
             if indexSearch.indexLocalSearch {
-                match self.indexLocalSearch(columnValues, dataKey, indexSearch)? {
+                match self.indexLocalSearch::<A, B, C, D>(columnValues, dataKey, indexSearch)? {
                     Some(rowData) => return Ok(Some(IndexSearchResult::Direct((dataKey, rowData)))),
                     None => return Ok(None)
                 }
@@ -756,30 +793,30 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
+    // todo indexLocalSearch 要有hook 因为scan时候到这里就要就地解决了
     /// 调用该函数的时候已然是通过了 filter的测试 还需要通过mvcc visibility测试
-    fn indexLocalSearch(&self,
-                        columnValues: Vec<GraphValue>, // index上的全部的column的data
-                        datakey: DataKey,
-                        indexSearch: &IndexSearch) -> Result<Option<RowData>> {
+    fn indexLocalSearch<A, B, C, D>(&self,
+                                    columnValues: Vec<GraphValue>, // index上的全部的column的data
+                                    datakey: DataKey,
+                                    indexSearch: &IndexSearch) -> Result<Option<RowData>>
+        where
+            A: ScanCommittedPreProcessor,
+            B: ScanCommittedPostProcessor,
+            C: ScanUncommittedPreProcessor,
+            D: ScanUncommittedPostProcessor, {
         let index = indexSearch.dbObjectIndex.asIndex()?;
 
+        // 它们这些的ref的生命周期是什么, 目前觉的应该是和indexSearch相同
+        let mvccKeyBuffer = utils::ptr2RefMut(indexSearch.mvccKeyBufferPtr);
+        let dbRawIterator = utils::ptr2RefMut(indexSearch.dbRawIteratorPtr);
+
         // mvcc visibility筛选
-       // if self.checkCommittedDataVisiWithoutTxMutations(&mut mvccKeyBuffer,
-         //                                                &mut rawIterator,
-           //                                              dataKey,
-             //                                            &columnFamily,
-               //                                          &scanParams.table.name)? == false {
-          //  return Ok(None);
-        //}
-
-        // 以上是全都在已落地的维度内的visibility check
-        // 还要结合当前事务上的尚未提交的mutations,看已落地的是不是应该干掉
-        //if let Some(mutationsRawCurrentTx) = tableMutationsCurrentTx {
-          //  if self.checkCommittedDataVisiWithTxMutations(mutationsRawCurrentTx, &mut mvccKeyBuffer, dataKey)? == false {
-            //    return Ok(None);
-            //}
-        //}
-
+        if self.committedDataVisible(mvccKeyBuffer, dbRawIterator,
+                                     datakey, indexSearch.columnFamily,
+                                     &indexSearch.scanParams.table.name,
+                                     indexSearch.tableMutationsCurrentTx)? == false {
+            return Ok(None);
+        }
 
         let mut rowData: RowData = HashMap::with_capacity(index.columnNames.len());
 
@@ -787,7 +824,23 @@ impl<'session> CommandExecutor<'session> {
             rowData.insert(columnName.clone(), columnValue);
         }
 
-        let rowData = store::pruneRowData(rowData, indexSearch.selectedColNames)?;
+        let rowData = store::pruneRowData(rowData, indexSearch.scanParams.selectedColumnNames)?;
+
+        let scanHooks: &mut ScanHooks<A, B, C, D> = utils::ptr2RefMut(indexSearch.scanHooksPtr);
+
+        // scanCommittedPreProcessor 已没有太大的意义了 原来是为了能够应对不必要的对rowData的读取
+        if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
+            if scanCommittedPreProcessor(indexSearch.columnFamily, datakey)? == false {
+                return Ok(None);
+            }
+        }
+
+        if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
+            if scanCommittedPostProcessor(indexSearch.columnFamily, datakey, &rowData)? == false {
+                return Ok(None);
+            }
+        }
+
         Ok(Some(rowData))
     }
 }
