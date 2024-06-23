@@ -11,11 +11,11 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
-use crate::{global, meta, parser, throw, u64ToByteArrRef};
+use crate::{global, meta, parser, throw, throwFormat, u64ToByteArrRef};
 use anyhow::Result;
 use log::log;
-use rocksdb::{BoundColumnFamily, DB, DBAccess, DBWithThreadMode,
-              MultiThreaded, OptimisticTransactionDB, Options, SnapshotWithThreadMode, Transaction, WriteBatchWithTransaction};
+use rocksdb::{BoundColumnFamily, DB, DBAccess, SnapshotWithThreadMode, DBWithThreadMode};
+use rocksdb::{MultiThreaded, OptimisticTransactionDB, Options, Transaction, WriteBatchWithTransaction};
 use tokio::io::AsyncWriteExt;
 use crate::executor::CommandExecutor;
 use crate::parser::command::Command;
@@ -180,7 +180,7 @@ impl Session {
     pub fn getColFamily(columnFamilyName: &str) -> Result<ColumnFamily> {
         match meta::STORE.dataStore.cf_handle(columnFamilyName) {
             Some(cf) => Ok(cf),
-            None => throw!(&format!("column family:{} not exist", columnFamilyName))
+            None => throwFormat!("column family:{} not exist", columnFamilyName)
         }
     }
 

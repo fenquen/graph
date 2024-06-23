@@ -5,7 +5,7 @@ use serde_json::Value;
 use strum_macros::Display;
 use crate::meta::{DBObject, Index, Table};
 use crate::session::Session;
-use crate::{meta, throw};
+use crate::{meta, throw, throwFormat};
 use crate::graph_value::GraphValue;
 use crate::parser::command::Command;
 use crate::parser::command::manage::Set;
@@ -131,7 +131,7 @@ impl<'session> CommandExecutor<'session> {
     fn getDBObjectByName(&self, dbObjectName: &str) -> Result<Ref<String, DBObject>> {
         let dbObject = meta::NAME_DB_OBJ.get(dbObjectName);
         if dbObject.is_none() {
-            throw!(&format!("db object:{} not exist", dbObjectName));
+            throwFormat!("db object:{} not exist", dbObjectName);
         }
 
         Ok(dbObject.unwrap())

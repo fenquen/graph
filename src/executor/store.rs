@@ -806,7 +806,7 @@ pub(super) fn pruneRowData(mut rowData: RowData,
 
         // 说明指明的column不存在
         if entry.is_none() {
-            throw!(&format!("not have column:{}", selectedColName));
+            throwFormat!("not have column:{}", selectedColName);
         }
 
         let (columnName, columnValue) = entry.unwrap();
