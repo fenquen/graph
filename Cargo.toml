@@ -21,7 +21,7 @@ tokio = { version = "1", features = ["full"] }
 bytes = "1.6.0"
 rocksdb = { version = "0.22.0", features = ["multi-threaded-cf"] }
 futures = { version = "0.3.30", features = ["default"] }
-tokio-tungstenite = "0.21.0"
+tokio-tungstenite = "0.23.1"
 futures-channel = "0.3.30"
 futures-util = "0.3.30"
 rayon = "1.9.0"
