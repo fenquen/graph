@@ -14,7 +14,7 @@ use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
 use crate::parser::command::update::Update;
 use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, KV, RowData, RowId, TableMutations};
-use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
+use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 use anyhow::Result;
 use crate::executor::CommandExecResult::DmlResult;
 
@@ -71,14 +71,14 @@ impl<'session> CommandExecutor<'session> {
 
         // 这里要使用post体系 基于满足普通update的前提
         let scanHooks = ScanHooks {
-            scanCommittedPreProcessor: Option::<Box<dyn ScanCommittedPreProcessor>>::None,
-            scanCommittedPostProcessor: Some(
+            committedPreProcessor: Option::<Box<dyn CommittedPreProcessor>>::None,
+            committedPostProcessor: Some(
                 |_: &ColumnFamily, committedDataKey: DataKey, _: &RowData| {
                     checkNodeHasBeenLinked(committedDataKey)
                 }
             ),
-            scanUncommittedPreProcessor: Option::<Box<dyn ScanUncommittedPreProcessor>>::None,
-            scanUncommittedPostProcessor: Some(
+            uncommittedPreProcessor: Option::<Box<dyn UncommittedPreProcessor>>::None,
+            uncommittedPostProcessor: Some(
                 |_: &TableMutations, addedDataKey: DataKey, _: &RowData| {
                     checkNodeHasBeenLinked(addedDataKey)
                 }

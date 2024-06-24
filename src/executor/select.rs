@@ -15,7 +15,7 @@ use crate::parser::command::select::{EndPointType, RelDesc, Select, SelectRel, S
 use anyhow::{anyhow, Result};
 use crate::executor::store::{ScanHooks, ScanParams, SearchPointerKeyHooks};
 use crate::expr::Expr;
-use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
+use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 
 impl<'session> CommandExecutor<'session> {
     /// 如果不是含有relation的select 便是普通的select
@@ -380,7 +380,7 @@ impl<'session> CommandExecutor<'session> {
                         scanParams.selectedColumnNames = None;
 
                         // relation数据是不是满足relationFliter
-                        if self.getRowDatasByDataKeys(&[targetRelationDataKey], &scanParams)?.len() > 0 {
+                        if self.getRowDatasByDataKeys(&[targetRelationDataKey], &scanParams, &mut ScanHooks::default())?.len() > 0 {
                             found = true;
                             return Result::<IterationCmd>::Ok(IterationCmd::Return);
                         }
@@ -449,20 +449,20 @@ impl<'session> CommandExecutor<'session> {
 
         let scanHooks = ScanHooks {
             // 确认当前的data是不是满足在各个rel上的位置
-            scanCommittedPreProcessor: Some(
+            committedPreProcessor: Some(
                 |_: &ColumnFamily, committedDataKey: DataKey| {
                     processNodeDataKey.borrow_mut()(committedDataKey)
                 }
             ),
-            scanCommittedPostProcessor: Option::<Box<dyn ScanCommittedPostProcessor>>::None,
+            committedPostProcessor: Option::<Box<dyn CommittedPostProcessor>>::None,
             // todo uncommitted也要照顾到 完成
             // 到mutations上去搜索相应的pointerKey的
-            scanUncommittedPreProcessor: Some(
+            uncommittedPreProcessor: Some(
                 |_: &TableMutations, addedDatakey: DataKey| {
                     processNodeDataKey.borrow_mut()(addedDatakey)
                 }
             ),
-            scanUncommittedPostProcessor: Option::<Box<dyn ScanUncommittedPostProcessor>>::None,
+            uncommittedPostProcessor: Option::<Box<dyn UncommittedPostProcessor>>::None,
         };
 
         let rowDatas = {

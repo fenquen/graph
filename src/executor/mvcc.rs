@@ -94,10 +94,10 @@ impl<'session> CommandExecutor<'session> {
         Ok(tableMutations.get(mvccKeyBuffer.as_ref()).is_none())
     }
 
-    pub(super) fn checkUncommittedDataVisi(&self,
-                                           tableMutations: &TableMutations,
-                                           mvccKeyBuffer: &mut BytesMut,
-                                           addedDataKeyCurrentTx: DataKey) -> Result<bool> {
+    pub(super) fn uncommittedDataVisible(&self,
+                                         tableMutations: &TableMutations,
+                                         mvccKeyBuffer: &mut BytesMut,
+                                         addedDataKeyCurrentTx: DataKey) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 检验当前tx上新add的话 只要检验相应的xmax便可以了 就算有xmax那对应的txId也只会是currentTx

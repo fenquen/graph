@@ -2,7 +2,7 @@ use bytes::BytesMut;
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::{meta, types};
 use crate::parser::command::delete::Delete;
-use types::ScanCommittedPreProcessor;
+use types::CommittedPreProcessor;
 use crate::executor::store::{ScanHooks, ScanParams};
 
 impl<'session> CommandExecutor<'session> {

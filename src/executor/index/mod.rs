@@ -21,7 +21,7 @@ use crate::session::Session;
 use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, Pointer, RowData, TableMutations};
 use anyhow::Result;
 use crate::executor::store::{ScanHooks, ScanParams};
-use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
+use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 
 #[derive(Clone, Copy)]
 pub enum Logical {
@@ -119,6 +119,7 @@ pub(in crate::executor) struct IndexSearch<'a> {
     pub columnFamily: &'a ColumnFamily<'a>,
     pub tableMutationsCurrentTx: Option<&'a TableMutations>,
     // mvccKeyBufferPtr, dbRawIteratorPtr, scanHooksPtr 是透传到indexLocalSearch使用的
+    // 使用危险的ptr的原因是,它们使用的时候都是mut的,使用传统的引用的话可能会产生可变和不可变引用的冲突
     pub mvccKeyBufferPtr: Pointer,
     pub dbRawIteratorPtr: Pointer,
     pub scanHooksPtr: Pointer,
@@ -419,10 +420,10 @@ impl<'session> CommandExecutor<'session> {
     /// index本身也是个table 只不过可以是实际的data加上dataKey
     pub(in crate::executor) fn searchByIndex<A, B, C, D>(&self, indexSearch: IndexSearch) -> Result<Vec<(DataKey, RowData)>>
         where
-            A: ScanCommittedPreProcessor,
-            B: ScanCommittedPostProcessor,
-            C: ScanUncommittedPreProcessor,
-            D: ScanUncommittedPostProcessor {
+            A: CommittedPreProcessor,
+            B: CommittedPostProcessor,
+            C: UncommittedPreProcessor,
+            D: UncommittedPostProcessor {
         let index = indexSearch.dbObjectIndex.asIndex()?;
         let snapshot = self.session.getSnapshot()?;
 
@@ -700,7 +701,10 @@ impl<'session> CommandExecutor<'session> {
         }
 
         let dataKeys: Vec<DataKey> = dataKeys.into_iter().collect();
-        let rowDatas = self.getRowDatasByDataKeys(dataKeys.as_slice(), indexSearch.scanParams)?;
+
+        let scanHooks: &mut ScanHooks<A, B, C, D> = utils::ptr2RefMut(indexSearch.scanHooksPtr);
+
+        let rowDatas = self.getRowDatasByDataKeys(dataKeys.as_slice(), indexSearch.scanParams,scanHooks)?;
 
         Ok(rowDatas)
     }
@@ -710,10 +714,10 @@ impl<'session> CommandExecutor<'session> {
     fn further<A, B, C, D>(&self, indexKey: &[Byte],
                            indexSearch: &IndexSearch) -> Result<Option<IndexSearchResult>>
         where
-            A: ScanCommittedPreProcessor,
-            B: ScanCommittedPostProcessor,
-            C: ScanUncommittedPreProcessor,
-            D: ScanUncommittedPostProcessor {
+            A: CommittedPreProcessor,
+            B: CommittedPostProcessor,
+            C: UncommittedPreProcessor,
+            D: UncommittedPostProcessor {
 
         // key的末尾是dataKey
         let dataKey = extractDataKeyFromIndexKey!(indexKey);
@@ -796,10 +800,10 @@ impl<'session> CommandExecutor<'session> {
                                     datakey: DataKey,
                                     indexSearch: &IndexSearch) -> Result<Option<RowData>>
         where
-            A: ScanCommittedPreProcessor,
-            B: ScanCommittedPostProcessor,
-            C: ScanUncommittedPreProcessor,
-            D: ScanUncommittedPostProcessor, {
+            A: CommittedPreProcessor,
+            B: CommittedPostProcessor,
+            C: UncommittedPreProcessor,
+            D: UncommittedPostProcessor, {
         let index = indexSearch.dbObjectIndex.asIndex()?;
 
         // 它们这些的ref的生命周期是什么, 目前觉的应该是和indexSearch相同
@@ -825,13 +829,13 @@ impl<'session> CommandExecutor<'session> {
         let scanHooks: &mut ScanHooks<A, B, C, D> = utils::ptr2RefMut(indexSearch.scanHooksPtr);
 
         // scanCommittedPreProcessor 已没有太大的意义了 原来是为了能够应对不必要的对rowData的读取
-        if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
+        if let Some(ref mut scanCommittedPreProcessor) = scanHooks.committedPreProcessor {
             if scanCommittedPreProcessor(indexSearch.columnFamily, datakey)? == false {
                 return Ok(None);
             }
         }
 
-        if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
+        if let Some(ref mut scanCommittedPostProcessor) = scanHooks.committedPostProcessor {
             if scanCommittedPostProcessor(indexSearch.columnFamily, datakey, &rowData)? == false {
                 return Ok(None);
             }

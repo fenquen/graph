@@ -19,7 +19,7 @@ use crate::meta::{Column, DBObject, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
 use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, KeyTag, RowId, Pointer};
-use crate::types::{ScanCommittedPreProcessor, ScanCommittedPostProcessor, ScanUncommittedPreProcessor, ScanUncommittedPostProcessor};
+use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 use anyhow::Result;
 use dashmap::mapref::one::Ref;
 use lazy_static::lazy_static;
@@ -31,42 +31,85 @@ use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor}
 
 pub(super) struct ScanHooks<A, B, C, D>
     where
-        A: ScanCommittedPreProcessor,
-        B: ScanCommittedPostProcessor,
-        C: ScanUncommittedPreProcessor,
-        D: ScanUncommittedPostProcessor,
-{
-    /// 融合filter读取到committed RowData 前
-    pub(super) scanCommittedPreProcessor: Option<A>,
-    /// 融合filter读取到committed RowData 后
-    pub(super) scanCommittedPostProcessor: Option<B>,
-    /// 融合filter读取到uncommitted RowData 前
-    pub(super) scanUncommittedPreProcessor: Option<C>,
-    /// 融合filter读取到uncommitted RowData 后
-    pub(super) scanUncommittedPostProcessor: Option<D>,
+        A: CommittedPreProcessor,
+        B: CommittedPostProcessor,
+        C: UncommittedPreProcessor,
+        D: UncommittedPostProcessor {
+    /// 读取到committed RowData 前
+    pub(super) committedPreProcessor: Option<A>,
+    /// 读取到committed RowData 后
+    pub(super) committedPostProcessor: Option<B>,
+    /// 读取到uncommitted RowData 前
+    pub(super) uncommittedPreProcessor: Option<C>,
+    /// 读取到uncommitted RowData 后
+    pub(super) uncommittedPostProcessor: Option<D>,
 }
 
 impl Default for ScanHooks<
-    Box<dyn ScanCommittedPreProcessor>,
-    Box<dyn ScanCommittedPostProcessor>,
-    Box<dyn ScanUncommittedPreProcessor>,
-    Box<dyn ScanUncommittedPostProcessor>
+    Box<dyn CommittedPreProcessor>,
+    Box<dyn CommittedPostProcessor>,
+    Box<dyn UncommittedPreProcessor>,
+    Box<dyn UncommittedPostProcessor>
 > {
     fn default() -> Self {
         ScanHooks {
-            scanCommittedPreProcessor: None,
-            scanCommittedPostProcessor: None,
-            scanUncommittedPreProcessor: None,
-            scanUncommittedPostProcessor: None,
+            committedPreProcessor: None,
+            committedPostProcessor: None,
+            uncommittedPreProcessor: None,
+            uncommittedPostProcessor: None,
         }
+    }
+}
+
+impl<A, B, C, D> ScanHooks<A, B, C, D>
+    where
+        A: CommittedPreProcessor,
+        B: CommittedPostProcessor,
+        C: UncommittedPreProcessor,
+        D: UncommittedPostProcessor {
+    pub fn preProcessCommitted(&mut self, columnFamily: &ColumnFamily, dataKey: DataKey) -> Result<bool> {
+        if let Some(ref mut committedPreProcessor) = self.committedPreProcessor {
+            return committedPreProcessor(columnFamily, dataKey);
+        }
+
+        Ok(true)
+    }
+
+    pub fn postProcessCommitted(&mut self,
+                                columnFamily: &ColumnFamily,
+                                dataKey: DataKey,
+                                rowData: &RowData) -> Result<bool> {
+        if let Some(ref mut committedPostProcessor) = self.committedPostProcessor {
+            return committedPostProcessor(columnFamily, dataKey, rowData);
+        }
+
+        Ok(true)
+    }
+
+    pub fn preProcessUncommitted(&mut self, tableMutations: &TableMutations, dataKey: DataKey) -> Result<bool> {
+        if let Some(ref mut uncommittedPreProcessor) = self.uncommittedPreProcessor {
+            return uncommittedPreProcessor(tableMutations, dataKey);
+        }
+
+        Ok(true)
+    }
+
+    pub fn postProcessUncommitted(&mut self,
+                                  tableMutations: &TableMutations,
+                                  dataKey: DataKey,
+                                  rowData: &RowData) -> Result<bool> {
+        if let Some(ref mut uncommittedPostProcessor) = self.uncommittedPostProcessor {
+            return uncommittedPostProcessor(tableMutations, dataKey, rowData);
+        }
+
+        Ok(true)
     }
 }
 
 pub struct SearchPointerKeyHooks<A, B>
     where
         A: CommittedPointerKeyProcessor,
-        B: UncommittedPointerKeyProcessor,
-{
+        B: UncommittedPointerKeyProcessor {
     pub(super) committedPointerKeyProcessor: Option<A>,
     pub(super) uncommittedPointerKeyProcessor: Option<B>,
 }
@@ -111,7 +154,15 @@ impl<'session> CommandExecutor<'session> {
     // todo 实现不实际捞取数据的
     // todo getRowDatasByDataKeys 也要有hook 因为scan时候的index搜索得到dataKeys后会调用到该函数
     /// 目前使用的场合是通过realtion保存的两边node的position得到相应的node
-    pub(super) fn getRowDatasByDataKeys(&self, dataKeys: &[DataKey], scanParams: &ScanParams) -> Result<Vec<(DataKey, RowData)>> {
+    pub(super) fn getRowDatasByDataKeys<A, B, C, D>(&self,
+                                                    dataKeys: &[DataKey],
+                                                    scanParams: &ScanParams,
+                                                    scanHooks: &mut ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
+        where
+            A: CommittedPreProcessor,
+            B: CommittedPostProcessor,
+            C: UncommittedPreProcessor,
+            D: UncommittedPostProcessor {
         if dataKeys.is_empty() {
             return Ok(Vec::new());
         }
@@ -132,10 +183,18 @@ impl<'session> CommandExecutor<'session> {
                 // 习惯的套路和scan函数相同 都是先搜索committed然后是uncommitted 这对scan来说是可以的
                 // 对这边的直接通过datakey获取有点不合适了 搜索uncommitted逻辑要到前边,要是有的话可以提前return
                 if let Some(tableMutations) = tableMutations {
-                    if self.checkUncommittedDataVisi(tableMutations, mvccKeyBuffer, dataKey)? {
+                    if self.uncommittedDataVisible(tableMutations, mvccKeyBuffer, dataKey)? {
+                        if scanHooks.preProcessUncommitted(tableMutations, dataKey)? == false {
+                            return Ok(());
+                        }
+
                         // 是不是不会是none
                         if let Some(addedValueBinary) = tableMutations.get(u64ToByteArrRef!(dataKey).as_ref()) {
                             if let Some(rowData) = self.readRowDataBinary(addedValueBinary.as_slice(), scanParams)? {
+                                if scanHooks.postProcessUncommitted(tableMutations, dataKey, &rowData)? == false {
+                                    return Ok(());
+                                }
+
                                 rowDatas.push((dataKey, rowData));
                                 return Ok(());
                             }
@@ -157,7 +216,15 @@ impl<'session> CommandExecutor<'session> {
                         None => return Ok(()), // 有可能
                     };
 
+                if scanHooks.preProcessCommitted(&columnFamily, dataKey)? == false {
+                    return Ok(());
+                }
+
                 if let Some(rowData) = self.readRowDataBinary(rowDataBinary.as_slice(), scanParams)? {
+                    if scanHooks.postProcessCommitted(&columnFamily, dataKey, &rowData)? == false {
+                        return Ok(());
+                    }
+
                     match sender {
                         Some(sender) => sender.send((dataKey, rowData))?,
                         None => rowDatas.push((dataKey, rowData)),
@@ -192,10 +259,10 @@ impl<'session> CommandExecutor<'session> {
                                                 select: bool,
                                                 mut scanHooks: ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
         where
-            A: ScanCommittedPreProcessor,
-            B: ScanCommittedPostProcessor,
-            C: ScanUncommittedPreProcessor,
-            D: ScanUncommittedPostProcessor {
+            A: CommittedPreProcessor,
+            B: CommittedPostProcessor,
+            C: UncommittedPreProcessor,
+            D: UncommittedPostProcessor {
 
         // todo 使用table id 为 column family 标识
         let columnFamily = Session::getColFamily(&scanParams.table.name)?;
@@ -331,7 +398,7 @@ impl<'session> CommandExecutor<'session> {
                                             }
 
                                             // committed pre
-                                            if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
+                                            if let Some(ref mut scanCommittedPreProcessor) = scanHooks.committedPreProcessor {
                                                 if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
                                                     continue;
                                                 }
@@ -344,7 +411,7 @@ impl<'session> CommandExecutor<'session> {
 
                                             if let Some(rowData) = commandExecutor.readRowDataBinary(&*rowDataBinary, &scanParams)? {
                                                 // committed post
-                                                if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
+                                                if let Some(ref mut scanCommittedPostProcessor) = scanHooks.committedPostProcessor {
                                                     if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
                                                         continue;
                                                     }
@@ -425,7 +492,7 @@ impl<'session> CommandExecutor<'session> {
                         }
 
                         // pre processor
-                        if let Some(ref mut scanCommittedPreProcessor) = scanHooks.scanCommittedPreProcessor {
+                        if let Some(ref mut scanCommittedPreProcessor) = scanHooks.committedPreProcessor {
                             if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
                                 continue;
                             }
@@ -434,7 +501,7 @@ impl<'session> CommandExecutor<'session> {
                         // mvcc筛选过了 对rowData本身的筛选
                         if let Some(rowData) = self.readRowDataBinary(&*rowDataBinary, &scanParams)? {
                             // post processor
-                            if let Some(ref mut scanCommittedPostProcessor) = scanHooks.scanCommittedPostProcessor {
+                            if let Some(ref mut scanCommittedPostProcessor) = scanHooks.committedPostProcessor {
                                 if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
                                     continue;
                                 }
@@ -499,18 +566,18 @@ impl<'session> CommandExecutor<'session> {
             for (addedDataKeyBinaryCurrentTx, addRowDataBinaryCurrentTx) in addedDataCurrentTxRange {
                 let addedDataKeyCurrentTx: DataKey = byte_slice_to_u64!(addedDataKeyBinaryCurrentTx);
 
-                if self.checkUncommittedDataVisi(tableMutationsCurrentTx, &mut mvccKeyBuffer, addedDataKeyCurrentTx)? == false {
+                if self.uncommittedDataVisible(tableMutationsCurrentTx, &mut mvccKeyBuffer, addedDataKeyCurrentTx)? == false {
                     continue;
                 }
 
-                if let Some(ref mut scanUncommittedPreProcessor) = scanHooks.scanUncommittedPreProcessor {
+                if let Some(ref mut scanUncommittedPreProcessor) = scanHooks.uncommittedPreProcessor {
                     if scanUncommittedPreProcessor(tableMutationsCurrentTx, addedDataKeyCurrentTx)? == false {
                         continue;
                     }
                 }
 
                 if let Some(rowData) = self.readRowDataBinary(addRowDataBinaryCurrentTx, &scanParams)? {
-                    if let Some(ref mut scanUncommittedPostProcessor) = scanHooks.scanUncommittedPostProcessor {
+                    if let Some(ref mut scanUncommittedPostProcessor) = scanHooks.uncommittedPostProcessor {
                         if scanUncommittedPostProcessor(tableMutationsCurrentTx, addedDataKeyCurrentTx, &rowData)? == false {
                             continue;
                         }
@@ -791,7 +858,7 @@ impl<'session> CommandExecutor<'session> {
         scanParams.tableFilter = destFilter;
         scanParams.selectedColumnNames = None;
 
-        let relationDatas = self.getRowDatasByDataKeys(targetRelationDataKeys.as_slice(), &scanParams)?;
+        let relationDatas = self.getRowDatasByDataKeys(targetRelationDataKeys.as_slice(), &scanParams, &mut ScanHooks::default())?;
 
         Ok(relationDatas)
     }

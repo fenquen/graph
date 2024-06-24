@@ -32,10 +32,10 @@ pub type KV = (Vec<Byte>, Vec<Byte>);
 
 pub type RowData = HashMap<String, GraphValue>;
 
-pub trait ScanCommittedPreProcessor = FnMut(&ColumnFamily, DataKey) -> anyhow::Result<bool>;
-pub trait ScanCommittedPostProcessor = FnMut(&ColumnFamily, DataKey, &RowData) -> anyhow::Result<bool>;
-pub trait ScanUncommittedPreProcessor = FnMut(&TableMutations, DataKey) -> anyhow::Result<bool>;
-pub trait ScanUncommittedPostProcessor = FnMut(&TableMutations, DataKey, &RowData) -> anyhow::Result<bool>;
+pub trait CommittedPreProcessor = FnMut(&ColumnFamily, DataKey) -> anyhow::Result<bool>;
+pub trait CommittedPostProcessor = FnMut(&ColumnFamily, DataKey, &RowData) -> anyhow::Result<bool>;
+pub trait UncommittedPreProcessor = FnMut(&TableMutations, DataKey) -> anyhow::Result<bool>;
+pub trait UncommittedPostProcessor = FnMut(&TableMutations, DataKey, &RowData) -> anyhow::Result<bool>;
 
 /// columnFamily committedPointerKey(会随着变化) prefix(不会变化)
 pub trait CommittedPointerKeyProcessor = FnMut(&ColumnFamily, &[Byte], &[Byte]) -> anyhow::Result<IterationCmd>;

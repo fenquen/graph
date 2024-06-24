@@ -7,13 +7,13 @@ use crate::executor::store::{ScanHooks, ScanParams};
 use crate::meta::Table;
 use crate::parser::command::insert::Insert;
 use crate::parser::command::link::Link;
-use crate::types::{DataKey, KeyTag, KV, RowId, ScanCommittedPreProcessor};
+use crate::types::{DataKey, KeyTag, KV, RowId, CommittedPreProcessor};
 use anyhow::Result;
 
 impl<'session> CommandExecutor<'session> {
     /// 它本质是向relation对应的data file写入
     /// 两个元素之间的relation只看种类不看里边的属性的
-    pub(super) fn link(&self, link: &Link) -> anyhow::Result<CommandExecResult> {
+    pub(super) fn link(&self, link: &Link) -> Result<CommandExecResult> {
         // 得到表的对象
         let srcTable = self.getDBObjectByName(link.srcTableName.as_str())?;
         let srcTable = srcTable.asTable()?;

@@ -6,7 +6,7 @@ use crate::executor::mvcc::BytesMutExt;
 use crate::executor::store::{ScanHooks, ScanParams};
 use crate::parser::command::unlink::{Unlink, UnlinkLinkStyle, UnlinkSelfStyle};
 use crate::session::Session;
-use crate::types::{ColumnFamily, DataKey, ScanCommittedPreProcessor};
+use crate::types::{ColumnFamily, DataKey, CommittedPreProcessor};
 
 impl<'session> CommandExecutor<'session> {
     // todo pointer指向点和边的xmin xmax如何应对
@@ -79,7 +79,7 @@ impl<'session> CommandExecutor<'session> {
                     scanParams.selectedColumnNames = None;
 
                     // 是不是符合src dest上的筛选expr
-                    if self.getRowDatasByDataKeys(&[targetDataKey], &scanParams)?.is_empty() {
+                    if self.getRowDatasByDataKeys(&[targetDataKey], &scanParams, &mut ScanHooks::default())?.is_empty() {
                         continue;
                     }
 
