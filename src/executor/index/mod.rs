@@ -6,7 +6,7 @@ use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::rc::Rc;
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::mapref::one::Ref;
 use serde_json::Value;
 use crate::graph_value::GraphValue;
@@ -14,7 +14,7 @@ use crate::parser::op::{MathCmpOp, Op};
 use crate::executor::{CommandExecutor, index};
 use crate::expr::Expr;
 use crate::meta::{DBObject, Table};
-use crate::{meta, suffix_plus_plus, throwFormat, byte_slice_to_u64, global, utils};
+use crate::{meta, suffix_plus_plus, throwFormat, byte_slice_to_u64, global, utils, u64ToByteArrRef};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::executor::store;
 use crate::session::Session;
@@ -836,6 +836,39 @@ impl<'session> CommandExecutor<'session> {
         }
 
         Ok(Some(rowData))
+    }
+
+    pub(in crate::executor) fn generateIndex(&self, table: &Table,
+                                             indexKeyBuffer: &mut BytesMut,
+                                             dataKey: DataKey,
+                                             rowData: &RowData,
+                                             trash: bool) -> Result<()> {
+        // 遍历各个index
+        for indexName in &table.indexNames {
+            let dbObjectIndex = self.getDBObjectByName(indexName)?;
+            let index = dbObjectIndex.asIndex()?;
+
+            assert_eq!(table.name, index.tableName);
+
+            indexKeyBuffer.clear();
+
+            // 遍历了index的各个column
+            for indexColumnName in &index.columnNames {
+                let columnValue = rowData.get(indexColumnName).unwrap();
+                columnValue.encode(indexKeyBuffer)?;
+            }
+
+            // indexKey的末尾写上dataKey,这样就算row上的data相同也能区分
+            indexKeyBuffer.put_slice(u64ToByteArrRef!(dataKey));
+
+            if trash {
+                self.session.writeAddIndexMutation(&format!("{indexName}_trash"), (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
+            } else {
+                self.session.writeAddIndexMutation(indexName, (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
+            }
+        }
+
+        Ok(())
     }
 }
 

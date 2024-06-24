@@ -70,8 +70,11 @@ impl<'session> CommandExecutor<'session> {
 
         let indexName = index.name.clone();
 
-        // 生成column family
+        // 生成index对应的column family
         self.session.createColFamily(index.name.as_str())?;
+
+        // index对应的垃圾桶的column family,它只是个附庸在index上的纯rocks概念体系里的东西,不是db的概念
+        self.session.createColFamily(format!("{indexName}_trash").as_str())?;
 
         let indexId = u64ToByteArrRef!(index.id);
         let dbObjectIndex = DBObject::Index(index);

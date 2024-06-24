@@ -32,30 +32,9 @@ impl<'session> CommandExecutor<'session> {
         self.session.writeAddDataMutation(&table.name, dataAdd, xminAdd, xmaxAdd, origin);
 
         // 处理相应的index
-        {
-            // index的key应该是什么样的 columnData + dataKey
-            let mut indexKeyBuffer = BytesMut::with_capacity(rowDataBinary.len() + meta::DATA_KEY_BYTE_LEN);
-
-            // 遍历各个index
-            for indexName in &table.indexNames {
-                let dbObjectIndex = self.getDBObjectByName(indexName)?;
-                let index = dbObjectIndex.asIndex()?;
-
-                assert_eq!(table.name, index.tableName);
-
-                indexKeyBuffer.clear();
-
-                // 遍历了index的各个column
-                for indexColumnName in &index.columnNames {
-                    let columnValue = rowData.get(indexColumnName).unwrap();
-                    columnValue.encode(&mut indexKeyBuffer)?;
-                }
-
-                indexKeyBuffer.put_slice(dataKeyBinary);
-
-                self.session.writeAddIndexMutation(&index.name, (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
-            }
-        }
+        // index的key应该是什么样的 columnData + dataKey
+        let mut indexKeyBuffer = BytesMut::with_capacity(rowDataBinary.len() + meta::DATA_KEY_BYTE_LEN);
+        self.generateIndex(table, &mut indexKeyBuffer, dataKey, &rowData,false)?;
 
         Ok(CommandExecResult::DmlResult)
     }

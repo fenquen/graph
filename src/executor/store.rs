@@ -638,7 +638,7 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 if found == false {
-                    throw!(&format!("column {} does not defined", columnNameToInsert));
+                    throwFormat!("column {} does not defined", columnNameToInsert);
                 }
             }
 
@@ -654,7 +654,7 @@ impl<'session> CommandExecutor<'session> {
                         insert.columnNames.push(absentColumn.name.clone());
                         insert.columnExprs.push(Expr::Single(Element::Null));
                     } else {
-                        throw!(&format!("table:{}, column:{} is not nullable", table.name, absentColumn.name));
+                        throwFormat!("table:{}, column:{} is not nullable", table.name, absentColumn.name);
                     }
                 }
             }
@@ -708,7 +708,7 @@ impl<'session> CommandExecutor<'session> {
                 // columnType和value要对上
                 let columnValue = columnExpr.calc(None)?;
                 if column.type0.compatible(&columnValue) == false {
-                    throw!(&format!("column:{}, type:{} is not compatible with value:{}", column.name, column.type0, columnValue));
+                    throwFormat!("column:{}, type:{} is not compatible with value:{}", column.name, column.type0, columnValue);
                 }
 
                 columnValue.encode(&mut destByteSlice)?;

@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::Display;
 use crate::graph_error::GraphError;
-use crate::{global, meta, throw};
+use crate::{global, meta, throw, throwFormat};
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::ser::SerializeMap;
@@ -55,7 +55,7 @@ impl BinaryCodec for GraphValue {
             GraphValue::INTEGER => Ok(GraphValue::Integer(srcByteSlice.bytes.get_i64())),
             GraphValue::DECIMAL => Ok(GraphValue::Decimal(srcByteSlice.bytes.get_f64())),
             GraphValue::NULL => Ok(GraphValue::Null),
-            _ => throw!(&format!("unknown type tag:{}",typeTag))
+            _ => throwFormat!("unknown type tag:{}",typeTag)
         }
     }
 
@@ -167,7 +167,7 @@ impl TryFrom<&Element> for GraphValue {
             Element::DecimalLiteral(decimal) => Ok(GraphValue::Decimal(*decimal)),
             Element::TextLiteral(columnName) => Ok(GraphValue::Pending(columnName.clone())),
             Element::Null => Ok(GraphValue::Null),
-            _ => throw!(&format!("element:{element:?} can not be transform to GraphValue")),
+            _ => throwFormat!("element:{element:?} can not be transform to GraphValue"),
         }
     }
 }
@@ -192,7 +192,7 @@ impl GraphValue {
             GraphValue::BOOLEAN => Ok(GraphValue::Boolean(false)),
             GraphValue::INTEGER => Ok(GraphValue::Integer(0)),
             GraphValue::DECIMAL => Ok(GraphValue::Decimal(0.0)),
-            _ => throw!(&format!("unsupported graphValueType:{}", graphValueType))
+            _ => throwFormat!("unsupported graphValueType:{}", graphValueType)
         }
     }
 
@@ -200,7 +200,7 @@ impl GraphValue {
         if let GraphValue::Boolean(bool) = self {
             Ok(*bool)
         } else {
-            throw!(&format!("not boolean, is {self:?}"))
+            throwFormat!("not boolean, is {self:?}")
         }
     }
 
@@ -364,7 +364,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Decimal(float64 + (*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Decimal(float + float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Decimal(float64 + (*integer as f64))),
-                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                            _ => throwFormat!("can not use {op:?}, between {self:?} , {rightValue:?}"),
                         }
                     }
                     MathCalcOp::Divide => {
@@ -373,7 +373,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Decimal(float64 / (*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Decimal(float / float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Decimal(float64 / (*integer as f64))),
-                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                            _ => throwFormat!("can not use {op:?}, between {self:?} , {rightValue:?}"),
                         }
                     }
                     MathCalcOp::Multiply => {
@@ -382,7 +382,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Decimal(float64 * (*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Decimal(float * float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Decimal(float64 * (*integer as f64))),
-                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                            _ => throwFormat!("can not use {op:?}, between {self:?} , {rightValue:?}"),
                         }
                     }
                     MathCalcOp::Minus => {
@@ -391,7 +391,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Decimal(float64 - (*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Decimal(float - float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Decimal(float64 - (*integer as f64))),
-                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                            _ => throwFormat!("can not use {op:?}, between {self:?} , {rightValue:?}"),
                         }
                     }
                 }
@@ -401,18 +401,18 @@ impl GraphValue {
                     LogicalOp::Or => {
                         match (self, rightValue) {
                             (GraphValue::Boolean(bool), GraphValue::Boolean(bool0)) => Ok(GraphValue::Boolean(bool | bool0)),
-                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                            _ => throwFormat!("can not use {op:?}, between {self:?} , {rightValue:?}"),
                         }
                     }
                     LogicalOp::And => {
                         match (self, rightValue) {
                             (GraphValue::Boolean(bool), GraphValue::Boolean(bool0)) => Ok(GraphValue::Boolean(bool & bool0)),
-                            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+                            _ => throwFormat!("can not use {op:?}, between {self:?} , {rightValue:?}"),
                         }
                     }
                 }
             }
-            _ => throw!(&format!("can not use {op:?}, between {self:?} , {rightValue:?}")),
+            _ => throwFormat!("can not use {op:?}, between {self:?} , {rightValue:?}"),
         }
     }
 
