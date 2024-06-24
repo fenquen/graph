@@ -99,7 +99,7 @@ impl<'session> CommandExecutor<'session> {
 
                     self.createTable(table, false)?
                 }
-                Command::Insert(insertValues) => self.insert(insertValues)?,
+                Command::Insert(insert) => self.insert(insert)?,
                 Command::Select(select) => self.select(select)?,
                 Command::Link(link) => self.link(link)?,
                 Command::Delete(delete) => self.delete(delete)?,
