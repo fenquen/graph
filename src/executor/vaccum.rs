@@ -27,7 +27,7 @@ impl<'session> CommandExecutor<'session> {
             let mut dbRawIteratorMvccKey: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
             let mut dbRawIteratorPointerKey: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
 
-            // 先去scan xmax mvccKey
+            // 先去scan xmax的mvccKey
             dbRawIteratorMvccKey.seek(meta::MVCC_KEY_PATTERN);
 
             let mut keyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
@@ -53,7 +53,7 @@ impl<'session> CommandExecutor<'session> {
                 let rowId = extractRowIdFromKeySlice!(mvccKey);
                 let xmax = extractTxIdFromMvccKey!(mvccKey);
 
-                // 说明需要干掉
+                // 说明rowId对应的体系都需要干掉
                 if thresholdTxIdInclude >= xmax && xmax != meta::TX_ID_INVALID {
                     for keyPrefix in meta::KEY_PREFIX_DATA..=meta::KEY_PPREFIX_ORIGIN_DATA_KEY {
                         dataStore.delete_range_cf(&columnFamily,

@@ -52,14 +52,21 @@ pub const KEY_PREFIX_POINTER: KeyPrefix = 1;
 pub const KEY_PREFIX_MVCC: KeyPrefix = 2;
 pub const KEY_PPREFIX_ORIGIN_DATA_KEY: KeyPrefix = 3;
 
+// ----------------------------------------------------------------------
+
 pub const ROW_ID_BIT_LEN: usize = 64 - KEY_PREFIX_BIT_LEN;
 pub const ROW_ID_MAX: RowId = (1 << ROW_ID_BIT_LEN) - 1;
 pub const ROW_ID_MAX_AVAILABLE: RowId = ROW_ID_MAX - 1;
 pub const ROW_ID_INVALID: RowId = 0;
 pub const ROW_ID_MIN: RowId = 1;
 
-// key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
+// ----------------------------------------------------------------------
+
+/// key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
 pub const DATA_KEY_BYTE_LEN: usize = mem::size_of::<DataKey>();
+
+// ----------------------------------------------------------------------
+
 pub const DATA_KEY_PATTERN: &[Byte] = u64ToByteArrRef!((KEY_PREFIX_DATA as u64) << ROW_ID_BIT_LEN);
 pub const POINTER_KEY_PATTERN: &[Byte] = u64ToByteArrRef!((KEY_PREFIX_POINTER as u64) << ROW_ID_BIT_LEN);
 pub const MVCC_KEY_PATTERN: &[Byte] = u64ToByteArrRef!((KEY_PREFIX_MVCC as u64) << ROW_ID_BIT_LEN);
@@ -70,8 +77,16 @@ lazy_static! {
     pub static ref MVCC_KEY_PATTERN_VEC: Vec<Byte> = MVCC_KEY_PATTERN.to_vec();
 }
 
-// tag 用到POINTER前缀的key上的1Byte
-pub const KEY_TAG_BYTE_LEN: usize = 1;
+// ----------------------------------------------------------------------
+
+/// tag 用到POINTER前缀的key上的1Byte
+pub const KEY_TAG_BYTE_LEN: usize = mem::size_of::<KeyTag>();
+
+// ----------------------------------------------------------------------
+
+pub const DB_OBJECT_ID_BYTE_LEN: usize = mem::size_of::<DBObjectId>();
+
+// ----------------------------------------------------------------------
 
 /// node 下游rel的tableId
 pub const POINTER_KEY_TAG_UPSTREAM_REL_ID: KeyTag = 0;
@@ -86,7 +101,7 @@ pub const POINTER_KEY_TAG_DATA_KEY: KeyTag = 4;
 
 pub const POINTER_KEY_BYTE_LEN: usize = {
     DATA_KEY_BYTE_LEN + // keyPrefix 4bit + rowId 60bit
-        KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // table/relation的id
+        KEY_TAG_BYTE_LEN + DB_OBJECT_ID_BYTE_LEN + // table/relation的id
         KEY_TAG_BYTE_LEN + DATA_KEY_BYTE_LEN + // 实际的data条目的key
         KEY_TAG_BYTE_LEN + TX_ID_BYTE_LEN // xmin和xmax 对应的tx
 };
@@ -119,7 +134,7 @@ pub const MVCC_KEY_BYTE_LEN: usize = {
 // -----------------------------------------------------------------------------------------
 
 /// 4bit + 60bit
-pub const ORIGIN_DATA_KEY_KEY_BYTE_LEN: usize = mem::size_of::<u64>();
+pub const ORIGIN_DATA_KEY_KEY_BYTE_LEN: usize = mem::size_of::<DataKey>();
 /// 是value啊不是像以往的key
 pub const DATA_KEY_INVALID: DataKey = crate::keyPrefixAddRowId!(KEY_PREFIX_DATA, ROW_ID_INVALID);
 

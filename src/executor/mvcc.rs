@@ -175,7 +175,7 @@ impl<'session> CommandExecutor<'session> {
     // -------------------------------------------------------------------------------------------
 
     /// 当前tx上add时候生成 xmin xmax 对应的mvcc key
-    pub(super) fn generateAddDataXminXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> anyhow::Result<(KV, KV)> {
+    pub(super) fn generateAddDataXminXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> Result<(KV, KV)> {
         let xmin = {
             mvccKeyBuffer.writeDataMvccXmin(dataKey, self.session.getTxId()?);
             (mvccKeyBuffer.to_vec(), global::EMPTY_BINARY)

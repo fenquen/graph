@@ -440,7 +440,7 @@ impl<'session> CommandExecutor<'session> {
                             }
 
                             // 不然的话下边的遍历receiver永远也不会return
-                            mem::drop(sender);
+                            drop(sender);
 
                             for a in receiver {
                                 let a = a?;
