@@ -701,10 +701,8 @@ impl<'session> CommandExecutor<'session> {
         }
 
         let dataKeys: Vec<DataKey> = dataKeys.into_iter().collect();
-
         let scanHooks: &mut ScanHooks<A, B, C, D> = utils::ptr2RefMut(indexSearch.scanHooksPtr);
-
-        let rowDatas = self.getRowDatasByDataKeys(dataKeys.as_slice(), indexSearch.scanParams,scanHooks)?;
+        let rowDatas = self.getRowDatasByDataKeys(dataKeys.as_slice(), indexSearch.scanParams, scanHooks)?;
 
         Ok(rowDatas)
     }
@@ -829,16 +827,12 @@ impl<'session> CommandExecutor<'session> {
         let scanHooks: &mut ScanHooks<A, B, C, D> = utils::ptr2RefMut(indexSearch.scanHooksPtr);
 
         // scanCommittedPreProcessor 已没有太大的意义了 原来是为了能够应对不必要的对rowData的读取
-        if let Some(ref mut scanCommittedPreProcessor) = scanHooks.committedPreProcessor {
-            if scanCommittedPreProcessor(indexSearch.columnFamily, datakey)? == false {
-                return Ok(None);
-            }
+        if scanHooks.preProcessCommitted(indexSearch.columnFamily, datakey)? == false {
+            return Ok(None);
         }
 
-        if let Some(ref mut scanCommittedPostProcessor) = scanHooks.committedPostProcessor {
-            if scanCommittedPostProcessor(indexSearch.columnFamily, datakey, &rowData)? == false {
-                return Ok(None);
-            }
+        if scanHooks.postProcessCommitted(indexSearch.columnFamily, datakey, &rowData)? == false {
+            return Ok(None);
         }
 
         Ok(Some(rowData))

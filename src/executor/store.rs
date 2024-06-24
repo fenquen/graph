@@ -398,10 +398,8 @@ impl<'session> CommandExecutor<'session> {
                                             }
 
                                             // committed pre
-                                            if let Some(ref mut scanCommittedPreProcessor) = scanHooks.committedPreProcessor {
-                                                if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
-                                                    continue;
-                                                }
+                                            if scanHooks.preProcessCommitted(&columnFamily, dataKey)? == false {
+                                                continue;
                                             }
 
                                             let mut scanParams = ScanParams::default();
@@ -411,10 +409,8 @@ impl<'session> CommandExecutor<'session> {
 
                                             if let Some(rowData) = commandExecutor.readRowDataBinary(&*rowDataBinary, &scanParams)? {
                                                 // committed post
-                                                if let Some(ref mut scanCommittedPostProcessor) = scanHooks.committedPostProcessor {
-                                                    if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
-                                                        continue;
-                                                    }
+                                                if scanHooks.postProcessCommitted(&columnFamily, dataKey, &rowData)? == false {
+                                                    continue;
                                                 }
 
                                                 // concurrent scan 当前不知如何应对offset 只能应对limit
@@ -491,20 +487,16 @@ impl<'session> CommandExecutor<'session> {
                             continue;
                         }
 
-                        // pre processor
-                        if let Some(ref mut scanCommittedPreProcessor) = scanHooks.committedPreProcessor {
-                            if scanCommittedPreProcessor(&columnFamily, dataKey)? == false {
-                                continue;
-                            }
+                        // preProcessCommitted
+                        if scanHooks.preProcessCommitted(&columnFamily, dataKey)? == false {
+                            continue;
                         }
 
                         // mvcc筛选过了 对rowData本身的筛选
                         if let Some(rowData) = self.readRowDataBinary(&*rowDataBinary, &scanParams)? {
-                            // post processor
-                            if let Some(ref mut scanCommittedPostProcessor) = scanHooks.committedPostProcessor {
-                                if scanCommittedPostProcessor(&columnFamily, dataKey, &rowData)? == false {
-                                    continue;
-                                }
+                            // postProcessCommitted
+                            if scanHooks.postProcessCommitted(&columnFamily, dataKey, &rowData)? == false {
+                                continue;
                             }
 
                             // 应对 offset
@@ -570,17 +562,15 @@ impl<'session> CommandExecutor<'session> {
                     continue;
                 }
 
-                if let Some(ref mut scanUncommittedPreProcessor) = scanHooks.uncommittedPreProcessor {
-                    if scanUncommittedPreProcessor(tableMutationsCurrentTx, addedDataKeyCurrentTx)? == false {
-                        continue;
-                    }
+                // preProcessUncommitted
+                if scanHooks.preProcessUncommitted(tableMutationsCurrentTx, addedDataKeyCurrentTx)? == false {
+                    continue;
                 }
 
                 if let Some(rowData) = self.readRowDataBinary(addRowDataBinaryCurrentTx, &scanParams)? {
-                    if let Some(ref mut scanUncommittedPostProcessor) = scanHooks.uncommittedPostProcessor {
-                        if scanUncommittedPostProcessor(tableMutationsCurrentTx, addedDataKeyCurrentTx, &rowData)? == false {
-                            continue;
-                        }
+                    // postProcessUncommitted
+                    if scanHooks.postProcessUncommitted(tableMutationsCurrentTx, addedDataKeyCurrentTx, &rowData)? == false {
+                        continue;
                     }
 
                     satisfiedRows.push((addedDataKeyCurrentTx, rowData));
