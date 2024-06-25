@@ -18,15 +18,15 @@ pub mod select;
 pub mod manage;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Command {
+pub enum Command { //  todo 实现 order by
     CreateTable(Table),
     CreateIndex(Index),
     CreateRelation(Table),
     Insert(Insert),
-    Link(Link),
     Update(Update),
-    Select(Select),
     Delete(Delete),
+    Select(Select),
+    Link(Link),
     Unlink(Unlink),
     Commit,
     Rollback,
@@ -37,6 +37,13 @@ impl Command {
     pub fn isDml(&self) -> bool {
         match self {
             Command::Insert(_) | Command::Link(_) | Command::Update(_) | Command::Unlink(_) => true,
+            _ => false
+        }
+    }
+
+    pub fn isDdl(&self) -> bool {
+        match self {
+            Command::CreateTable(_) | Command::CreateIndex(_)  => true,
             _ => false
         }
     }
