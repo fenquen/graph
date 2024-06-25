@@ -176,7 +176,7 @@ impl<'session> CommandExecutor<'session> {
             self.session.writeUpdateDataMutation(&table.name, oldXmax, newData, newXmin, newXmax, origin);
 
             // 新的data的相应的index
-            self.generateIndex(table, &mut keyBuffer, newDataKey, &rowData, true)?;
+            self.generateIndex(table, &mut keyBuffer, newDataKey, &rowData, false)?;
 
             // todo update时候如何干掉oldDataKey对应的index
         }

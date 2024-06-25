@@ -276,7 +276,7 @@ impl<'session> CommandExecutor<'session> {
             if scanParams.tableFilter.is_some() || select {
                 let mut satisfiedRows = Vec::new();
 
-                let mut scanSearch = false;
+                let mut scanSearch = true;
 
                 if scanParams.tableFilter.is_some() {
                     if let Some(mut indexSearch) = self.getMostSuitableIndex(&scanParams)? {

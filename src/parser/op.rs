@@ -77,7 +77,7 @@ pub enum LogicalOp {
 }
 
 #[derive(DisplayStrum, Clone, Debug, Copy, Serialize, Deserialize)]
-pub enum SqlOp {
+pub enum SqlOp { // todo 实现like
     In,
 }
 

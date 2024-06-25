@@ -134,12 +134,16 @@ pub const MVCC_KEY_BYTE_LEN: usize = {
 // -----------------------------------------------------------------------------------------
 
 /// 4bit + 60bit
-pub const ORIGIN_DATA_KEY_KEY_BYTE_LEN: usize = mem::size_of::<DataKey>();
+pub const ORIGIN_DATA_KEY_KEY_BYTE_LEN: usize = size_of::<DataKey>();
 /// 是value啊不是像以往的key
 pub const DATA_KEY_INVALID: DataKey = crate::keyPrefixAddRowId!(KEY_PREFIX_DATA, ROW_ID_INVALID);
 
+// ------------------------------------------------------------------------------------------
+
 /// 用来保存txId的colFamily的name
 pub const COLUMN_FAMILY_NAME_TX_ID: &str = "tx_id";
+
+pub const INDEX_TRASH_SUFFIX: &str = "_trash";
 
 pub fn isVisible(currentTxId: TxId, xmin: TxId, xmax: TxId) -> bool {
     // invisible
@@ -319,6 +323,19 @@ pub struct Table {
     pub indexNames: Vec<String>,
 }
 
+impl Clone for Table {
+    fn clone(&self) -> Self {
+        Table {
+            id: self.id,
+            name: self.name.clone(),
+            columns: self.columns.clone(),
+            rowIdCounter: AtomicU64::new(self.rowIdCounter.load(Ordering::Acquire)),
+            createIfNotExist: self.createIfNotExist,
+            indexNames: self.indexNames.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Serialize, Default)]
 pub enum TableType {
     #[default]
@@ -434,6 +451,7 @@ pub fn init() -> Result<()> {
             let (key, value) = iterResult?;
 
             let dbObjectId = byte_slice_to_u64!(&*key);
+            //println!("{}", String::from_utf8(Vec::from(&*value)).unwrap());
             let dbObject: DBObject = serde_json::from_slice(&*value)?;
 
             if dbObjectId != dbObject.getId() {
@@ -441,6 +459,11 @@ pub fn init() -> Result<()> {
             }
 
             columnFamilyNames.push(dbObject.getName());
+
+            // 如果是index的话不要忘了对应的trash的columnFamily
+            if let DBObject::Index(ref index) = dbObject {
+                columnFamilyNames.push(format!("{}{}", index.name, INDEX_TRASH_SUFFIX));
+            }
 
             NAME_DB_OBJ.insert(dbObject.getName(), dbObject);
 
@@ -475,6 +498,10 @@ pub fn init() -> Result<()> {
 
     // 遍历各个cf读取last的key 读取lastest的rowId
     for ref columnFamilyName in columnFamilyNames {
+        if columnFamilyName.ends_with(INDEX_TRASH_SUFFIX) {
+            continue;
+        }
+
         let columnFamily = dataStore.cf_handle(columnFamilyName.as_str()).unwrap();
         let mut rawIterator: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
 
@@ -489,15 +516,15 @@ pub fn init() -> Result<()> {
                 TX_ID_START_UP.set(lastTxId);
                 TX_ID_COUNTER.store(lastTxId + 1, Ordering::Release);
             }
+            (None, COLUMN_FAMILY_NAME_TX_ID) => {
+                TX_ID_START_UP.set(TX_ID_MIN - 1);
+                TX_ID_COUNTER.store(TX_ID_MIN, Ordering::Release);
+            }
             (Some(key), _) => {
                 let lastRowId = extractRowIdFromKeySlice!(key);
 
                 let dbObject = NAME_DB_OBJ.get(columnFamilyName.as_str()).unwrap();
                 dbObject.getRowIdCounter().store(lastRowId + 1, Ordering::Release);
-            }
-            (None, COLUMN_FAMILY_NAME_TX_ID) => {
-                TX_ID_START_UP.set(TX_ID_MIN - 1);
-                TX_ID_COUNTER.store(TX_ID_MIN, Ordering::Release);
             }
             (None, _) => {
                 let dbObject = NAME_DB_OBJ.get(columnFamilyName.as_str()).unwrap();

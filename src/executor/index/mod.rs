@@ -43,18 +43,18 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
     // 要是这个闭包的那个&GraphValue 不去标生命周期参数的话会报错,
     // 原因是 编译器认为那个reference 它跑到了外边的Vec<(Op, &graphValue)> 了 产生了dangling
     // 然而事实上不是这样的 然而编译器是不知道的 需要手动的标上
-    let mut accumulate = |op: Op, value: &'a GraphValue| {
+    let mut accumulate = |op: Op, value: &'a GraphValue, dest: &mut Vec<(Op, &'a GraphValue)>| {
         let mut merged = false;
 
-        // 第1趟
-        if selfAccumulated.is_empty() {
-            selfAccumulated.push((op, value));
-            return true;
+        // 要是累加的成果还是空的话,直接的insert
+        if dest.is_empty() {
+            dest.push((op, value));
+            return (true, merged);
         }
 
-        let mut accumulated = Vec::with_capacity(selfAccumulated.len());
+        let mut accumulated = Vec::new();
 
-        for (previousOp, previousValue) in &selfAccumulated {
+        for (previousOp, previousValue) in &*dest {
             if merged {
                 accumulated.push((*previousOp, *previousValue));
                 continue;
@@ -66,13 +66,13 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
             };
 
             match withSingle {
-                None => return false, // 说明有 a<0 or a>=0 类似的废话出现了
+                None => return (false, merged), // 说明有 a<0 or a>=0 类似的废话出现了
                 Some(orResult) => {
                     if orResult.len() == 1 { // 说明能融合
-                        accumulated.push(orResult[0]);
                         merged = true;
+                        accumulated.push(orResult[0]);
                     } else {
-                        accumulated.push((*previousOp, *previousValue));
+                        accumulated.push((*previousOp, previousValue))
                     }
                 }
             }
@@ -82,16 +82,45 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
             accumulated.push((op, value));
         }
 
-        selfAccumulated = accumulated;
 
-        true
+        dest.clear();
+        for a in accumulated {
+            dest.push(a);
+        }
+        // selfAccumulated = accumulated;
+
+        (true, merged)
     };
 
     for (op, value) in opValueVec {
-        if accumulate(*op, &**value) == false {
+        if let (false, _) = accumulate(*op, &**value, &mut selfAccumulated) {
             return None;
         }
     }
+
+    // (a=1 or a=3 or a >0) 运算之后是 (a=1 or a>0) 还是能继续压缩融合的
+    loop {
+        let clone = selfAccumulated.clone();
+        selfAccumulated.clear();
+
+        let mut a = false;
+        for (op, value) in clone {
+            match accumulate(op, value, &mut selfAccumulated) {
+                (false, _) => return None,
+                (true, merged) => {
+                    if merged {
+                        a = true;
+                    }
+                }
+            }
+        }
+
+        // 说明未发生过融合,没有进1步融合压缩的可能了
+        if a == false {
+            break;
+        }
+    }
+
 
     Some(selfAccumulated)
 }
@@ -259,20 +288,32 @@ impl<'session> CommandExecutor<'session> {
 
                     opValueVecVecAcrossIndexFilteredCols.push(opValueVecVec);
 
+                    indexFilteredColNames.push(indexColName.clone());
+
                     // 尝试or压缩 (a and b) or (c and d), 应对 (a and b)和(c and d) 之间重复的部分
                     // 如果是纯粹通用考虑的话是不太容易的, 不过以目前的话事实上是可以知道的, 如果
                 } else { // 单个字段上的过滤条件之间是or 字段和字段之间是or
-                    let opValueVec: Vec<(Op, &GraphValue)> = opValuesVec.iter().map(|(op, values)| {
+                    // 扁平化values
+                    let mut opValueVec = Vec::new();
+                    for (op, values) in opValuesVec {
                         assert!(op.permitByIndex());
-                        assert_eq!(values.len(), 1);
 
-                        let value = values.first().unwrap();
-                        assert!(value.isConstant());
+                        // 说明是尚未被消化的in
+                        if values.len() > 1 {
+                            for value in values {
+                                assert!(value.isConstant());
 
-                        (*op, value)
-                    }).collect();
+                                opValueVec.push((Op::MathCmpOp(MathCmpOp::Equal), value));
+                            }
+                        } else {
+                            let value = values.first().unwrap();
+                            assert!(value.isConstant());
 
-                    let accumulatedOr = match index::accumulateOr(opValueVec.as_slice()) {
+                            opValueVec.push((*op, value));
+                        }
+                    }
+
+                    let accumulatedOr = match accumulateOr(opValueVec.as_slice()) {
                         Some(accumulated) => accumulated,
                         // 如果and 那么是 a>=0 and a<0 矛盾
                         // 如果是or 那么是 a>0 or a<=0 这样的废话
@@ -306,6 +347,9 @@ impl<'session> CommandExecutor<'session> {
                                     leafVec.push(andDesc);
                                 }
                             }
+
+                            // 注意需要return刹住
+                            return;
                         } else {
                             let value = values.first().unwrap();
                             assert!(value.isConstant());
@@ -317,8 +361,8 @@ impl<'session> CommandExecutor<'session> {
 
                             // 不是last元素
                             if opValuesVec.len() > 1 {
-                                // 收纳小弟
-                                and(&opValuesVec[1..], Rc::new(andDesc), leafVec);
+                                // 收纳小弟,注意需要return刹住
+                                return and(&opValuesVec[1..], Rc::new(andDesc), leafVec);
                             } else {
                                 leafVec.push(andDesc);
                             }
@@ -419,11 +463,14 @@ impl<'session> CommandExecutor<'session> {
     // todo 如果index本身能包含要select的全部字段 那么直接index读取了
     /// index本身也是个table 只不过可以是实际的data加上dataKey
     pub(in crate::executor) fn searchByIndex<A, B, C, D>(&self, indexSearch: IndexSearch) -> Result<Vec<(DataKey, RowData)>>
-        where
-            A: CommittedPreProcessor,
-            B: CommittedPostProcessor,
-            C: UncommittedPreProcessor,
-            D: UncommittedPostProcessor {
+    where
+        A: CommittedPreProcessor,
+        B: CommittedPostProcessor,
+        C: UncommittedPreProcessor,
+        D: UncommittedPostProcessor,
+    {
+        log::info!("searchByIndex, indexSearch.indexLocalSearch:{:?}",indexSearch.indexLocalSearch);
+
         let index = indexSearch.dbObjectIndex.asIndex()?;
         let snapshot = self.session.getSnapshot()?;
 
@@ -511,6 +558,9 @@ impl<'session> CommandExecutor<'session> {
                         _ => panic!("impossible")
                     }
                 }
+
+                lowerValueBuffer.clear();
+                upperValueBuffer.clear();
 
                 match (lowerValue, upperValue) {
                     (Some(lowerValue), Some(upperValue)) => {
@@ -618,6 +668,7 @@ impl<'session> CommandExecutor<'session> {
                     assert!(op.permitByIndex());
                     assert!(value.isConstant());
 
+                    buffer.clear();
                     value.encode(&mut buffer)?;
 
                     match op {
@@ -711,11 +762,12 @@ impl<'session> CommandExecutor<'session> {
     // 对or来说 不会调用该函数了 因为 要使用index的话 表的过滤条件的字段只能单个 且 要是 index的打头字段
     fn further<A, B, C, D>(&self, indexKey: &[Byte],
                            indexSearch: &IndexSearch) -> Result<Option<IndexSearchResult>>
-        where
-            A: CommittedPreProcessor,
-            B: CommittedPostProcessor,
-            C: UncommittedPreProcessor,
-            D: UncommittedPostProcessor {
+    where
+        A: CommittedPreProcessor,
+        B: CommittedPostProcessor,
+        C: UncommittedPreProcessor,
+        D: UncommittedPostProcessor,
+    {
 
         // key的末尾是dataKey
         let dataKey = extractDataKeyFromIndexKey!(indexKey);
@@ -797,11 +849,12 @@ impl<'session> CommandExecutor<'session> {
                                     columnValues: Vec<GraphValue>, // index上的全部的column的data
                                     datakey: DataKey,
                                     indexSearch: &IndexSearch) -> Result<Option<RowData>>
-        where
-            A: CommittedPreProcessor,
-            B: CommittedPostProcessor,
-            C: UncommittedPreProcessor,
-            D: UncommittedPostProcessor, {
+    where
+        A: CommittedPreProcessor,
+        B: CommittedPostProcessor,
+        C: UncommittedPreProcessor,
+        D: UncommittedPostProcessor,
+    {
         let index = indexSearch.dbObjectIndex.asIndex()?;
 
         // 它们这些的ref的生命周期是什么, 目前觉的应该是和indexSearch相同
@@ -845,6 +898,7 @@ impl<'session> CommandExecutor<'session> {
                                              trash: bool) -> Result<()> {
         // 遍历各个index
         for indexName in &table.indexNames {
+            println!("indexName:{indexName}");
             let dbObjectIndex = self.getDBObjectByName(indexName)?;
             let index = dbObjectIndex.asIndex()?;
 
@@ -862,7 +916,7 @@ impl<'session> CommandExecutor<'session> {
             indexKeyBuffer.put_slice(u64ToByteArrRef!(dataKey));
 
             if trash {
-                self.session.writeAddIndexMutation(&format!("{indexName}_trash"), (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
+                self.session.writeAddIndexMutation(&format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX), (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
             } else {
                 self.session.writeAddIndexMutation(indexName, (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
             }

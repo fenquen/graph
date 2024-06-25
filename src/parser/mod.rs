@@ -120,7 +120,7 @@ mod test {
 
     #[test]
     pub fn testParseCreateIndex() {
-        parser::parse("create index aaa on user[name,id] aaaaa").unwrap();
+        parser::parse("create index aaa on user[name,id]").unwrap();
     }
 
     #[test]

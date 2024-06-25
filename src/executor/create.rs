@@ -74,7 +74,7 @@ impl<'session> CommandExecutor<'session> {
         self.session.createColFamily(index.name.as_str())?;
 
         // index对应的垃圾桶的column family,它只是个附庸在index上的纯rocks概念体系里的东西,不是db的概念
-        self.session.createColFamily(format!("{indexName}_trash").as_str())?;
+        self.session.createColFamily(format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX).as_str())?;
 
         let indexId = u64ToByteArrRef!(index.id);
         let dbObjectIndex = DBObject::Index(index);
@@ -86,7 +86,7 @@ impl<'session> CommandExecutor<'session> {
         // todo 如何知道表涉及到的index有哪些,要有table和相应的index的联系 完成
         // 回写更新后的表的信息
         targetTable.indexNames.push(indexName);
-        meta::STORE.metaStore.put(u64ToByteArrRef!(targetTable.id), serde_json::to_string(targetTable)?.as_bytes())?;
+        meta::STORE.metaStore.put(u64ToByteArrRef!(targetTable.id), serde_json::to_string(&DBObject::Table(targetTable.clone()))?.as_bytes())?;
 
         Ok(CommandExecResult::DdlResult)
     }
