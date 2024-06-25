@@ -759,9 +759,9 @@ impl<'session> CommandExecutor<'session> {
             }
 
             if let Some(tableMutations) = tableMutations {
-                if self.checkCommittedPointerVisiWithTxMutations(tableMutations,
-                                                                 &mut pointerKeyBuffer,
-                                                                 committedPointerKey.as_ref())? == false {
+                if self.committedPointerVisibleWithTxMutations(tableMutations,
+                                                               &mut pointerKeyBuffer,
+                                                               committedPointerKey.as_ref())? == false {
                     continue;
                 }
             }
@@ -788,7 +788,7 @@ impl<'session> CommandExecutor<'session> {
                     break;
                 }
 
-                if self.checkUncommittedPointerVisi(&tableMutations, &mut pointerKeyBuffer, addedPointerKey)? == false {
+                if self.uncommittedPointerVisible(&tableMutations, &mut pointerKeyBuffer, addedPointerKey)? == false {
                     continue;
                 }
 

@@ -140,10 +140,10 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
-    pub(super) fn checkCommittedPointerVisiWithTxMutations(&self,
-                                                           tableMutations: &TableMutations,
-                                                           pointerKeyBuffer: &mut BytesMut,
-                                                           committedPointerKey: &[Byte]) -> Result<bool> {
+    pub(super) fn committedPointerVisibleWithTxMutations(&self,
+                                                         tableMutations: &TableMutations,
+                                                         pointerKeyBuffer: &mut BytesMut,
+                                                         committedPointerKey: &[Byte]) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 对committedPointerKey来说,mutations上只可能会有xmax的
@@ -155,10 +155,10 @@ impl<'session> CommandExecutor<'session> {
         Ok(tableMutations.get(pointerKeyBuffer.as_ref()).is_none())
     }
 
-    pub(super) fn checkUncommittedPointerVisi(&self,
-                                              tableMutations: &TableMutations,
-                                              pointerKeyBuffer: &mut BytesMut,
-                                              addedPointerKey: &[Byte]) -> Result<bool> {
+    pub(super) fn uncommittedPointerVisible(&self,
+                                            tableMutations: &TableMutations,
+                                            pointerKeyBuffer: &mut BytesMut,
+                                            addedPointerKey: &[Byte]) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // 不要xmax的pointerKey
