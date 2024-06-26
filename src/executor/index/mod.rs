@@ -29,15 +29,15 @@ pub enum Logical {
     And,
 }
 
-pub(super) fn accumulateOr<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Option<Vec<(Op, &GraphValue)>> {
+pub(super) fn accumulateOr<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Result<Option<Vec<(Op, &GraphValue)>>> {
     accumulate(opValueVec, Logical::Or)
 }
 
-pub(super) fn accumulateAnd<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Option<Vec<(Op, &GraphValue)>> {
+pub(super) fn accumulateAnd<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Result<Option<Vec<(Op, &GraphValue)>>> {
     accumulate(opValueVec, Logical::And)
 }
 
-fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logical: Logical) -> Option<Vec<(Op, &'a GraphValue)>> {
+fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logical: Logical) -> Result<Option<Vec<(Op, &'a GraphValue)>>> {
     let mut selfAccumulated = Vec::new();
 
     // 要是这个闭包的那个&GraphValue 不去标生命周期参数的话会报错,
@@ -49,7 +49,7 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
         // 要是累加的成果还是空的话,直接的insert
         if dest.is_empty() {
             dest.push((op, value));
-            return (true, merged);
+            return Result::<(bool,bool)>::Ok((true, merged));
         }
 
         let mut accumulated = Vec::new();
@@ -61,12 +61,12 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
             }
 
             let withSingle = match logical {
-                Logical::Or => or::orWithSingle(op, value, *previousOp, previousValue),
+                Logical::Or => or::orWithSingle(op, value, *previousOp, previousValue)?,
                 Logical::And => and::andWithSingle(op, value, *previousOp, previousValue)
             };
 
             match withSingle {
-                None => return (false, merged), // 说明有 a<0 or a>=0 类似的废话出现了
+                None => return Result::<(bool,bool)>::Ok((false, merged)), // 说明有 a<0 or a>=0 类似的废话出现了
                 Some(orResult) => {
                     if orResult.len() == 1 { // 说明能融合
                         merged = true;
@@ -89,12 +89,12 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
         }
         // selfAccumulated = accumulated;
 
-        (true, merged)
+        Result::<(bool,bool)>::Ok((true, merged))
     };
 
     for (op, value) in opValueVec {
-        if let (false, _) = accumulate(*op, &**value, &mut selfAccumulated) {
-            return None;
+        if let (false, _) = accumulate(*op, &**value, &mut selfAccumulated)? {
+            return Ok(None);
         }
     }
 
@@ -105,8 +105,8 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
 
         let mut a = false;
         for (op, value) in clone {
-            match accumulate(op, value, &mut selfAccumulated) {
-                (false, _) => return None,
+            match accumulate(op, value, &mut selfAccumulated)? {
+                (false, _) => return Ok(None),
                 (true, merged) => {
                     if merged {
                         a = true;
@@ -122,7 +122,7 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
     }
 
 
-    Some(selfAccumulated)
+    Ok(Some(selfAccumulated))
 }
 
 #[macro_export]
@@ -268,7 +268,7 @@ impl<'session> CommandExecutor<'session> {
 
                     //  对麾下的各个的and脉络压缩
                     let opValueVecVec: Vec<Vec<(Op, &GraphValue)>> =
-                        opValueVecVec.iter().filter_map(|opValueVec| accumulateAnd(opValueVec.as_slice())).collect();
+                        opValueVecVec.iter().filter_map(|opValueVec| accumulateAnd(opValueVec.as_slice()).unwrap()).collect();
 
                     if opValueVecVec.is_empty() {
                         continue 'loopIndex;
@@ -309,7 +309,7 @@ impl<'session> CommandExecutor<'session> {
                         }
                     }
 
-                    let accumulatedOr = match accumulateOr(opValueVec.as_slice()) {
+                    let accumulatedOr = match accumulateOr(opValueVec.as_slice())? {
                         Some(accumulated) => accumulated,
                         // 如果and 那么是 a>=0 and a<0 矛盾
                         // 如果是or 那么是 a>0 or a<=0 这样的废话

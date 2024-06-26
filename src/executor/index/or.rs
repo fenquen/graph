@@ -2,11 +2,12 @@ use crate::graph_value::GraphValue;
 use crate::parser::op::{LikePattern, MathCmpOp, Op, SqlOp};
 use crate::{global, utils};
 use crate::parser::op;
+use anyhow::Result;
 
 /// 如果能融合的话 得到的vec的len是1 不然是2
 /// 融合是相当有必要的 不然后续index搜索的时候会有很多无谓的重复 对性能有损失的
 pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
-                               targetOp: Op, targetValue: &'a GraphValue) -> Option<Vec<(Op, &'a GraphValue)>> {
+                               targetOp: Op, targetValue: &'a GraphValue) -> Result<Option<Vec<(Op, &'a GraphValue)>>> {
     assert!(op.permitByIndex());
     assert!(value.isConstant());
 
@@ -20,7 +21,7 @@ pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
         (Op::SqlOp(SqlOp::Like), Op::SqlOp(SqlOp::Like)) => {
             // 不在乎具体的数据种类
             if value == targetValue {
-                return Some(vec![(Op::SqlOp(SqlOp::Like), value)]);
+                return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
             }
 
             if let (GraphValue::String(string), GraphValue::String(targetString)) = (value, targetValue) {
@@ -28,28 +29,28 @@ pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
                 let targetLikePattern = op::determineLikePattern(targetString)?;
 
                 match (likePattern, targetLikePattern) {
-                    (LikePattern::Redundant, _) => return None,
-                    (_, LikePattern::Redundant) => return None,
+                    (LikePattern::Redundant, _) => return Ok(None),
+                    (_, LikePattern::Redundant) => return Ok(None),
                     (LikePattern::Equal(s0), LikePattern::Equal(s1)) => {
                         // like 'a' or like 'a'
                         // like 'a' or like 'a%'
                         // like 'a' or like '%a'
                         // like 'a' or like '%a%'
                         if s0 == s1 { // 其实是重复了  上边会包含的
-                            return Some(vec![(Op::SqlOp(SqlOp::Like), value)]);
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
                         }
                     }
                     (LikePattern::Equal(s0), LikePattern::StartWith(s1)) => {
                         if s1.starts_with(&s0) {
-                            return Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]);
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
                         }
                     }
                     (LikePattern::Equal(s0), LikePattern::EndWith(s1)) => {
                         if s1.starts_with(&s0) {
-                            return Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]);
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
                         }
                     }
-                    (LikePattern::EndWith(s0),LikePattern::Contain(s1))=>{
+                    (LikePattern::Equal(s0),LikePattern::Contain(s1))=>{
 
                     }
                     _ => panic!()
@@ -75,7 +76,7 @@ pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
                 Op::MathCmpOp(MathCmpOp::LessThan) => {}
                 Op::SqlOp(SqlOp::Like) => { // 不在乎具体的数据种类
                     if value == targetValue {
-                        return Some(vec![(Op::SqlOp(SqlOp::Like), value)]);
+                        return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
                     }
                 }
                 _ => panic!()
@@ -84,192 +85,192 @@ pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
         (_, Op::SqlOp(SqlOp::Like)) => {}
         (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::Equal)) => {
             if value == targetValue { // 能够融合
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), value)]));
             }
         }
         (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
             if value >= targetValue { // =6 or >=6
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)]));
             }
             // =6 or >=7 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
             if value == targetValue { // =6 or >6
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)]));
             }
 
             if value > targetValue { // =6 or >5
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)]));
             }
             // =6 or >7 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
             if value <= targetValue { // =6 or <=6, =6 or <=9
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)]));
             }
             // =6 or <=0 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::LessThan)) => {
             if value < targetValue { // =6 or <7
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)]));
             }
 
             if value == targetValue { // =6 or <6
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)]));
             }
             //  =6 or <0 不能融合
         }
         // -----------------------------------------------------------------------------
         (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::Equal)) => {
             if value == targetValue { // >6 or =6
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)]));
             }
 
             if value <= targetValue {  // >6 or =9
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)]));
             }
             // >=6 or =3 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
             if value >= targetValue { // >6 or >6 , >6 or >3
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)]));
             }
 
             // >6 or >7
-            return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)]);
+            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)]));
         }
         (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
             if value >= targetValue { // >6 and >=6, >6 and >=3
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)]));
             }
 
             // >3 and >=4
-            return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)]);
+            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)]));
         }
         (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
             if value <= targetValue { // >6 or <=6 , >6 or <=7 是废话
-                return None;
+                return Ok(None);
             }
             // >6 or <=3 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::GreaterThan), Op::MathCmpOp(MathCmpOp::LessThan)) => {
             if value <= targetValue { // >3 or <3 等效not equal, >3 or <4 是废话
-                return None;
+                return Ok(None);
             }
             // >3 or <0 不能融合
         }
         // -----------------------------------------------------------------------------
         (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::Equal)) => {
             if value <= targetValue { // >=6 or =6, >=6 or =9
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), value)]));
             }
             // >=6 or =3 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
             if value >= targetValue { // >=6 or >=6 , >=6 or >=0
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)]));
             }
 
             // >=6 or >=7
-            return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)]);
+            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)]));
         }
         (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
             if value <= targetValue { // >=6 or > 6, >=6 or >7
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), value)]));
             }
 
             // >=6 or >0
-            return Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)]);
+            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterThan), targetValue)]));
         }
         (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
             if value <= targetValue { // >=6 or <=6, >=6 or <=9 废话
-                return None;
+                return Ok(None);
             }
             // >=6 or <=0 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::GreaterEqual), Op::MathCmpOp(MathCmpOp::LessThan)) => {
             if value <= targetValue { // >=6 or <6, >=6 or <7 废话
-                return None;
+                return Ok(None);
             }
             // >=6 or <5 不能融合
         }
         // ------------------------------------------------------------------------------
         (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::Equal)) => {
             if value >= targetValue { // <=6 or =6 , <=6 or =5
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)]));
             }
             // <=6 or =9 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
             if value >= targetValue { // <=6 and >6, <=6 or >5 废话
-                return None;
+                return Ok(None);
             }
             // <=6 and >9 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
             if value >= targetValue { // <=6 or >=6 ,<=6 or >=0 废话
-                return None;
+                return Ok(None);
             }
             // <=6 and >=9 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
             if value <= targetValue { // <=6 or <=6 ,<=6 or <=7
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)]));
             }
 
             // <=6 or <=0
-            return Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)]);
+            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)]));
         }
         (Op::MathCmpOp(MathCmpOp::LessEqual), Op::MathCmpOp(MathCmpOp::LessThan)) => {
             if value >= targetValue { // <=6 or <6 ,<=6 or <0
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)]));
             }
 
             // <=6 or <9
-            return Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)]);
+            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)]));
         }
         // ------------------------------------------------------------------------------
         (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::Equal)) => {
             if value == targetValue { // <6 or =6
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), value)]));
             }
 
             if value > targetValue {  // <6 or =0
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)]));
             }
 
             // <6 or =9 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
             if value >= targetValue { // <6 or >6 等效not equal, <6 or >3 废话
-                return None;
+                return Ok(None);
             }
             // <6 or >9 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
             if value >= targetValue { // <6 or >=6, <6 or >=5 废话
-                return None;
+                return Ok(None);
             }
             // <6 or >=9 不能融合
         }
         (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
             if value <= targetValue { // <6 or <=6, <6 or <=7
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)]));
             }
 
             // <6 or <=5
-            return Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)]);
+            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)]));
         }
         (Op::MathCmpOp(MathCmpOp::LessThan), Op::MathCmpOp(MathCmpOp::LessThan)) => {
             if value <= targetValue { // <6 or <6 , <6 or <7
-                return Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)]);
+                return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), targetValue)]));
             }
 
             // <6 or <5
-            return Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)]);
+            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessThan), value)]));
         }
         _ => panic!("impossible")
     }
 
-    return Some(vec![(op, value), (targetOp, targetValue)]);
+    return Ok(Some(vec![(op, value), (targetOp, targetValue)]));
 }

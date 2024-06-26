@@ -110,6 +110,18 @@ pub enum LikePattern {
     Contain(String),
 }
 
+impl LikePattern {
+    pub fn getString(&self) -> Result<&String> {
+        match self {
+            LikePattern::Equal(s) => Ok(s),
+            LikePattern::Redundant => throw!("can not get string from LikePattern::Redundant"),
+            LikePattern::StartWith(s) => Ok(s),
+            LikePattern::EndWith(s) => Ok(s),
+            LikePattern::Contain(s) => Ok(s),
+        }
+    }
+}
+
 pub fn determineLikePattern(likePattern: &str) -> Result<LikePattern> {
     // like 'a', right不包含'%', 变成equal比较
     if likePattern.contains(global::百分号_STR) == false {
@@ -144,5 +156,5 @@ pub fn determineLikePattern(likePattern: &str) -> Result<LikePattern> {
     }
 
     // 到了这边便是 like 'a%a'这样的了
-    throwFormat!("like {rightString} is not supported")
+    throwFormat!("like {likePattern} is not supported")
 }
