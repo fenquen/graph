@@ -19,41 +19,115 @@ pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
         // 不像其它的,对like来说还要深入其数据种类来探讨,不过不这样的话 like '%' 这样的废话就漏过了
         // like '%a' or >='a'
         (Op::SqlOp(SqlOp::Like), Op::SqlOp(SqlOp::Like)) => {
-            // 不在乎具体的数据种类
+            // 不在乎具体的数据种类 ,不管是 like null 和 like null 还是 like '%a' 和 like '%a'
             if value == targetValue {
                 return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
             }
 
+            // like '%' 含有Redundant踢掉
+            if let (GraphValue::String(string)) = value {
+                if let LikePattern::Redundant = op::determineLikePattern(string)? {
+                    return Ok(None);
+                }
+            }
+
+            // like '%' 含有Redundant踢掉
+            if let (GraphValue::String(targetString)) = targetValue {
+                if let LikePattern::Redundant = op::determineLikePattern(targetString)? {
+                    return Ok(None);
+                }
+            }
+            
             if let (GraphValue::String(string), GraphValue::String(targetString)) = (value, targetValue) {
                 let likePattern = op::determineLikePattern(string)?;
                 let targetLikePattern = op::determineLikePattern(targetString)?;
 
-                match (likePattern, targetLikePattern) {
-                    (LikePattern::Redundant, _) => return Ok(None),
-                    (_, LikePattern::Redundant) => return Ok(None),
-                    (LikePattern::Equal(s0), LikePattern::Equal(s1)) => {
+                // 含有Redundant踢掉,事实上是用不着的上边的会兜底的,写了是为了后续阅读方便
+                if let LikePattern::Redundant = &likePattern {
+                    return Ok(None);
+                }
+                if let LikePattern::Redundant = &targetLikePattern {
+                    return Ok(None);
+                }
+
+                let likeString = likePattern.getString()?;
+                let targetLikeString = targetLikePattern.getString()?;
+
+                match (&likePattern, &targetLikePattern) { // 统共要有16类情况
+                    (LikePattern::Equal(_), _) | (_, LikePattern::Equal(_)) => { // 对应7类情况 4+4-1
                         // like 'a' or like 'a'
                         // like 'a' or like 'a%'
                         // like 'a' or like '%a'
                         // like 'a' or like '%a%'
-                        if s0 == s1 { // 其实是重复了  上边会包含的
+                        if likeString == targetLikeString {
                             return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
                         }
                     }
-                    (LikePattern::Equal(s0), LikePattern::StartWith(s1)) => {
-                        if s1.starts_with(&s0) {
-                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
+                    (LikePattern::StartWith(string), LikePattern::StartWith(targetString)) => {
+                        // like 'a%' or like 'abcd%'
+                        if targetString.starts_with(string) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
                         }
-                    }
-                    (LikePattern::Equal(s0), LikePattern::EndWith(s1)) => {
-                        if s1.starts_with(&s0) {
-                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
-                        }
-                    }
-                    (LikePattern::Equal(s0),LikePattern::Contain(s1))=>{
 
+                        // like 'abcd%' or like 'a%'
+                        if string.starts_with(targetString) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
+                        }
                     }
-                    _ => panic!()
+                    (LikePattern::StartWith(string), LikePattern::EndWith(targetString)) => {
+                        // like 'a%' or like '%a' ,不能融合
+                    }
+                    (LikePattern::StartWith(string), LikePattern::Contain(targetString)) => {
+                        // like 'abcd%' or like '%b%'
+                        if string.contains(targetString) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
+                        }
+                    }
+                    (LikePattern::EndWith(string), LikePattern::StartWith(targetString)) => {
+                        // like '%a' or like 'a%' ,不能融合
+                    }
+                    (LikePattern::EndWith(string), LikePattern::EndWith(targetString)) => {
+                        // like '%d' or like '%abcd'
+                        if targetString.ends_with(string) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
+                        }
+
+                        // like '%abcd' or like '%d'
+                        if string.ends_with(targetString) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
+                        }
+                    }
+                    (LikePattern::EndWith(string), LikePattern::Contain(targetString)) => {
+                        // like '%abcd' or like '%b%'
+                        if string.contains(targetString) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
+                        }
+                    }
+                    (LikePattern::Contain(string), LikePattern::StartWith(targetString)) => {
+                        // like '%a%' or like 'bacd%'
+                        if targetString.contains(string) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
+                        }
+                    }
+                    (LikePattern::Contain(string), LikePattern::EndWith(targetString)) => {
+                        // like '%a%' or like '%bacd'
+                        if targetString.contains(string) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
+                        }
+                    }
+                    (LikePattern::Contain(string), LikePattern::Contain(targetString)) => {
+                        // like '%abd%' or like '%dabdr%'
+                        if targetString.contains(string) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
+                        }
+
+                        // like '%dabdr' or like '%abd%'
+                        if string.contains(targetString) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), targetValue)]));
+                        }
+                    }
+
+                    _ => panic!("impossible")
                 }
             }
         }
