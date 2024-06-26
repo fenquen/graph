@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
-use crate::{global, throw};
+use crate::{global, throw, throwFormat, utils};
 use crate::graph_error::GraphError;
 use strum_macros::{Display as DisplayStrum, Display, EnumString};
 use anyhow::Result;
@@ -77,8 +77,9 @@ pub enum LogicalOp {
 }
 
 #[derive(DisplayStrum, Clone, Debug, Copy, Serialize, Deserialize)]
-pub enum SqlOp { // todo 实现like
+pub enum SqlOp {
     In,
+    Like,
 }
 
 #[derive(DisplayStrum, Clone, Debug, Copy, Serialize, Deserialize)]
@@ -99,4 +100,49 @@ impl MathCalcOp {
             _ => throw!(&format!("unknown math calc operator:{char}"))
         }
     }
+}
+
+pub enum LikePattern {
+    Equal(String),
+    Redundant,
+    StartWith(String),
+    EndWith(String),
+    Contain(String),
+}
+
+pub fn determineLikePattern(likePattern: &str) -> Result<LikePattern> {
+    // like 'a', right不包含'%', 变成equal比较
+    if likePattern.contains(global::百分号_STR) == false {
+        return Ok(LikePattern::Equal(likePattern.to_string()));
+    }
+
+    // right全都是'%'
+    if utils::isPureSomeChar(likePattern, global::百分号_CHAR) {
+        // like '%' 和 like '%%'
+        if 2 >= likePattern.len() {
+            return Ok(LikePattern::Redundant);
+        }
+
+        // 如果上边的不满足的话,就对应了下边的 两头都是"%"
+    }
+    // like '%a%',提取当中的部分,使用contains
+    if likePattern.starts_with(global::百分号_STR) && likePattern.ends_with(global::百分号_STR) {
+        let targetStr = &likePattern[1..likePattern.len() - 1];
+        return Ok(LikePattern::Contain(targetStr.to_string()));
+    }
+
+    // like '%a' 使用 ends_with
+    if likePattern.starts_with(global::百分号_STR) {
+        let targetStr = &likePattern[1..];
+        return Ok(LikePattern::EndWith(targetStr.to_string()));
+    }
+
+    // like 'a%' 使用 starts_with
+    if likePattern.ends_with(global::百分号_STR) {
+        let targetStr = &likePattern[..likePattern.len() - 1];
+        return Ok(LikePattern::StartWith(targetStr.to_string()));
+    }
+
+    // 到了这边便是 like 'a%a'这样的了
+    throwFormat!("like {rightString} is not supported")
 }

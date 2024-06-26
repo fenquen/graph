@@ -9,7 +9,7 @@ pub(super) fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
     assert!(targetOp.permitByIndex());
     assert!(targetValue.isConstant());
 
-    match (op, targetOp) {
+    match (op, targetOp) { // todo 如何应对 string的 like 'a%' 和 >='a' 的融合
         (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::Equal)) => {
             if value == targetValue {
                 return Some(vec![(op, value)]);

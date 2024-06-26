@@ -79,3 +79,6 @@ pub const DOT_CHAR: char = '.';
 pub const DOT_STR: &str = ".";
 
 pub const EMPTY_BINARY: Vec<Byte> = vec![];
+
+pub const 百分号_CHAR: char = '%';
+pub const 百分号_STR: &str = "%";

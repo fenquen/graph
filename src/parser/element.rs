@@ -248,14 +248,30 @@ impl Parser {
                 'n' | 'N' => {
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
+                        continue;
+                    }
+
+                    if self.tryPrefecthIgnoreCase(&vec!['U', 'L', 'L']) {
+                        // 需要了断 pendingChars
+                        self.collectPendingChars(&mut currentElementVec);
+                        currentElementVec.push(Element::Null);
                     } else {
-                        if self.tryPrefecthIgnoreCase(&vec!['U', 'L', 'L']) {
-                            // 需要了断 pendingChars
-                            self.collectPendingChars(&mut currentElementVec);
-                            currentElementVec.push(Element::Null);
-                        } else {
-                            self.pendingChars.push(currentChar);
-                        }
+                        self.pendingChars.push(currentChar);
+                    }
+                }
+                // 应对like
+                'l' | 'L' => { // todo 实现对like的parse 完成
+                    if self.whetherIn单引号() {
+                        self.pendingChars.push(currentChar);
+                        continue;
+                    }
+
+                    if self.tryPrefecthIgnoreCase(&vec!['i', 'k', 'e']) {
+                        // 需要了断 pendingChars
+                        self.collectPendingChars(&mut currentElementVec);
+                        currentElementVec.push(Element::Op(Op::SqlOp(SqlOp::Like)));
+                    } else {
+                        self.pendingChars.push(currentChar);
                     }
                 }
                 _ => {
@@ -308,7 +324,7 @@ impl Parser {
             }
         }
 
-        // 看看后边是不是还有粘连的 是不是只是某个长的textLiteral的前1部分
+        // 看看后边是不是还有粘连的(是不是只是某个长的textLiteral的前1部分)
         match self.peekNextChar() {
             Some(nextChar) => {
                 match nextChar {

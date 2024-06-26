@@ -3,14 +3,14 @@ use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::Display;
 use crate::graph_error::GraphError;
-use crate::{global, meta, throw, throwFormat};
+use crate::{global, meta, throw, throwFormat, utils};
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::ser::SerializeMap;
 use serde_json::Value;
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::parser::element::Element;
-use crate::parser::op::{LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
+use crate::parser::op::{determineLikePattern, LikePattern, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
 use crate::types::{Byte, DataKey};
 
 #[derive(Deserialize, Debug, Clone)]
@@ -193,14 +193,6 @@ impl GraphValue {
             GraphValue::INTEGER => Ok(GraphValue::Integer(0)),
             GraphValue::DECIMAL => Ok(GraphValue::Decimal(0.0)),
             _ => throwFormat!("unsupported graphValueType:{}", graphValueType)
-        }
-    }
-
-    pub fn boolValue(&self) -> Result<bool> {
-        if let GraphValue::Boolean(bool) = self {
-            Ok(*bool)
-        } else {
-            throwFormat!("not boolean, is {self:?}")
         }
     }
 
@@ -412,6 +404,23 @@ impl GraphValue {
                     }
                 }
             }
+            Op::SqlOp(SqlOp::Like) => { // todo 实现对like的计算 完成
+                match (self, rightValue) {
+                    (GraphValue::String(selfString), GraphValue::String(rightString)) => {
+                        match determineLikePattern(rightString)? {
+                            LikePattern::Equal(s) => Ok(GraphValue::Boolean(selfString == rightString)),
+                            LikePattern::Redundant => Ok(GraphValue::Boolean(true)),
+                            LikePattern::StartWith(s) => Ok(GraphValue::Boolean(selfString.starts_with(&s))),
+                            LikePattern::Contain(s) => Ok(GraphValue::Boolean(selfString.contains(&s))),
+                            LikePattern::EndWith(s) => Ok(GraphValue::Boolean(selfString.ends_with(&s))),
+                        }
+                    }
+                    (GraphValue::Null, GraphValue::Null) => Ok(GraphValue::Boolean(true)),
+                    (GraphValue::Null, GraphValue::String(_)) => Ok(GraphValue::Boolean(false)),
+                    (GraphValue::String(_), GraphValue::Null) => Ok(GraphValue::Boolean(false)),
+                    _ => throwFormat!("like can only used between strings")
+                }
+            }
             _ => throwFormat!("can not use {op:?}, between {self:?} , {rightValue:?}"),
         }
     }
@@ -419,7 +428,7 @@ impl GraphValue {
     fn calcIn(&self, rightValues: &[GraphValue]) -> Result<GraphValue> {
         for rightValue in rightValues {
             let calcResult = self.calcOneToOne(Op::MathCmpOp(MathCmpOp::Equal), rightValue)?;
-            if calcResult.boolValue()? == false {
+            if calcResult.asBoolean()? == false {
                 return Ok(GraphValue::Boolean(false));
             }
         }
@@ -444,9 +453,29 @@ impl GraphValue {
 
     pub fn asBoolean(&self) -> Result<bool> {
         if let GraphValue::Boolean(b) = self {
-            Ok(*b)
-        } else {
-            throw!("not boolean")
+            return Ok(*b);
+        }
+
+        throw!("not boolean")
+    }
+
+    pub fn asString(&self) -> Result<&String> {
+        if let GraphValue::String(s) = self {
+            return Ok(s);
+        }
+
+        throw!("not string")
+    }
+
+    pub fn getType(&self) -> GraphValueType {
+        match self {
+            GraphValue::Pending(_) => Self::PENDING,
+            GraphValue::String(_) => Self::STRING,
+            GraphValue::Boolean(_) => Self::BOOLEAN,
+            GraphValue::Integer(_) => Self::INTEGER,
+            GraphValue::Decimal(_) => Self::DECIMAL,
+            GraphValue::Null => Self::NULL,
+            _ => { panic!() }
         }
     }
 }
@@ -466,6 +495,7 @@ impl PartialOrd for GraphValue {
             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Some(float64.total_cmp(&(*integer as f64))),
             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Some(float.total_cmp(float0)),
             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Some(float64.total_cmp(&(*integer as f64))),
+            (GraphValue::Null, GraphValue::Null) => Some(Ordering::Equal),
             _ => None,
         }
     }

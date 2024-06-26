@@ -155,9 +155,10 @@ pub(in crate::executor) struct IndexSearch<'a> {
 }
 
 impl<'session> CommandExecutor<'session> {
-    // todo table对应的index列表 是不是应该融入到table对象 完成
-    pub(super) fn getMostSuitableIndex<'a>(&'a self, // 对self使用 'a的原因是 dbObjectIndex是通过 self.getDBObjectByName() 得到 含有的生命周期是 'session
-                                           scanParams: &'a ScanParams) -> Result<Option<IndexSearch<'a>>> {
+    // todo table对应的index列表 是不是应该融入到table对象(table本身记录他的indexNames) 完成
+    // todo index应对like
+    // 对self使用 'a的原因是 dbObjectIndex是通过 self.getDBObjectByName() 得到 含有的生命周期是 'session
+    pub(super) fn getMostSuitableIndex<'a>(&'a self, scanParams: &'a ScanParams) -> Result<Option<IndexSearch<'a>>> {
         if scanParams.table.indexNames.is_empty() {
             return Ok(None);
         }
@@ -191,11 +192,6 @@ impl<'session> CommandExecutor<'session> {
         // 候选的index名单
         let mut candiateInices = Vec::with_capacity(scanParams.table.indexNames.len());
 
-        // todo 要是有多个index都能应对tableFilter应该挑选哪个 需要考虑 select和filter的涵盖
-        // 挑选index 目前的原则有  index的本身能涵盖多少selectedColName, index能涵盖多少过滤条件
-        // top 理想的情况是, index的本身能涵盖全部的selectedColName 且 能涵盖全部过滤条件
-        // 要是不能的话 都得要去原始的表上 还是优先 覆盖过滤条件多的
-        // 遍历table的各个index,筛掉不合适的
         'loopIndex:
         for indexName in &scanParams.table.indexNames {
             let dbObjectIndex = self.getDBObjectByName(indexName)?;
@@ -384,6 +380,11 @@ impl<'session> CommandExecutor<'session> {
             return Ok(None);
         }
 
+        // todo 要是有多个index都能应对tableFilter应该挑选哪个 需要考虑 select和filter的涵盖 完成
+        // 挑选index 目前的原则有  index的本身能涵盖多少selectedColName, index能涵盖多少过滤条件
+        // top 理想的情况是, index的本身能涵盖全部的selectedColName 且 能涵盖全部过滤条件
+        // 要是不能的话 都得要去原始的表上 还是优先 覆盖过滤条件多的
+        // 遍历table的各个index,筛掉不合适的
         // indexFilteredColNames 由大到小排序
         candiateInices.sort_by(|prev, next| {
             // 比较 filter用到的字段数量
