@@ -50,6 +50,7 @@ pub enum MathCmpOp {
     GreaterEqual,
     LessEqual,
     LessThan,
+    /// not allowed by index
     NotEqual,
 }
 

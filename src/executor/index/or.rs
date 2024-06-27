@@ -24,39 +24,41 @@ pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
                 return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
             }
 
-            // like '%' 含有Redundant踢掉
+            // 用if let因为可能会有 like null, like '%' 含有Redundant踢掉
             if let (GraphValue::String(string)) = value {
                 if let LikePattern::Redundant = op::determineLikePattern(string)? {
                     return Ok(None);
                 }
             }
 
-            // like '%' 含有Redundant踢掉
+            // 用if let因为可能会有 like null, like '%' 含有Redundant踢掉
             if let (GraphValue::String(targetString)) = targetValue {
                 if let LikePattern::Redundant = op::determineLikePattern(targetString)? {
                     return Ok(None);
                 }
             }
-            
+
+            // 目前只对两边都是string的时候尝试去压缩,去掉不必要的or条件
             if let (GraphValue::String(string), GraphValue::String(targetString)) = (value, targetValue) {
                 let likePattern = op::determineLikePattern(string)?;
                 let targetLikePattern = op::determineLikePattern(targetString)?;
 
                 // 含有Redundant踢掉,事实上是用不着的上边的会兜底的,写了是为了后续阅读方便
-                if let LikePattern::Redundant = &likePattern {
-                    return Ok(None);
-                }
-                if let LikePattern::Redundant = &targetLikePattern {
-                    return Ok(None);
-                }
+                // if let LikePattern::Redundant = &likePattern {
+                //     return Ok(None);
+                // }
+                // if let LikePattern::Redundant = &targetLikePattern {
+                //     return Ok(None);
+                // }
 
-                let likeString = likePattern.getString()?;
-                let targetLikeString = targetLikePattern.getString()?;
-
+                // 因为两边都是like,这里是两边的likePattern比较
                 match (&likePattern, &targetLikePattern) { // 统共要有16类情况
                     (LikePattern::Equal(_), _) | (_, LikePattern::Equal(_)) => { // 对应7类情况 4+4-1
+                        let likeString = likePattern.getString()?;
+                        let targetLikeString = targetLikePattern.getString()?;
+
                         // like 'a' or like 'a'
-                        // like 'a' or like 'a%'
+                        // like 'a' or like 'a%' // todo orWithSingle遗漏了 Equal和StartWith 进1步压缩
                         // like 'a' or like '%a'
                         // like 'a' or like '%a%'
                         if likeString == targetLikeString {
@@ -132,31 +134,119 @@ pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
             }
         }
         (Op::SqlOp(SqlOp::Like), _) => {
-            assert_eq!(value.getType(), GraphValue::STRING);
-            assert_eq!(targetValue.getType(), GraphValue::STRING);
-
-            let selfString = value.asString()?;
-            let targetString = value.asString()?;
-
-            match targetOp {
-                Op::MathCmpOp(MathCmpOp::Equal) => { // like '%a' or ='a'
-                    // like 'b' or ='b'
+            // 用if let是因为可能会有like null 不是string, like '%' 含有Redundant踢掉
+            if let (GraphValue::String(string)) = value {
+                if let LikePattern::Redundant = op::determineLikePattern(string)? {
+                    return Ok(None);
                 }
-                Op::MathCmpOp(MathCmpOp::GreaterEqual) => {
-                    // like 'a%' or >='a'
-                }
-                Op::MathCmpOp(MathCmpOp::GreaterThan) => {}
-                Op::MathCmpOp(MathCmpOp::LessEqual) => {}
-                Op::MathCmpOp(MathCmpOp::LessThan) => {}
-                Op::SqlOp(SqlOp::Like) => { // 不在乎具体的数据种类
-                    if value == targetValue {
-                        return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
+            }
+
+            if let (GraphValue::String(string), GraphValue::String(targetString)) = (value, targetValue) {
+                let likePattern = op::determineLikePattern(string)?;
+
+                //  likePattern 4种, targetOp 5类
+                match (&likePattern, targetOp) {
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::Equal)) => {
+                        // like 'd' or ='d'
+                        if string == targetString {
+                            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), targetValue)]));
+                        }
                     }
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::GreaterThan) | Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
+                        // like 'd' or >'d' , like 'd' or >='d'
+                        if string == targetString {
+                            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue)]));
+                        }
+                    }
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::LessThan) | Op::MathCmpOp(MathCmpOp::LessEqual)) => {
+                        // like 'd' or <'d', like 'd' or <='d'
+                        if string == targetString {
+                            return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::LessEqual), targetValue)]));
+                        }
+                    }
+                    //-------------------------------------------------------------------------------
+                    (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::Equal)) => {
+                        // like 'a%' or ='abcd'
+                        if targetString.starts_with(string) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
+                        }
+                    }
+                    (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
+                        // like 'a%' or >'a' 不能融合
+                    }
+                    (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
+                        // like 'a%' or >='a' 不能融合
+                    }
+                    (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::LessThan)) => {
+                        // like 'a%' or <'a' 不能融合
+                    }
+                    (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
+                        // like 'a%' or <='a' 不能融合
+                    }
+                    //-------------------------------------------------------------------------------
+                    (LikePattern::EndWith(string), Op::MathCmpOp(MathCmpOp::Equal)) => {
+                        // like '%a' or ='a'
+                        if string == targetString {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
+                        }
+                    }
+                    (LikePattern::EndWith(string), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
+                        // like '%a' or >'a' 不能融合
+                    }
+                    (LikePattern::EndWith(string), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
+                        // like '%a' or >='a' 不能融合
+                    }
+                    (LikePattern::EndWith(string), Op::MathCmpOp(MathCmpOp::LessThan)) => {
+                        // like '%a' or <'a' 不能融合
+                    }
+                    (LikePattern::EndWith(string), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
+                        // like '%a' or <='a' 不能融合
+                    }
+                    //-------------------------------------------------------------------------------
+                    (LikePattern::Contain(string), Op::MathCmpOp(MathCmpOp::Equal)) => {
+                        // like '%a%' or ='dad'
+                        if targetString.contains(string) {
+                            return Ok(Some(vec![(Op::SqlOp(SqlOp::Like), value)]));
+                        }
+                    }
+                    (LikePattern::Contain(string), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
+                        // like '%a%' or >'dad' 不能融合
+                    }
+                    (LikePattern::Contain(string), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
+                        // like '%a%' or >='dad' 不能融合
+                    }
+                    (LikePattern::Contain(string), Op::MathCmpOp(MathCmpOp::LessThan)) => {
+                        // like '%a%' or <'dad' 不能融合
+                    }
+                    (LikePattern::Contain(string), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
+                        // like '%a%' or <='dad' 不能融合
+                    }
+                    _ => panic!("impossible")
                 }
-                _ => panic!()
             }
         }
-        (_, Op::SqlOp(SqlOp::Like)) => {}
+        (_, Op::SqlOp(SqlOp::Like)) => {
+            if let (GraphValue::String(targetString)) = targetValue {
+                if let LikePattern::Redundant = op::determineLikePattern(targetString)? {
+                    return Ok(None);
+                }
+            }
+
+            if let (GraphValue::String(string), GraphValue::String(targetString)) = (value, targetValue) {
+                let targetLikePattern = op::determineLikePattern(string)?;
+
+                // op 5类, targetLikePattern 4类
+                match (op, &targetLikePattern) {
+                    //  ='d' or like'd'
+                    (Op::MathCmpOp(MathCmpOp::Equal), LikePattern::Equal(targetString)) => {
+                        if string == targetString {
+                            return Ok(Some(vec![]))
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::Equal)) => {
             if value == targetValue { // 能够融合
                 return Ok(Some(vec![(Op::MathCmpOp(MathCmpOp::Equal), value)]));
