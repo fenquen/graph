@@ -10,7 +10,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::mapref::one::Ref;
 use serde_json::Value;
 use crate::graph_value::GraphValue;
-use crate::parser::op::{MathCmpOp, Op};
+use crate::parser::op::{MathCmpOp, Op, SqlOp};
 use crate::executor::{CommandExecutor, index};
 use crate::expr::Expr;
 use crate::meta::{DBObject, Table};
@@ -49,7 +49,7 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
         // 要是累加的成果还是空的话,直接的insert
         if dest.is_empty() {
             dest.push((op, value));
-            return Result::<(bool,bool)>::Ok((true, merged));
+            return Result::<(bool, bool)>::Ok((true, merged));
         }
 
         let mut accumulated = Vec::new();
@@ -62,11 +62,11 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
 
             let withSingle = match logical {
                 Logical::Or => or::orWithSingle(op, value, *previousOp, previousValue)?,
-                Logical::And => and::andWithSingle(op, value, *previousOp, previousValue)
+                Logical::And => and::andWithSingle(op, value, *previousOp, previousValue)?
             };
 
             match withSingle {
-                None => return Result::<(bool,bool)>::Ok((false, merged)), // 说明有 a<0 or a>=0 类似的废话出现了
+                None => return Result::<(bool, bool)>::Ok((false, merged)), // 说明有 a<0 or a>=0 类似的废话出现了
                 Some(orResult) => {
                     if orResult.len() == 1 { // 说明能融合
                         merged = true;
@@ -89,7 +89,7 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
         }
         // selfAccumulated = accumulated;
 
-        Result::<(bool,bool)>::Ok((true, merged))
+        Result::<(bool, bool)>::Ok((true, merged))
     };
 
     for (op, value) in opValueVec {
@@ -369,7 +369,16 @@ impl<'session> CommandExecutor<'session> {
 
             // filter没有用到index的任何字段
             if indexFilteredColNames.is_empty() {
-                continue;
+                continue 'loopIndex;
+            }
+
+            // 目前不支持对index的打头字段使用like
+            for opValueVec in &opValueVecVecAcrossIndexFilteredCols[0] {
+                for (op, value) in opValueVec {
+                    if let Op::SqlOp(SqlOp::Like) = op {
+                        continue 'loopIndex;
+                    }
+                }
             }
 
             // 不能直接放index 因为它是来源dbObject的 而for 循环结束后dbObject销毁了
@@ -428,6 +437,7 @@ impl<'session> CommandExecutor<'session> {
             }
         }
 
+        // 能不能使用indexLocalSearch不用到原表上了
         let indexLocalSearch = {
             let mut indexLocalSearch = false;
 
@@ -930,4 +940,11 @@ impl<'session> CommandExecutor<'session> {
 pub(in crate::executor) enum IndexSearchResult {
     Direct((DataKey, RowData)),
     Redirect(DataKey),
+}
+
+#[macro_export]
+macro_rules! ok_some_vec {
+    ($($a:tt)*) => {
+        Ok(Some(vec![$($a)*]))
+    };
 }

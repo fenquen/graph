@@ -207,7 +207,7 @@ impl<'session> CommandExecutor<'session> {
     pub(super) fn generateAddPointerXminXmax(&self,
                                              pointerKeyBuffer: &mut BytesMut,
                                              selfDataKey: DataKey,
-                                             pointerKeyTag: KeyTag, tableId: DBObjectId, targetDatakey: DataKey) -> anyhow::Result<(KV, KV)> {
+                                             pointerKeyTag: KeyTag, tableId: DBObjectId, targetDatakey: DataKey) -> Result<(KV, KV)> {
         let xmin = {
             pointerKeyBuffer.writePointerKeyMvccXmin(selfDataKey, pointerKeyTag, tableId, targetDatakey, self.session.getTxId()?);
             (pointerKeyBuffer.to_vec(), global::EMPTY_BINARY) as KV
