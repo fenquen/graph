@@ -153,8 +153,7 @@ pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
                             return ok_some_vec!((Op::SqlOp(SqlOp::Like), targetValue));
                         }
                     }
-
-                    _ => panic!("impossible")
+                    (LikePattern::Redundant, _) | (_, LikePattern::Redundant) => return Ok(None)
                 }
             }
         }
@@ -177,15 +176,37 @@ pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
                             return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal), targetValue));
                         }
                     }
-                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::GreaterThan) | Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
-                        // like 'd' or >'d' , like 'd' or >='d'
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
+                        // like 'd' or >'d'
                         if string == targetString {
-                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::GreaterEqual), targetValue));
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::GreaterEqual), value));
+                        }
+
+                        // like 'd' or >'a'
+                        if string > targetString {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::GreaterThan),targetValue));
                         }
                     }
-                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::LessThan) | Op::MathCmpOp(MathCmpOp::LessEqual)) => {
-                        // like 'd' or <'d', like 'd' or <='d'
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
+                        // like 'd' or >='a'
+                        if string >= targetString {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::GreaterEqual), value));
+                        }
+                    }
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::LessThan)) => {
+                        // like 'd' or <'d'
                         if string == targetString {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::LessEqual), targetValue));
+                        }
+
+                        //  like 'a' or <'b'
+                        if string < targetString {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::LessThan), targetValue));
+                        }
+                    }
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
+                        // like 'a' or <='r'
+                        if string <= targetString {
                             return ok_some_vec!((Op::MathCmpOp(MathCmpOp::LessEqual), targetValue));
                         }
                     }
@@ -260,7 +281,7 @@ pub(super) fn orWithSingle<'a>(op: Op, value: &'a GraphValue,
             if let (GraphValue::String(string), GraphValue::String(targetString)) = (value, targetValue) {
                 let targetLikePattern = op::determineLikePattern(targetString)?;
 
-                // op 5类, targetLikePattern 4类
+                // op 5类, targetLikePattern 4类,这边的左右顺序和上边的是镜像的
                 match (op, &targetLikePattern) {
                     //  ='d' or like'd'
                     (Op::MathCmpOp(MathCmpOp::Equal), LikePattern::Equal(targetString)) => {

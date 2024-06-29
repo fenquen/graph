@@ -210,6 +210,7 @@ impl GraphValue {
         }
     }
 
+    // todo calc0的时候是不是应该拦掉 like ‘%a’ 和 like ‘%a%’
     pub fn calc0(&self, op: Op, rightValues: &[GraphValue]) -> Result<GraphValue> {
         if rightValues.len() > 1 {
             if let Op::SqlOp(SqlOp::In) = op {

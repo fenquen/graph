@@ -1,3 +1,5 @@
+// Copyright (c) 2024 fenquen(https://github.com/fenquen) licensed under Apache 2.0
+use std::fs::read;
 use crate::graph_value::GraphValue;
 use crate::ok_some_vec;
 use crate::parser::op::{LikePattern, MathCmpOp, Op, SqlOp};
@@ -55,16 +57,12 @@ pub(super) fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
                         // like 'abd‘ and like '%a' 矛盾
                     }
                     (LikePattern::Equal(string), LikePattern::Contain(targetString)) => {
-                        // like 'abd' and like '%aabda%'
-                        if targetString.contains(string) {
-                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),value));
-                        }
-
                         // like 'abd' and like '%bd%'
                         if string.contains(targetString) {
                             return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),value));
                         }
 
+                        // like 'abd' and like '%aabda%' 矛盾
                         // like 'ab' and like '%ba%' 矛盾
                     }
                     (LikePattern::StartWith(string), LikePattern::Equal(targetString)) => {
@@ -124,17 +122,242 @@ pub(super) fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
                         }
                         // like '%abcd' and like '%ab' 矛盾
                     }
-                    (LikePattern::EndWith(string),LikePattern::Contain(targetString))=>{
+                    (LikePattern::EndWith(string), LikePattern::Contain(targetString)) => {
                         // like '%abd' and like '%b%'
                         if string.contains(targetString) {
                             return ok_some_vec!((Op::SqlOp(SqlOp::Like),value));
                         }
 
                         // like '%a' and like '%b%' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
                     }
-                    _ => {}
+                    (LikePattern::Contain(string), LikePattern::Equal(targetString)) => {
+                        // like '%a%' and like 'ab'
+                        if targetString.contains(string) {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),targetValue));
+                        }
+
+                        // like '%ar%' and like 'a' 矛盾
+                    }
+                    (LikePattern::Contain(String), LikePattern::StartWith(targetString)) => {
+                        // like '%a%' and like 'abd%' 变为 like 'abd%'
+                        if targetString.contains(string) {
+                            return ok_some_vec!((Op::SqlOp(SqlOp::Like),targetValue));
+                        }
+
+                        // like '%a%' and like 'b%' 不能融合也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    (LikePattern::Contain(string), LikePattern::EndWith(targetString)) => {
+                        // like '%a%' and like '%rar'
+                        if targetString.contains(string) {
+                            return ok_some_vec!((Op::SqlOp(SqlOp::Like),targetValue));
+                        }
+
+                        // like '%a%' and like '%b' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    (LikePattern::Contain(string), LikePattern::Contain(targetString)) => {
+                        // like '%a%' and like '%rar%'
+                        if targetString.contains(string) {
+                            return ok_some_vec!((Op::SqlOp(SqlOp::Like),targetValue));
+                        }
+
+                        // like '%rar%' and like '%a%'
+                        if string.contains(targetString) {
+                            return ok_some_vec!((Op::SqlOp(SqlOp::Like),value));
+                        }
+
+                        // like '%ara%' and like '%d%' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    (LikePattern::Redundant, _) | (_, LikePattern::Redundant) => return Ok(None)
                 }
             }
+        }
+        (Op::SqlOp(SqlOp::Like), _) => { // 下边的各类情况分析的太累了,后边的(_,Op::SqlOp(SqlOp::Like)) 需要复用
+            if let GraphValue::String(string) = value {
+                if let LikePattern::Redundant = op::determineLikePattern(string)? {
+                    return Ok(None);
+                }
+            }
+
+            if let (GraphValue::String(string), GraphValue::String(targetString)) = (value, targetValue) {
+                let likePattern = op::determineLikePattern(string)?;
+
+                match (&likePattern, targetOp) {
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::Equal)) => {
+                        if string == targetString {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),targetValue));
+                        }
+                    }
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
+                        // like 'ar' and >'a'
+                        // like 'r' and >'a'
+                        if string > targetString {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),value));
+                        }
+                        // like 'a' and >'a' 矛盾
+                    }
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
+                        // like 'ar' and >='a'
+                        if string >= targetString {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),value));
+                        }
+                        // like 'r' and >'a' 矛盾
+                    }
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::LessThan)) => {
+                        // like 'a' and <'b'
+                        if string < targetString {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),value));
+                        }
+                        // like 'a' and <'a' 矛盾
+                    }
+                    (LikePattern::Equal(string), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
+                        // like 'a' and <='b'
+                        if string <= targetString {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),value));
+                        }
+                        // like 'r' and <='a' 矛盾
+                    }
+                    // ---------------------------------------------------------------------------
+                    (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::Equal)) => {
+                        // like 'a%' and ='abcd'
+                        if targetString.starts_with(string) {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal), targetValue));
+                        }
+                    }
+                    (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
+                        // like 'r%' and >'a'
+                        // like 'aa%' and >'a'
+                        if string > targetString {
+                            return ok_some_vec!((Op::SqlOp(SqlOp::Like),value));
+                        }
+
+                        // like 'a%' and >'aa'
+                        // like 'a%' and >'a' 不能融合 也不矛盾
+                        // 例如 'a'满足'a%' 不满足>'a', 而 'ab' 满足 'a%' 且 'a%'
+                        if targetString.starts_with(string) {
+                            return ok_some_vec!((op,value),(targetOp,targetValue));
+                        }
+                        // like 'a%' and >'b' 矛盾
+                    }
+                    (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
+                        // like 'rd%' and >='a'
+                        // like 'a%' and >='a'
+                        if string >= targetString {
+                            return ok_some_vec!((Op::SqlOp(SqlOp::Like),value));
+                        }
+
+                        // like 'a%' and >='aa' 不能融合 也不矛盾
+                        // 例如 'a'满足'a%' 不满足>='aa', 而 'ab' 满足 'a%' 且 >='aa'
+                        if targetString.starts_with(string) {
+                            return ok_some_vec!((op,value),(targetOp,targetValue));
+                        }
+                        // like 'a%' and >='b' 矛盾
+                    }
+                    (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::LessThan)) => {
+                        if string < targetString {
+                            // like 'a%' and <'arra' 变为 <'arra'
+                            if targetString.starts_with(string) {
+                                return ok_some_vec!((Op::MathCmpOp(MathCmpOp::LessThan),targetValue));
+                            }
+
+                            // like 'a%' and <'ra' 变为 like 'a%'
+                            return ok_some_vec!((Op::SqlOp(SqlOp::Like),value));
+                        }
+                        // like 'a%' and <'a' 矛盾
+                        // like 'r%' and <'d' 矛盾
+                    }
+                    (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
+                        if string <= targetString {
+                            // like 'a%' and <='a'
+                            if string == targetString {
+                                return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),value));
+                            }
+
+                            // like 'a%' and <='ar' 不能融合 也不矛盾
+                            // 例如 'ay'满足'a%' 不满足<='ar', 'a' 满足 'a%' 且 <='ar'
+                            if targetString.starts_with(string) {
+                                return ok_some_vec!((op,value),(targetOp,targetValue));
+                            }
+
+                            // like 'a%' and <='ba'
+                            return ok_some_vec!((Op::SqlOp(SqlOp::Like),value));
+                        }
+                        // like 'r%' and <='d' 矛盾
+                    }
+                    // ----------------------------------------------------------------------------
+                    (LikePattern::EndWith(string), Op::MathCmpOp(MathCmpOp::Equal)) => {
+                        // like '%r' and ='ar'
+                        if targetString.ends_with(string) {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),targetValue));
+                        }
+                    }
+                    (LikePattern::EndWith(string), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
+                        // like '%a' and >'a' 不能融合 也不矛盾
+                        // like '%ra' and >'a' 不能融合 也不矛盾
+                        // like '%a' and >'r' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    (LikePattern::EndWith(string), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
+                        // like '%a' and >='a' 不能融合 也不矛盾
+                        // like '%ra' and >='a' 不能融合 也不矛盾
+                        // like '%a' and >='r' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    (LikePattern::EndWith(string), Op::MathCmpOp(MathCmpOp::LessThan)) => {
+                        // like '%r' and <'r' 不能融合 也不矛盾
+                        // like '%ar' and <'r' 不能融合 也不矛盾
+                        // like '%r' and <'a' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    (LikePattern::EndWith(string), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
+                        // like '%r' and <='r' 不能融合 也不矛盾
+                        // like '%ar' and <='r' 不能融合 也不矛盾
+                        // like '%r' and <='a' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    // --------------------------------------------------------------------------
+                    (LikePattern::Contain(string), Op::MathCmpOp(MathCmpOp::Equal)) => {
+                        // like '%r%' and ='ara' 变为 ='ara'
+                        if targetString.contains(string) {
+                            return ok_some_vec!((Op::MathCmpOp(MathCmpOp::Equal),targetValue));
+                        }
+                        // like '%r%' and ='abcd' 矛盾
+                        // like '%ar%' and ='dr' 矛盾
+                    }
+                    (LikePattern::Contain(string), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
+                        // like '%r%' and >'r' 不能融合 也不矛盾
+                        // like '%ra%' and >'r' 不能融合 也不矛盾
+                        // like '%d%' and >'r' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    (LikePattern::Contain(string), Op::MathCmpOp(MathCmpOp::GreaterEqual)) => {
+                        // like '%r%' and >='r' 不能融合 也不矛盾
+                        // like '%ra%' and >='r' 不能融合 也不矛盾
+                        // like '%d%' and >='r' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    (LikePattern::Contain(string), Op::MathCmpOp(MathCmpOp::LessThan)) => {
+                        // like '%r%' and <'r' 不能融合 也不矛盾
+                        // like '%ar%' and <'r' 不能融合 也不矛盾
+                        // like '%r%' and <'d' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    (LikePattern::Contain(string), Op::MathCmpOp(MathCmpOp::LessEqual)) => {
+                        // like '%r%' and <='r' 不能融合 也不矛盾
+                        // like '%ar%' and <='r' 不能融合 也不矛盾
+                        // like '%r%' and <='d' 不能融合 也不矛盾
+                        return ok_some_vec!((op,value),(targetOp,targetValue));
+                    }
+                    _ => panic!("impossible")
+                }
+            }
+        }
+        (_, Op::SqlOp(SqlOp::Like)) => {
+            // 和上边的逻辑是相同的只不过换了位置 利用递归两边的参数位置调换使用现有的能力
+            return andWithSingle(targetOp, targetValue, op, value);
         }
         (Op::MathCmpOp(MathCmpOp::Equal), Op::MathCmpOp(MathCmpOp::Equal)) => {
             // =0 and =0 变为 =0
@@ -349,5 +572,10 @@ pub(super) fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
     }
 
     // and 的兜底是None 矛盾
+    Ok(None)
+}
+
+fn process<'a>(string: &str,
+               targetString: &str, targetOp: Op) -> Result<Option<Vec<Op, &'a GraphValue>>> {
     Ok(None)
 }
