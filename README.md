@@ -1,9 +1,9 @@
 # graph
 
-个人独立设计和使用rust实现的rdbms风格的图数据库 <br>
+个人利用业余时间独立设计和使用rust实现的rdbms风格的图数据库 <br>
 <a href="https://github.com/fenquen/graph">项目地址</a> <a href="https://github.com/fenquen">个人的github主页</a> <br>
 
-## 项目动机
+## 项目说明
 
 日常使用的传统关系数据库在面对对象之间的关联关系的时候显得相当的力不从心，通常需要通过大量冗余的表关联join来达到效果<br>
 显然使用图数据是不错的解决方式，市面上相应的产品也有不少，例如neo4j、nebula等<br>
@@ -11,7 +11,7 @@
 rust是门相当特别的编程语言，使用独特的内存体系实现了不需程序员手动管理内存的无gc，大大降低了像c/c++的内存泄漏的风险<br>
 使用rust编写1个自己的图数据库是个相当有趣和有挑战的项目，也同时能学习到很多<br>
 <br>
-如果您感觉还可以对你有些帮助还望不吝惜你的star，你们的肯定是最大的支持和动力
+个人时间和能力有限，还望能积极issue，如果您感觉还可以对你有些帮助还望不吝惜你的star，你们的肯定是最大的支持和动力<br>
 
 ## 开发环境
 
@@ -85,9 +85,15 @@ websocket text message 传递 json
 ### 创建表
 
 ```sql
-create table user if not exist (id integer,name string null);
-create table car if not exist (id integer,color string);
+create table user if not exist (id integer, name string null);
+create table car if not exist (id integer, color string);
 create table tyre if not exist (id integer, name string);
+```
+
+### 创建索引
+
+```sql
+create index user_id_index on user[id]
 ```
 
 ### 创建关系
