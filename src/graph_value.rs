@@ -187,6 +187,10 @@ impl GraphValue {
 
     pub const GRAPH_VALUE_DUMMY: GraphValue = GraphValue::Null;
 
+    pub const TYPE_BYTE_LEN: usize = 1;
+    pub const LEN_BYTE_LEN: usize = 4;
+    pub const STRING_CONTENT_OFFSET: usize = GraphValue::TYPE_BYTE_LEN + GraphValue::LEN_BYTE_LEN;
+
     pub fn getDefaultValue(graphValueType: GraphValueType) -> Result<GraphValue> {
         match graphValueType {
             GraphValue::STRING => Ok(GraphValue::String(global::EMPTY_STR.to_owned())),

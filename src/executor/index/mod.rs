@@ -1,55 +1,78 @@
 pub(super) mod or;
 pub(super) mod and;
 
+use std::alloc::Layout;
 use std::cell::RefCell;
-use std::cmp;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::rc::Rc;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::mapref::one::Ref;
 use serde_json::Value;
 use crate::graph_value::GraphValue;
-use crate::parser::op::{MathCmpOp, Op, SqlOp};
+use crate::parser::op::{LikePattern, MathCmpOp, Op, SqlOp};
 use crate::executor::{CommandExecutor, index};
 use crate::expr::Expr;
-use crate::meta::{DBObject, Table};
-use crate::{meta, suffix_plus_plus, throwFormat, byte_slice_to_u64, global, utils, u64ToByteArrRef};
+use crate::meta::{ColumnType, DBObject, Table};
+use crate::{meta, suffix_plus_plus, throwFormat, byte_slice_to_u64, global, utils, u64ToByteArrRef, byte_slice_to_u32};
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::executor::store;
 use crate::session::Session;
 use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, Pointer, RowData, TableMutations};
 use anyhow::Result;
 use crate::executor::store::{ScanHooks, ScanParams};
+use crate::parser::op;
 use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 
 #[derive(Clone, Copy)]
-pub enum Logical {
+enum Logical {
     Or,
     And,
 }
 
-pub(super) fn accumulateOr<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Result<Option<Vec<(Op, &GraphValue)>>> {
+pub(super) enum AccumulateResult<'a> {
+    Conflict,
+    Nonsense,
+    Ok(Vec<(Op, &'a GraphValue)>),
+}
+
+enum MergeResult<'a> {
+    Conflict,
+    Nonsense,
+    NotMerged(Vec<(Op, &'a GraphValue)>),
+    Merged((Op, &'a GraphValue)),
+}
+
+pub(super) fn accumulateOr<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Result<AccumulateResult> {
     accumulate(opValueVec, Logical::Or)
 }
 
-pub(super) fn accumulateAnd<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Result<Option<Vec<(Op, &GraphValue)>>> {
+pub(super) fn accumulateAnd<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Result<AccumulateResult> {
     accumulate(opValueVec, Logical::And)
 }
 
-fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logical: Logical) -> Result<Option<Vec<(Op, &'a GraphValue)>>> {
-    let mut selfAccumulated = Vec::new();
+fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logical: Logical) -> Result<AccumulateResult<'a>> {
+    let mut selfAccumulated =
+        opValueVec.iter().map(|(op, value)| (*op, &**value)).collect::<Vec<(Op, &'a GraphValue)>>();
 
     // 要是这个闭包的那个&GraphValue 不去标生命周期参数的话会报错,
     // 原因是 编译器认为那个reference 它跑到了外边的Vec<(Op, &graphValue)> 了 产生了dangling
     // 然而事实上不是这样的 然而编译器是不知道的 需要手动的标上
-    let mut accumulate = |op: Op, value: &'a GraphValue, dest: &mut Vec<(Op, &'a GraphValue)>| {
+    let accumulate = |op: Op, value: &'a GraphValue, dest: &mut Vec<(Op, &'a GraphValue)>| {
         let mut merged = false;
 
         // 要是累加的成果还是空的话,直接的insert
         if dest.is_empty() {
+            // 单个的opValue本身也是需要检查的 目前已知要应对Nonsense,like '%%' 这样的废话
+            if let (Op::SqlOp(SqlOp::Like), GraphValue::String(s)) = (op, value) {
+                if let LikePattern::Redundant = op::determineLikePattern(s)? {
+                    return Result::<(AccumulateResult<'a>, bool)>::Ok((AccumulateResult::Nonsense, merged));
+                }
+            }
+
             dest.push((op, value));
-            return Result::<(bool, bool)>::Ok((true, merged));
+            return Result::<(AccumulateResult<'a>, bool)>::Ok((AccumulateResult::Ok(vec![]), merged));
         }
 
         let mut accumulated = Vec::new();
@@ -61,19 +84,34 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
             }
 
             let withSingle = match logical {
-                Logical::Or => or::orWithSingle(op, value, *previousOp, previousValue)?,
-                Logical::And => and::andWithSingle(op, value, *previousOp, previousValue)?
+                Logical::Or => or::opValueOrOpValue(op, value, *previousOp, previousValue)?,
+                Logical::And => and::opValueAndOpValue(op, value, *previousOp, previousValue)?
             };
 
             match withSingle {
-                None => return Result::<(bool, bool)>::Ok((false, merged)), // 说明有 a<0 or a>=0 类似的废话出现了
-                Some(orResult) => {
-                    if orResult.len() == 1 { // 说明能融合
-                        merged = true;
-                        accumulated.push(orResult[0]);
-                    } else {
-                        accumulated.push((*previousOp, previousValue))
+                MergeResult::Nonsense => { // and 和 or 的时候都有可能 ,and的可能情况是 like '%%'
+                    if let Logical::Or = logical {
+                        // 说明有 a<0 or a>=0 类似的废话出现了
+                        return Result::<(AccumulateResult<'a>, bool)>::Ok((AccumulateResult::Nonsense, merged));
                     }
+
+                    // 到了这里说明是and,and的时候碰到 like '%%' 相当空气, 其实算merged
+                    merged = true;
+                    continue; // 未往accumulated里边放东西
+                }
+                MergeResult::Conflict => {
+                    // 只可能是and
+                    //assert_eq!(logical, Logical::And);
+
+                    // 说明有 a<0 and a>0 这样的矛盾显现了
+                    return Result::<(AccumulateResult<'a>, bool)>::Ok((AccumulateResult::Conflict, merged));
+                }
+                MergeResult::NotMerged(_) => {
+                    accumulated.push((*previousOp, previousValue));
+                }
+                MergeResult::Merged(mergedOpValue) => {
+                    merged = true;
+                    accumulated.push(mergedOpValue);
                 }
             }
         }
@@ -82,34 +120,39 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
             accumulated.push((op, value));
         }
 
-
         dest.clear();
         for a in accumulated {
             dest.push(a);
         }
         // selfAccumulated = accumulated;
 
-        Result::<(bool, bool)>::Ok((true, merged))
+        return Result::<(AccumulateResult<'a>, bool)>::Ok((AccumulateResult::Ok(vec![]), merged));
     };
 
-    for (op, value) in opValueVec {
-        if let (false, _) = accumulate(*op, &**value, &mut selfAccumulated)? {
-            return Ok(None);
-        }
-    }
-
-    // (a=1 or a=3 or a >0) 运算之后是 (a=1 or a>0) 还是能继续压缩融合的
     loop {
         let clone = selfAccumulated.clone();
         selfAccumulated.clear();
 
         let mut a = false;
+
         for (op, value) in clone {
-            match accumulate(op, value, &mut selfAccumulated)? {
-                (false, _) => return Ok(None),
-                (true, merged) => {
-                    if merged {
-                        a = true;
+            if let (accumulateResult, merged) = accumulate(op, value, &mut selfAccumulated)? {
+                match accumulateResult {
+                    AccumulateResult::Conflict => {
+                        //assert_eq!(logical, Logical::And);
+
+                        return Ok(AccumulateResult::Conflict);
+                    }
+                    AccumulateResult::Nonsense => {
+                        match logical {
+                            Logical::Or => return Ok(AccumulateResult::Nonsense),
+                            Logical::And => continue,
+                        }
+                    }
+                    _ => {
+                        if merged {
+                            a = true;
+                        }
                     }
                 }
             }
@@ -120,12 +163,40 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
             break;
         }
     }
+    // (a=1 or a=3 or a >0) 运算之后是 (a=1 or a>0) 还是能继续压缩融合的
+    // loop {
+    //     let clone = selfAccumulated.clone();
+    //     selfAccumulated.clear();
+    //
+    //     let mut a = false;
+    //     for (op, value) in clone {
+    //         match accumulate(op, value, &mut selfAccumulated)? {
+    //             (false, _) => return Ok(None),
+    //             (true, merged) => {
+    //                 if merged {
+    //                     a = true;
+    //                 }
+    //             }
+    //         }
+    //     }
+    //
+    //     // 说明未发生过融合,没有进1步融合压缩的可能了
+    //     if a == false {
+    //         break;
+    //     }
+    // }
 
+    // 丑陋的打补丁: 如果原始的opValueVec只包含like '%%' 那么其实也不会压缩
+    // for (op, value) in &selfAccumulated {}
 
-    Ok(Some(selfAccumulated))
+    // 没有筛选的条件了 不管是or还是and都意味着是Nonsense
+    if selfAccumulated.is_empty() {
+        return Ok(AccumulateResult::Nonsense);
+    }
+
+    Ok(AccumulateResult::Ok(selfAccumulated))
 }
 
-#[macro_export]
 macro_rules! extractDataKeyFromIndexKey {
     ($indexKey: expr) => {
         {
@@ -135,9 +206,16 @@ macro_rules! extractDataKeyFromIndexKey {
     };
 }
 
+
+macro_rules! extractIndexRowDataFromIndexKey {
+     ($indexKey: expr) => {
+         &$indexKey[..($indexKey.len() - meta::DATA_KEY_BYTE_LEN)]
+    };
+}
+
 pub(in crate::executor) struct IndexSearch<'a> {
     pub dbObjectIndex: Ref<'a, String, DBObject>,
-    /// 包含的grapgValue 只可能是 IndexUseful
+    /// 包含的grapgValue, 这个的vec数量是index用到的column数量
     pub opValueVecVecAcrossIndexFilteredCols: Vec<Vec<Vec<(Op, GraphValue)>>>,
     /// 如果说index能够 包含filter的全部字段 和 包含select的全部字段,那么就不用到原表上再搜索了,能够直接就地应对
     pub indexLocalSearch: bool,
@@ -152,6 +230,7 @@ pub(in crate::executor) struct IndexSearch<'a> {
     pub mvccKeyBufferPtr: Pointer,
     pub dbRawIteratorPtr: Pointer,
     pub scanHooksPtr: Pointer,
+    pub index1stFilterColIsString: bool,
 }
 
 impl<'session> CommandExecutor<'session> {
@@ -206,10 +285,11 @@ impl<'session> CommandExecutor<'session> {
             // select 要是指明 colName 的话能用到index上的多少字段
             let mut indexSelectedColCount = 0usize;
 
-            // index的各个用到的column上的表达式的集合
+            // index的各个用到的column上的表达式的集合,它的length便是index上用到的column数量
             let mut opValueVecVecAcrossIndexFilteredCols = Vec::with_capacity(index.columnNames.len());
 
             // 遍历index的各columnName
+            'loopIndexColumn:
             for indexColName in &index.columnNames {
                 if tableFilterColNames.contains(&indexColName) == false {
                     break;
@@ -266,13 +346,32 @@ impl<'session> CommandExecutor<'session> {
                         opValueVecVec.push(opValueVec);
                     }
 
-                    //  对麾下的各个的and脉络压缩
-                    let opValueVecVec: Vec<Vec<(Op, &GraphValue)>> =
-                        opValueVecVec.iter().filter_map(|opValueVec| accumulateAnd(opValueVec.as_slice()).unwrap()).collect();
+                    //  对当前这个的column麾下的各个的and脉络压缩
+                    let opValueVecVec = {
+                        let mut a = Vec::with_capacity(opValueVecVec.len());
+                        let mut confilctCount = 0usize;
 
-                    if opValueVecVec.is_empty() {
-                        continue 'loopIndex;
-                    }
+                        for opValueVec in &opValueVecVec {
+                            match accumulateAnd(opValueVec.as_slice())? {
+                                // 要是全部的脉络都是Conflict的话 那不止是用不用index的问题了 select是没有相应的必要的
+                                AccumulateResult::Conflict => {
+                                    suffix_plus_plus!(confilctCount);
+                                    continue;
+                                }
+                                // 只要有1天脉络是Nonsense,index的这个的column就没有筛选用途了
+                                AccumulateResult::Nonsense => break 'loopIndexColumn,
+                                AccumulateResult::Ok(opValueVec) => a.push(opValueVec)
+                            }
+                        }
+
+                        // 说明全部的脉络都是conflict, 要是全部的脉络都是Conflict的话 那不止是用不用index的问题了 select是没有相应的必要的
+                        if a.is_empty() {
+                            assert_eq!(confilctCount, opValueVecVec.len());
+                            return Ok(None);
+                        }
+
+                        a
+                    };
 
                     // 如果到这边打算收场的话 莫忘了将&GraphValue变为GraphValue
                     let opValueVecVec: Vec<Vec<(Op, GraphValue)>> =
@@ -310,10 +409,11 @@ impl<'session> CommandExecutor<'session> {
                     }
 
                     let accumulatedOr = match accumulateOr(opValueVec.as_slice())? {
-                        Some(accumulated) => accumulated,
+                        AccumulateResult::Conflict => panic!("impossible"),
                         // 如果and 那么是 a>=0 and a<0 矛盾
                         // 如果是or 那么是 a>0 or a<=0 这样的废话
-                        None => continue 'loopIndex
+                        AccumulateResult::Nonsense => continue 'loopIndex,
+                        AccumulateResult::Ok(accumulated) => accumulated,
                     };
 
                     let accumulatedOr: Vec<(Op, GraphValue)> = accumulatedOr.into_iter().map(|(op, value)| { (op, value.clone()) }).collect();
@@ -372,11 +472,53 @@ impl<'session> CommandExecutor<'session> {
                 continue 'loopIndex;
             }
 
-            // 目前不支持对index的打头字段使用like
+            // 目前不支持对index的打头字段使用like,
+            // 后续启用的话,如果是or,那么like只能是like 'a%',
+            // 如果是and ,如果出现了 like 'a%',like '%a%',那么还要有 like 'a%' 和 不是like的相伴随
+            // 遍历单个的字段上的各个的脉络
             for opValueVec in &opValueVecVecAcrossIndexFilteredCols[0] {
-                for (op, value) in opValueVec {
+                // todo 需要对opValueVec排序, 以op排序
+                for (op, _) in opValueVec {
                     if let Op::SqlOp(SqlOp::Like) = op {
                         continue 'loopIndex;
+                    }
+                }
+            }
+
+            // 到这里的时候 opValueVecVecAcrossIndexFilteredCols 压缩过
+            // 对index的首个的column上的各个opValueVec 各个脉络 排序
+            for opValueVec in &mut opValueVecVecAcrossIndexFilteredCols[0] {
+                // like 优先排到前边, 在其中 like 'a%' 优先排到前边
+                opValueVec.sort_by(|(prevOp, prevValue), (nextOp, nextValue)| {
+                    assert!(prevValue.isString());
+                    assert!(nextValue.isString());
+
+                    match (prevOp, nextOp) {
+                        (Op::SqlOp(SqlOp::Like), Op::SqlOp(SqlOp::Like)) => {
+                            // like null calc0的时候都已消化掉了 只会是string
+                            let prevLikePattern = op::determineLikePattern(prevValue.asString().unwrap()).unwrap();
+                            let nextLikePattern = op::determineLikePattern(nextValue.asString().unwrap()).unwrap();
+
+                            // like 'a',calc0的时候都已消化掉了 不可能有 LikePattern::Equal
+                            // LikePattern::Redundant 已经在压缩的时候消化掉了 不可能有 LikePattern::Redundant
+                            match (&prevLikePattern, &nextLikePattern) {
+                                (LikePattern::StartWith(_), _) => Ordering::Less,
+                                (_, LikePattern::StartWith(_)) => Ordering::Greater,
+                                _ => Ordering::Equal
+                            }
+                        }
+                        (_, Op::SqlOp(SqlOp::Like)) => Ordering::Less,
+                        (Op::SqlOp(SqlOp::Like), _) => Ordering::Greater,
+                        _ => Ordering::Equal
+                    }
+                });
+
+                // 如果第1个是like 而且不是 like 'a%' 那么该index抛弃
+                if let (Op::SqlOp(SqlOp::Like), value) = &opValueVec[0] {
+                    match op::determineLikePattern(value.asString()?)? {
+                        LikePattern::StartWith(_) => {}
+                        LikePattern::Contain(_) | LikePattern::EndWith(_) => continue 'loopIndex,
+                        _ => panic!("impossible")
                     }
                 }
             }
@@ -400,7 +542,7 @@ impl<'session> CommandExecutor<'session> {
             let compareFilterdColCount = next.2.len().cmp(&prev.2.len());
 
             // 要是相同 然后去比较 select用到的字段数量
-            if let cmp::Ordering::Equal = compareFilterdColCount {
+            if let Ordering::Equal = compareFilterdColCount {
                 return next.1.cmp(&prev.1);
             }
 
@@ -417,20 +559,27 @@ impl<'session> CommandExecutor<'session> {
         // index字段要覆盖全部的过滤条件
 
         // value 和 column的type是不是匹配
+        let mut index1stFilterColIsString = false;
         for index in 0..indexFilteredColNames.len() {
-            let columnNameFromIndexUsed = indexFilteredColNames.get(index).unwrap();
-            for column in &scanParams.table.columns {
-                if column.name.as_str() != columnNameFromIndexUsed {
+            let columnNameFromIndexUsed = &indexFilteredColNames[index];
+            for indexFilterColumn in &scanParams.table.columns {
+                if indexFilterColumn.name.as_str() != columnNameFromIndexUsed {
                     continue;
+                }
+
+                if index == 0 {
+                    if let ColumnType::String = indexFilterColumn.type0 {
+                        index1stFilterColIsString = true;
+                    }
                 }
 
                 let opValueVecVec = opValueVecVecAcrossIndexFilteredCols.get(index).unwrap();
 
                 for opValueVec in opValueVecVec {
                     for (_, value) in opValueVec {
-                        if column.type0.compatible(value) == false {
+                        if indexFilterColumn.type0.compatible(value) == false {
                             throwFormat!("table: {}, column:{}, type:{} is not compatible with value:{}",
-                                scanParams.table.name, columnNameFromIndexUsed, column.type0, value)
+                                scanParams.table.name, columnNameFromIndexUsed, indexFilterColumn.type0, value)
                         }
                     }
                 }
@@ -466,6 +615,7 @@ impl<'session> CommandExecutor<'session> {
             mvccKeyBufferPtr: Default::default(),
             dbRawIteratorPtr: Default::default(),
             scanHooksPtr: Default::default(),
+            index1stFilterColIsString,
         };
 
         Ok(Some(indexSearch))
@@ -474,11 +624,11 @@ impl<'session> CommandExecutor<'session> {
     // todo 如果index本身能包含要select的全部字段 那么直接index读取了
     /// index本身也是个table 只不过可以是实际的data加上dataKey
     pub(in crate::executor) fn searchByIndex<A, B, C, D>(&self, indexSearch: IndexSearch) -> Result<Vec<(DataKey, RowData)>>
-    where
-        A: CommittedPreProcessor,
-        B: CommittedPostProcessor,
-        C: UncommittedPreProcessor,
-        D: UncommittedPostProcessor,
+        where
+            A: CommittedPreProcessor,
+            B: CommittedPostProcessor,
+            C: UncommittedPreProcessor,
+            D: UncommittedPostProcessor,
     {
         log::info!("searchByIndex, indexSearch.indexLocalSearch:{:?}",indexSearch.indexLocalSearch);
 
@@ -517,7 +667,7 @@ impl<'session> CommandExecutor<'session> {
             };
         }
 
-        // todo 如果是indexLocal的话 还是要应对重复数据 不像应对datakey那样容易 使用hashMap 完成
+        // todo 如果是indexLocal的话 还是要应对重复数据 不像应对datakey那样容易 使用hashMap去掉重复的dataKey 完成
         let mut processWhen1stColSatisfied = |indexKey: &[Byte]| {
             if let Some(indexSearchResult) = self.further::<A, B, C, D>(indexKey, &indexSearch)? {
                 match indexSearchResult {
@@ -531,8 +681,118 @@ impl<'session> CommandExecutor<'session> {
 
         // opValueVecOnIndex1stColumn 之间不管isAnd如何都是 or
         for opValueVecOnIndex1stColumn in opValueVecVecOnIndex1stColumn {
-            // opValueVecOnIndex1stColumn 的各个元素(opValueVec)之间是 and 还是 or 取决 isAnd
+            // opValueVecOnIndex1stColumn 的各个元素(opValueVec)之间是不论是不是isAnd,都是or
             if indexSearch.isAnd {
+                // 不是用不用like的问题 是 column是不是string
+                // 说明了index的1st的column是string
+                if indexSearch.index1stFilterColIsString {
+                    let applyFiltersOn1stColValue = |indexKey: &[Byte]| {
+                        // 对indexRowData来说只要第1列的value
+                        let stringValue = {
+                            let indexRowData = extractIndexRowDataFromIndexKey!(indexKey);
+
+                            assert_eq!(indexRowData[0], GraphValue::STRING);
+
+                            let len = byte_slice_to_u32!(&indexRowData[1..5]) as usize;
+                            let string = String::from_utf8_lossy(&indexRowData[5..5 + len]).to_string();
+
+                            GraphValue::String(string)
+                        };
+
+                        for (op, value) in opValueVecOnIndex1stColumn {
+                            if stringValue.calcOneToOne(*op, value)?.asBoolean()? == false {
+                                return Result::<bool>::Ok(false);
+                            }
+                        }
+
+                        Result::<bool>::Ok(true)
+                    };
+
+                    // 如何应对 like 'a%' and >'a'
+                    for (op, value) in opValueVecOnIndex1stColumn {
+                        assert!(value.isString());
+
+                        value.encode(&mut buffer)?;
+
+                        match op {
+                            // like 'a' 没有通配,
+                            Op::MathCmpOp(MathCmpOp::Equal) => {
+                                indexDBRawIterator.seek(buffer.as_ref());
+
+                                let indexKey = getKeyIfSome!(indexDBRawIterator);
+                                if applyFiltersOn1stColValue(indexKey)? {
+                                    processWhen1stColSatisfied(indexKey)?;
+                                }
+                            }
+                            Op::MathCmpOp(MathCmpOp::GreaterThan) | Op::MathCmpOp(MathCmpOp::GreaterEqual) => {
+                                indexDBRawIterator.seek(buffer.as_ref());
+
+                                loop {
+                                    let indexKey = getKeyIfSome!(indexDBRawIterator);
+
+                                    // 用剩下的对stringValue校验
+                                    if applyFiltersOn1stColValue(indexKey)? == false {
+                                        break;
+                                    }
+
+                                    processWhen1stColSatisfied(indexKey)?;
+
+                                    indexDBRawIterator.next();
+                                }
+                            }
+                            Op::MathCmpOp(MathCmpOp::LessEqual) | Op::MathCmpOp(MathCmpOp::LessThan) => {
+                                indexDBRawIterator.seek_for_prev(buffer.as_ref());
+
+                                loop {
+                                    let indexKey = getKeyIfSome!(indexDBRawIterator);
+
+                                    // 用剩下的对stringValue校验
+                                    if applyFiltersOn1stColValue(indexKey)? == false {
+                                        break;
+                                    }
+
+                                    processWhen1stColSatisfied(indexKey)?;
+
+                                    indexDBRawIterator.prev();
+                                }
+                            }
+                            Op::SqlOp(SqlOp::Like) => { //  >'a' 'aa' 也是 'a'打头 string是变长的 不像int是固定的长度的
+                                match op::determineLikePattern(value.asString()?)? {
+                                    LikePattern::StartWith(s) => {
+                                        let value = GraphValue::String(s);
+                                        value.encode(&mut buffer)?;
+                                        // like 'a%'
+                                        indexDBRawIterator.seek(buffer.as_ref());
+
+                                        loop {
+                                            let indexKey = getKeyIfSome!(indexDBRawIterator);
+
+                                            // if indexKey[GraphValue::STRING_CONTENT_OFFSET..].starts_with(s.as_bytes()) {}
+
+                                            // 用剩下的对stringValue校验
+                                            if applyFiltersOn1stColValue(indexKey)? == false {
+                                                break;
+                                            }
+
+                                            processWhen1stColSatisfied(indexKey)?;
+
+                                            indexDBRawIterator.next();
+                                        }
+                                    }
+                                    _ => panic!("impossible")
+                                }
+                            }
+                            _ => panic!("impossible")
+                        }
+
+                        // 要点 不可以少
+                        break;
+                    }
+
+                    continue;
+                }
+
+                // 这只能应对不含有like的情况
                 let mut lowerValue = None;
                 let mut lowerInclusive = false;
                 let mut upperValue = None;
@@ -751,6 +1011,32 @@ impl<'session> CommandExecutor<'session> {
                                 indexDBRawIterator.prev();
                             }
                         }
+                        Op::SqlOp(SqlOp::Like) => {
+                            assert!(value.isString());
+
+                            match op::determineLikePattern(value.asString()?)? {
+                                LikePattern::StartWith(s) => {
+                                    let value = GraphValue::String(s);
+                                    value.encode(&mut buffer)?;
+
+                                    let s = value.asString()?.as_bytes();
+                                    indexDBRawIterator.seek(buffer.as_ref());
+
+                                    loop {
+                                        let indexKey = getKeyIfSome!(indexDBRawIterator);
+
+                                        if indexKey[GraphValue::STRING_CONTENT_OFFSET..].starts_with(s) == false {
+                                            break;
+                                        }
+
+                                        processWhen1stColSatisfied(indexKey)?;
+
+                                        indexDBRawIterator.next();
+                                    }
+                                }
+                                _ => panic!("impossible")
+                            }
+                        }
                         _ => panic!("impossible")
                     }
                 }
@@ -773,18 +1059,18 @@ impl<'session> CommandExecutor<'session> {
     // 对or来说 不会调用该函数了 因为 要使用index的话 表的过滤条件的字段只能单个 且 要是 index的打头字段
     fn further<A, B, C, D>(&self, indexKey: &[Byte],
                            indexSearch: &IndexSearch) -> Result<Option<IndexSearchResult>>
-    where
-        A: CommittedPreProcessor,
-        B: CommittedPostProcessor,
-        C: UncommittedPreProcessor,
-        D: UncommittedPostProcessor,
+        where
+            A: CommittedPreProcessor,
+            B: CommittedPostProcessor,
+            C: UncommittedPreProcessor,
+            D: UncommittedPostProcessor,
     {
 
         // key的末尾是dataKey
         let dataKey = extractDataKeyFromIndexKey!(indexKey);
 
         // 对index以表数据读取
-        let indexRowData = &indexKey[..(indexKey.len() - meta::DATA_KEY_BYTE_LEN)];
+        let indexRowData = extractIndexRowDataFromIndexKey!(indexKey);
         let mut myBytesRowData = MyBytes::from(Bytes::from(Vec::from(indexRowData)));
         let columnValues = Vec::try_from(&mut myBytesRowData)?;
 
@@ -805,7 +1091,7 @@ impl<'session> CommandExecutor<'session> {
 
         let opValueVecVecOnRemaingIndexCols = &indexSearch.opValueVecVecAcrossIndexFilteredCols[1..];
 
-        // opValueVecOnRemaingIndexCols 之间 or
+        // opValueVecVecOnRemaingIndexCol(脉络) 之间 or
         for (remainingIndexColValue, opValueVecVecOnRemaingIndexCol) in remainingIndexColValues.iter().zip(opValueVecVecOnRemaingIndexCols) {
             let mut satisfyOneOpValueVec = false;
 
@@ -860,11 +1146,11 @@ impl<'session> CommandExecutor<'session> {
                                     columnValues: Vec<GraphValue>, // index上的全部的column的data
                                     datakey: DataKey,
                                     indexSearch: &IndexSearch) -> Result<Option<RowData>>
-    where
-        A: CommittedPreProcessor,
-        B: CommittedPostProcessor,
-        C: UncommittedPreProcessor,
-        D: UncommittedPostProcessor,
+        where
+            A: CommittedPreProcessor,
+            B: CommittedPostProcessor,
+            C: UncommittedPreProcessor,
+            D: UncommittedPostProcessor,
     {
         let index = indexSearch.dbObjectIndex.asIndex()?;
 
@@ -946,5 +1232,19 @@ pub(in crate::executor) enum IndexSearchResult {
 macro_rules! ok_some_vec {
     ($($a:tt)*) => {
         Ok(Some(vec![$($a)*]))
+    };
+}
+
+#[macro_export]
+macro_rules! ok_merged {
+    ($opValue:expr) => {
+        Ok(MergeResult::Merged($opValue))
+    };
+}
+
+#[macro_export]
+macro_rules! ok_not_merged {
+    ($($opValue:tt)*) => {
+        Ok(MergeResult::NotMerged(vec![$($opValue)*]))
     };
 }
