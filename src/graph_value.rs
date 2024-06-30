@@ -10,7 +10,8 @@ use serde::ser::SerializeMap;
 use serde_json::Value;
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::parser::element::Element;
-use crate::parser::op::{determineLikePattern, LikePattern, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
+use crate::parser::op;
+use crate::parser::op::{LikePattern, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
 use crate::types::{Byte, DataKey};
 
 #[derive(Deserialize, Debug, Clone)]
@@ -93,8 +94,8 @@ impl BinaryCodec for GraphValue {
 
 impl Serialize for GraphValue {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
+        where
+            S: Serializer,
     {
         // 因为没有别的地方可以传递参数来标识了 不得已用threadLocal
         if global::UNTAGGED_ENUM_JSON.get() {
@@ -210,7 +211,7 @@ impl GraphValue {
         }
     }
 
-    // todo calc0的时候是不是应该拦掉 like ‘%a’ 和 like ‘%a%’
+    // todo calc0的时候是不是应该拦掉 like ‘%a’ 和 like ‘%a%’ 不能 因为 该不能确定对应的column是不是选中的index的第1个的column
     pub fn calc0(&self, op: Op, rightValues: &[GraphValue]) -> Result<GraphValue> {
         if rightValues.len() > 1 {
             if let Op::SqlOp(SqlOp::In) = op {
@@ -244,6 +245,27 @@ impl GraphValue {
             match (self, rightValue) {
                 (GraphValue::Pending(columnName), GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null) => {
                     if op.permitByIndex() {
+                        // like null, like 'a' 变为 equal
+                        if let Op::SqlOp(SqlOp::Like) = op {
+                            if let GraphValue::Null = rightValue {
+                                return Ok(GraphValue::IndexUseful {
+                                    columnName: columnName.clone(),
+                                    op: Op::MathCmpOp(MathCmpOp::Equal),
+                                    values: vec![GraphValue::Null],
+                                });
+                            }
+
+                            if let GraphValue::String(string) = rightValue {
+                                if let LikePattern::Equal(string) = op::determineLikePattern(string)? {
+                                    return Ok(GraphValue::IndexUseful {
+                                        columnName: columnName.clone(),
+                                        op: Op::MathCmpOp(MathCmpOp::Equal),
+                                        values: vec![rightValue.clone()],
+                                    });
+                                }
+                            }
+                        }
+
                         Ok(GraphValue::IndexUseful {
                             columnName: columnName.clone(),
                             op,
@@ -253,16 +275,8 @@ impl GraphValue {
                         Ok(GraphValue::IndexUseless)
                     }
                 }
-                (GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null, GraphValue::Pending(columnName)) => {
-                    if op.permitByIndex() {
-                        Ok(GraphValue::IndexUseful {
-                            columnName: columnName.clone(),
-                            op,
-                            values: vec![self.clone()],
-                        })
-                    } else {  // a+3 显然是不能的
-                        Ok(GraphValue::IndexUseless)
-                    }
+                (GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null, GraphValue::Pending(_)) => {
+                    return rightValue.calc0(op, &[self.clone()]);
                 }
                 // 两边都是常量
                 (GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null,
@@ -408,7 +422,7 @@ impl GraphValue {
             Op::SqlOp(SqlOp::Like) => { // todo 实现对like的计算 完成
                 match (self, rightValue) {
                     (GraphValue::String(selfString), GraphValue::String(rightString)) => {
-                        match determineLikePattern(rightString)? {
+                        match op::determineLikePattern(rightString)? {
                             LikePattern::Equal(s) => Ok(GraphValue::Boolean(selfString == rightString)),
                             LikePattern::Redundant => Ok(GraphValue::Boolean(true)),
                             LikePattern::StartWith(s) => Ok(GraphValue::Boolean(selfString.starts_with(&s))),

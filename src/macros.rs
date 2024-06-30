@@ -97,3 +97,13 @@ macro_rules! byte_slice_to_u64 {
         ($slice[7] as u64)
     };
 }
+
+#[macro_export]
+macro_rules! byte_slice_to_u32 {
+    ($slice: expr) => {
+        (($slice[0] as u32)<< 24)  |
+        (($slice[1] as u32)<< 16)  |
+        (($slice[2] as u32)<< 8)   |
+        ($slice[3] as u32)
+    };
+}

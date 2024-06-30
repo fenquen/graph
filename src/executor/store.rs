@@ -10,7 +10,7 @@ use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, index, IterationCmd};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extractDataKeyFromIndexKey, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey};
+use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey};
 use crate::{keyPrefixAddRowId, suffix_plus_plus, throw, u64ToByteArrRef, prefix_plus_plus, throwFormat};
 use crate::{global, meta, types, utils};
 use crate::codec::{BinaryCodec, MyBytes};

@@ -85,7 +85,7 @@ pub(super) fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
                         // like 'ab%' and like 'ay%' 矛盾
                     }
                     (LikePattern::StartWith(_), LikePattern::EndWith(_)) => {
-                        // like 'a%' and like '%a'
+                        // like 'a%' and like '%a' 虽然不能融合 然而 也不矛盾
                         // like 'a%' and like '%b' 虽然不能融合 然而 也不矛盾
                         return ok_some_vec!((op,value),(targetOp,targetValue));
                     }
@@ -234,7 +234,7 @@ pub(super) fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
                             return ok_some_vec!((Op::SqlOp(SqlOp::Like),value));
                         }
 
-                        // like 'a%' and >'aa'
+                        // like 'a%' and >'aa' 不能融合 也不矛盾
                         // like 'a%' and >'a' 不能融合 也不矛盾
                         // 例如 'a'满足'a%' 不满足>'a', 而 'ab' 满足 'a%' 且 'a%'
                         if targetString.starts_with(string) {
@@ -572,10 +572,5 @@ pub(super) fn andWithSingle<'a>(op: Op, value: &'a GraphValue,
     }
 
     // and 的兜底是None 矛盾
-    Ok(None)
-}
-
-fn process<'a>(string: &str,
-               targetString: &str, targetOp: Op) -> Result<Option<Vec<Op, &'a GraphValue>>> {
     Ok(None)
 }
