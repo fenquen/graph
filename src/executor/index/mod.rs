@@ -693,8 +693,8 @@ impl<'session> CommandExecutor<'session> {
 
                             assert_eq!(indexRowData[0], GraphValue::STRING);
 
-                            let len = byte_slice_to_u32!(&indexRowData[1..5]) as usize;
-                            let string = String::from_utf8_lossy(&indexRowData[5..5 + len]).to_string();
+                            let len = byte_slice_to_u32!(&indexRowData[GraphValue::TYPE_BYTE_LEN..GraphValue::STRING_CONTENT_OFFSET]) as usize;
+                            let string = String::from_utf8_lossy(&indexRowData[GraphValue::STRING_CONTENT_OFFSET..GraphValue::STRING_CONTENT_OFFSET + len]).to_string();
 
                             GraphValue::String(string)
                         };
