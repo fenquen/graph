@@ -482,6 +482,14 @@ impl GraphValue {
         throw!("not string")
     }
 
+    pub fn isString(&self) -> bool {
+        if let GraphValue::String(_) = self {
+            return true;
+        }
+
+        false
+    }
+
     pub fn getType(&self) -> GraphValueType {
         match self {
             GraphValue::Pending(_) => Self::PENDING,
