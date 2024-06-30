@@ -370,7 +370,7 @@ impl PartialEq for Column {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize, PartialEq, Default)]
+#[derive(Debug, Deserialize, Clone, Serialize, PartialEq, Default, Copy)]
 pub enum ColumnType {
     #[default]
     String,

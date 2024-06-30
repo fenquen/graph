@@ -80,6 +80,7 @@ pub enum LogicalOp {
 #[derive(DisplayStrum, Clone, Debug, Copy, Serialize, Deserialize)]
 pub enum SqlOp {
     In,
+    /// like 'a' 会在calc0的时候被消化掉变为 ='a'
     Like,
 }
 
