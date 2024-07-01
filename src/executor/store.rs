@@ -249,9 +249,6 @@ impl<'session> CommandExecutor<'session> {
         Ok(rowDatas)
     }
 
-
-    // todo 实现 index
-    // todo 识别何时应该使用index和使用哪种index
     // 如果传递的是fn()的话(不是Fn)是函数指针而不是闭包 不能和上下文有联系 闭包返回false 那么 continue
     /// 目前用到hook的地点有 update() selectTableUnderRels()
     pub(super) fn scanSatisfiedRows<A, B, C, D>(&self,
@@ -279,6 +276,7 @@ impl<'session> CommandExecutor<'session> {
                 let mut scanSearch = true;
 
                 if scanParams.tableFilter.is_some() {
+                    // todo 实现 index 完成
                     if let Some(mut indexSearch) = self.getMostSuitableIndex(&scanParams)? {
                         indexSearch.columnFamily = &columnFamily;
                         indexSearch.tableMutationsCurrentTx = tableMutationsCurrentTx;
@@ -599,19 +597,14 @@ impl<'session> CommandExecutor<'session> {
             rowData.insert(columnName, columnValue);
         }
 
-        let rowData = if scanParams.selectedColumnNames.is_some() {
-            pruneRowData(rowData, scanParams.selectedColumnNames)?
-        } else {
-            rowData
-        };
-
         if scanParams.tableFilter.is_none() {
-            return Ok(Some(rowData));
+            return Ok(Some(pruneRowData(rowData, scanParams.selectedColumnNames)?));
         }
 
+        // todo  select user[id](name like 'tom') 因为未选取name 使得name过滤的时候报错 不能提前prune 完成
         if let GraphValue::Boolean(satisfy) = scanParams.tableFilter.unwrap().calc(Some(&rowData))? {
             if satisfy {
-                Ok(Some(rowData))
+                Ok(Some(pruneRowData(rowData, scanParams.selectedColumnNames)?))
             } else {
                 Ok(None)
             }
