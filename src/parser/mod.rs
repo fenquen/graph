@@ -33,13 +33,13 @@ pub fn parse(sql: &str) -> anyhow::Result<Vec<Command>> {
 
     parser.parseElement()?;
 
-    for elementVec in &parser.elementVecVec {
+    /*for elementVec in &parser.elementVecVec {
         for element in elementVec {
             println!("{element}");
         }
 
         println!();
-    }
+    }*/
 
     parser.parse()
 }
@@ -72,7 +72,7 @@ impl Parser {
                     _ => self.throwSyntaxError()?,
                 };
 
-            println!("{:?}\n", command);
+          //  println!("{:?}\n", command);
 
             commandVec.push(command);
 
