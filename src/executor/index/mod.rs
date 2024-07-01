@@ -230,12 +230,14 @@ pub(in crate::executor) struct IndexSearch<'a> {
     pub mvccKeyBufferPtr: Pointer,
     pub dbRawIteratorPtr: Pointer,
     pub scanHooksPtr: Pointer,
+    /// 说明了index的1st的column是string
     pub index1stFilterColIsString: bool,
 }
 
 impl<'session> CommandExecutor<'session> {
     // todo table对应的index列表 是不是应该融入到table对象(table本身记录他的indexNames) 完成
     // todo index应对like
+    // todo 识别何时应该使用index和使用哪种index 完成
     // 对self使用 'a的原因是 dbObjectIndex是通过 self.getDBObjectByName() 得到 含有的生命周期是 'session
     pub(super) fn getMostSuitableIndex<'a>(&'a self, scanParams: &'a ScanParams) -> Result<Option<IndexSearch<'a>>> {
         if scanParams.table.indexNames.is_empty() {
@@ -259,13 +261,41 @@ impl<'session> CommandExecutor<'session> {
 
         let tableFilterColNames: Vec<&String> = tableFilterColName_opValuesVec.keys().collect();
 
-        // 对or来说对话 要想使用index 先要满足 tableFilter只能有1个字段,然后 该字段得是某个index的打头字段
-        // 例如 有个index包含 a和b两个字段 对 a=1 or b=2 来说 是用不了该index的 因为应对不了b=2 它不是index的打头部分
         if isAnd == false {
-            // 有多个字段 用不了index
+            // 对or来说对话 要想使用index 先要满足 tableFilter只能有1个字段,然后 该字段得是某个index的打头字段
+            // 例如 有个index包含 a和b两个字段 对 a=1 or b=2 来说 是用不了该index的 因为应对不了b=2 它不是index的打头部分
+            // tableFilter有多个字段 用不了index
             if tableFilterColNames.len() > 1 {
                 return Ok(None);
             }
+
+            // 对or来说, 如果使用了like 那么只能是 like 'a%'
+            // 如果是or, 对like来说只能使用 like 'a%' 不然的话
+            // 这个时候这些opValue都是尚未压缩的
+            for (op, values) in tableFilterColName_opValuesVec.get(tableFilterColNames[0]).unwrap() {
+                if let Op::SqlOp(SqlOp::Like) = op {
+                    assert_eq!(values.len(), 1);
+
+                    let value  = &values[0];
+
+                    // like null 当calc0的时候被转换成了 MathCmpOp::Equal了
+                    assert!(value.isString());
+
+                    match op::determineLikePattern(value.asString()?)? {
+                        LikePattern::StartWith(_) => {}
+                        LikePattern::Contain(_) | LikePattern::EndWith(_) => return Ok(None),
+                    }
+                }
+            }
+            //if let Op::SqlOp(SqlOp::Like) = op {
+            //  if let GraphValue::String(s) = value {
+            //    match op::determineLikePattern(s)? {
+            //      LikePattern::StartWith(_) => {}
+            //    LikePattern::Contain(_) | LikePattern::EndWith(_) => continue 'loopIndex,
+            //  LikePattern::Equal(_) | LikePattern::Redundant => panic!("impossible")
+            //}
+            //}
+            // }
         }
 
         // 候选的index名单
@@ -390,6 +420,7 @@ impl<'session> CommandExecutor<'session> {
                 } else { // 单个字段上的过滤条件之间是or 字段和字段之间是or
                     // 扁平化values
                     let mut opValueVec = Vec::new();
+
                     for (op, values) in opValuesVec {
                         assert!(op.permitByIndex());
 
@@ -417,6 +448,8 @@ impl<'session> CommandExecutor<'session> {
                     };
 
                     let accumulatedOr: Vec<(Op, GraphValue)> = accumulatedOr.into_iter().map(|(op, value)| { (op, value.clone()) }).collect();
+
+
                     opValueVecVecAcrossIndexFilteredCols.push(vec![accumulatedOr]);
 
                     indexFilteredColNames.push(indexColName.clone());
@@ -472,27 +505,12 @@ impl<'session> CommandExecutor<'session> {
                 continue 'loopIndex;
             }
 
-            // 目前不支持对index的打头字段使用like,
-            // 后续启用的话,如果是or,那么like只能是like 'a%',
-            // 如果是and ,如果出现了 like 'a%',like '%a%',那么还要有 like 'a%' 和 不是like的相伴随
-            // 遍历单个的字段上的各个的脉络
-            for opValueVec in &opValueVecVecAcrossIndexFilteredCols[0] {
-                // todo 需要对opValueVec排序, 以op排序
-                for (op, _) in opValueVec {
-                    if let Op::SqlOp(SqlOp::Like) = op {
-                        continue 'loopIndex;
-                    }
-                }
-            }
-
             // 到这里的时候 opValueVecVecAcrossIndexFilteredCols 压缩过
             // 对index的首个的column上的各个opValueVec 各个脉络 排序
             for opValueVec in &mut opValueVecVecAcrossIndexFilteredCols[0] {
-                // like 优先排到前边, 在其中 like 'a%' 优先排到前边
                 opValueVec.sort_by(|(prevOp, prevValue), (nextOp, nextValue)| {
                     assert!(prevValue.isString());
                     assert!(nextValue.isString());
-
                     match (prevOp, nextOp) {
                         (Op::SqlOp(SqlOp::Like), Op::SqlOp(SqlOp::Like)) => {
                             // like null calc0的时候都已消化掉了 只会是string
@@ -501,19 +519,24 @@ impl<'session> CommandExecutor<'session> {
 
                             // like 'a',calc0的时候都已消化掉了 不可能有 LikePattern::Equal
                             // LikePattern::Redundant 已经在压缩的时候消化掉了 不可能有 LikePattern::Redundant
+                            // 在其中 like 'a%' 优先排到前边
                             match (&prevLikePattern, &nextLikePattern) {
                                 (LikePattern::StartWith(_), _) => Ordering::Less,
                                 (_, LikePattern::StartWith(_)) => Ordering::Greater,
                                 _ => Ordering::Equal
                             }
                         }
+                        // like 相比其它op排到后边
                         (_, Op::SqlOp(SqlOp::Like)) => Ordering::Less,
                         (Op::SqlOp(SqlOp::Like), _) => Ordering::Greater,
                         _ => Ordering::Equal
                     }
                 });
 
-                // 如果第1个是like 而且不是 like 'a%' 那么该index抛弃
+                // 如果第1个是like 而且不是 like 'a%', 结合上边的排序规则(like 'a%'相比别的like要更加靠前), 说明不存在like 'a%',
+                // 那么该index抛弃 因为它违反了如下的rule
+                // 如果是or, like只能是like 'a%',
+                // 如果是and ,如果出现了 like '%a',like '%a%',那么还要有 like 'a%' 和 不是like的相伴随
                 if let (Op::SqlOp(SqlOp::Like), value) = &opValueVec[0] {
                     match op::determineLikePattern(value.asString()?)? {
                         LikePattern::StartWith(_) => {}
@@ -603,6 +626,8 @@ impl<'session> CommandExecutor<'session> {
             indexLocalSearch
         };
 
+        log::info!("use index: {}", dbObjectIndex.getName());
+
         let indexSearch = IndexSearch {
             dbObjectIndex,
             opValueVecVecAcrossIndexFilteredCols,
@@ -624,11 +649,11 @@ impl<'session> CommandExecutor<'session> {
     // todo 如果index本身能包含要select的全部字段 那么直接index读取了
     /// index本身也是个table 只不过可以是实际的data加上dataKey
     pub(in crate::executor) fn searchByIndex<A, B, C, D>(&self, indexSearch: IndexSearch) -> Result<Vec<(DataKey, RowData)>>
-        where
-            A: CommittedPreProcessor,
-            B: CommittedPostProcessor,
-            C: UncommittedPreProcessor,
-            D: UncommittedPostProcessor,
+    where
+        A: CommittedPreProcessor,
+        B: CommittedPostProcessor,
+        C: UncommittedPreProcessor,
+        D: UncommittedPostProcessor,
     {
         log::info!("searchByIndex, indexSearch.indexLocalSearch:{:?}",indexSearch.indexLocalSearch);
 
@@ -684,7 +709,6 @@ impl<'session> CommandExecutor<'session> {
             // opValueVecOnIndex1stColumn 的各个元素(opValueVec)之间是不论是不是isAnd,都是or
             if indexSearch.isAnd {
                 // 不是用不用like的问题 是 column是不是string
-                // 说明了index的1st的column是string
                 if indexSearch.index1stFilterColIsString {
                     let applyFiltersOn1stColValue = |indexKey: &[Byte]| {
                         // 对indexRowData来说只要第1列的value
@@ -712,6 +736,7 @@ impl<'session> CommandExecutor<'session> {
                     for (op, value) in opValueVecOnIndex1stColumn {
                         assert!(value.isString());
 
+                        buffer.clear();
                         value.encode(&mut buffer)?;
 
                         match op {
@@ -758,10 +783,12 @@ impl<'session> CommandExecutor<'session> {
                             }
                             Op::SqlOp(SqlOp::Like) => { //  >'a' 'aa' 也是 'a'打头 string是变长的 不像int是固定的长度的
                                 match op::determineLikePattern(value.asString()?)? {
-                                    LikePattern::StartWith(s) => {
+                                    LikePattern::StartWith(s) => { // like 'a%'
                                         let value = GraphValue::String(s);
+
+                                        buffer.clear();
                                         value.encode(&mut buffer)?;
-                                        // like 'a%'
+
                                         indexDBRawIterator.seek(buffer.as_ref());
 
                                         loop {
@@ -1017,6 +1044,8 @@ impl<'session> CommandExecutor<'session> {
                             match op::determineLikePattern(value.asString()?)? {
                                 LikePattern::StartWith(s) => {
                                     let value = GraphValue::String(s);
+
+                                    buffer.clear();
                                     value.encode(&mut buffer)?;
 
                                     let s = value.asString()?.as_bytes();
@@ -1025,6 +1054,7 @@ impl<'session> CommandExecutor<'session> {
                                     loop {
                                         let indexKey = getKeyIfSome!(indexDBRawIterator);
 
+                                        /// 这和原先scan的是手动其检测key的打头很类似
                                         if indexKey[GraphValue::STRING_CONTENT_OFFSET..].starts_with(s) == false {
                                             break;
                                         }
@@ -1059,11 +1089,11 @@ impl<'session> CommandExecutor<'session> {
     // 对or来说 不会调用该函数了 因为 要使用index的话 表的过滤条件的字段只能单个 且 要是 index的打头字段
     fn further<A, B, C, D>(&self, indexKey: &[Byte],
                            indexSearch: &IndexSearch) -> Result<Option<IndexSearchResult>>
-        where
-            A: CommittedPreProcessor,
-            B: CommittedPostProcessor,
-            C: UncommittedPreProcessor,
-            D: UncommittedPostProcessor,
+    where
+        A: CommittedPreProcessor,
+        B: CommittedPostProcessor,
+        C: UncommittedPreProcessor,
+        D: UncommittedPostProcessor,
     {
 
         // key的末尾是dataKey
@@ -1146,11 +1176,11 @@ impl<'session> CommandExecutor<'session> {
                                     columnValues: Vec<GraphValue>, // index上的全部的column的data
                                     datakey: DataKey,
                                     indexSearch: &IndexSearch) -> Result<Option<RowData>>
-        where
-            A: CommittedPreProcessor,
-            B: CommittedPostProcessor,
-            C: UncommittedPreProcessor,
-            D: UncommittedPostProcessor,
+    where
+        A: CommittedPreProcessor,
+        B: CommittedPostProcessor,
+        C: UncommittedPreProcessor,
+        D: UncommittedPostProcessor,
     {
         let index = indexSearch.dbObjectIndex.asIndex()?;
 
@@ -1195,7 +1225,6 @@ impl<'session> CommandExecutor<'session> {
                                              trash: bool) -> Result<()> {
         // 遍历各个index
         for indexName in &table.indexNames {
-            println!("indexName:{indexName}");
             let dbObjectIndex = self.getDBObjectByName(indexName)?;
             let index = dbObjectIndex.asIndex()?;
 
@@ -1215,6 +1244,7 @@ impl<'session> CommandExecutor<'session> {
             if trash {
                 self.session.writeAddIndexMutation(&format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX), (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
             } else {
+                log::info!("generate indexName:{indexName}");
                 self.session.writeAddIndexMutation(indexName, (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
             }
         }

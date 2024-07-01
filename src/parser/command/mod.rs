@@ -34,6 +34,14 @@ pub enum Command { //  todo 实现 order by
 }
 
 impl Command {
+    pub fn needTx(&self) -> bool {
+        if let Command::Select(_) = self {
+            return true;
+        }
+
+        self.isDml()
+    }
+
     pub fn isDml(&self) -> bool {
         match self {
             Command::Insert(_) | Command::Link(_) | Command::Update(_) | Command::Unlink(_) => true,
@@ -43,7 +51,7 @@ impl Command {
 
     pub fn isDdl(&self) -> bool {
         match self {
-            Command::CreateTable(_) | Command::CreateIndex(_)  => true,
+            Command::CreateTable(_) | Command::CreateIndex(_) => true,
             _ => false
         }
     }

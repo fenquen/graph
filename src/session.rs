@@ -45,16 +45,16 @@ impl Session {
         }
 
         // todo set autocommit 是不需要tx的 如果sql只包含set如何应对
-        let mut isPureSetSql = false;
+        let mut needTx = false;
         for command in &commands {
-            if let Command::Set(_) = command {
-                isPureSetSql = true;
+            if command.needTx() {
+                needTx = true;
                 break;
             }
         }
 
         // 不要求是不是auto commit的 要不在tx那么生成1个tx
-        if self.notInTx() && isPureSetSql == false {
+        if self.notInTx() && needTx {
             self.generateTx()?;
         }
 
@@ -62,7 +62,7 @@ impl Session {
         let selectResultToFront = CommandExecutor::new(self).execute(&mut commands)?;
 
         // todo sql中执行了commit rollback使得当前tx提交后,当前不是inTx了,要是后边还有不是set的sql需要再重起1个tx
-        if self.autoCommit && isPureSetSql == false {
+        if self.autoCommit && needTx == false {
             self.commit()?;
         }
 
