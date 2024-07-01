@@ -66,7 +66,7 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
         if dest.is_empty() {
             // 单个的opValue本身也是需要检查的 目前已知要应对Nonsense,like '%%' 这样的废话
             if let (Op::SqlOp(SqlOp::Like), GraphValue::String(s)) = (op, value) {
-                if let LikePattern::Redundant = op::determineLikePattern(s)? {
+                if let LikePattern::Nonsense = op::determineLikePattern(s)? {
                     return Result::<(AccumulateResult<'a>, bool)>::Ok((AccumulateResult::Nonsense, merged));
                 }
             }
@@ -215,21 +215,26 @@ macro_rules! extractIndexRowDataFromIndexKey {
 
 pub(in crate::executor) struct IndexSearch<'a> {
     pub dbObjectIndex: Ref<'a, String, DBObject>,
-    /// 包含的grapgValue, 这个的vec数量是index用到的column数量
+
+    /// 它的length是index用到的column数量
     pub opValueVecVecAcrossIndexFilteredCols: Vec<Vec<Vec<(Op, GraphValue)>>>,
+
     /// 如果说index能够 包含filter的全部字段 和 包含select的全部字段,那么就不用到原表上再搜索了,能够直接就地应对
     pub indexLocalSearch: bool,
-    // pub(in crate::executor) selectedColNames: Option<&'a [String]>,
+
     pub isAnd: bool,
     pub scanParams: &'a ScanParams<'a, 'a, 'a>,
+
     // 以下的2个的字段算是拖油瓶的,不想让函数的参数写的长长的1串,都纳入到IndexSearch麾下
     pub columnFamily: &'a ColumnFamily<'a>,
     pub tableMutationsCurrentTx: Option<&'a TableMutations>,
+
     // mvccKeyBufferPtr, dbRawIteratorPtr, scanHooksPtr 是透传到indexLocalSearch使用的
     // 使用危险的ptr的原因是,它们使用的时候都是mut的,使用传统的引用的话可能会产生可变和不可变引用的冲突
     pub mvccKeyBufferPtr: Pointer,
     pub dbRawIteratorPtr: Pointer,
     pub scanHooksPtr: Pointer,
+
     /// 说明了index的1st的column是string
     pub index1stFilterColIsString: bool,
 }
@@ -270,13 +275,12 @@ impl<'session> CommandExecutor<'session> {
             }
 
             // 对or来说, 如果使用了like 那么只能是 like 'a%'
-            // 如果是or, 对like来说只能使用 like 'a%' 不然的话
             // 这个时候这些opValue都是尚未压缩的
             for (op, values) in tableFilterColName_opValuesVec.get(tableFilterColNames[0]).unwrap() {
                 if let Op::SqlOp(SqlOp::Like) = op {
                     assert_eq!(values.len(), 1);
 
-                    let value  = &values[0];
+                    let value = &values[0];
 
                     // like null 当calc0的时候被转换成了 MathCmpOp::Equal了
                     assert!(value.isString());
@@ -284,18 +288,11 @@ impl<'session> CommandExecutor<'session> {
                     match op::determineLikePattern(value.asString()?)? {
                         LikePattern::StartWith(_) => {}
                         LikePattern::Contain(_) | LikePattern::EndWith(_) => return Ok(None),
+                        LikePattern::Nonsense => return Ok(None),
+                        LikePattern::Equal(_) => panic!("imposible, calc0的时候就已变换为MathCmpOp::Equal")
                     }
                 }
             }
-            //if let Op::SqlOp(SqlOp::Like) = op {
-            //  if let GraphValue::String(s) = value {
-            //    match op::determineLikePattern(s)? {
-            //      LikePattern::StartWith(_) => {}
-            //    LikePattern::Contain(_) | LikePattern::EndWith(_) => continue 'loopIndex,
-            //  LikePattern::Equal(_) | LikePattern::Redundant => panic!("impossible")
-            //}
-            //}
-            // }
         }
 
         // 候选的index名单
@@ -383,12 +380,13 @@ impl<'session> CommandExecutor<'session> {
 
                         for opValueVec in &opValueVecVec {
                             match accumulateAnd(opValueVec.as_slice())? {
+                                // a>=0 and a<0 矛盾
                                 // 要是全部的脉络都是Conflict的话 那不止是用不用index的问题了 select是没有相应的必要的
                                 AccumulateResult::Conflict => {
                                     suffix_plus_plus!(confilctCount);
                                     continue;
                                 }
-                                // 只要有1天脉络是Nonsense,index的这个的column就没有筛选用途了
+                                // 只要有1天脉络是Nonsense,index的这个的column以及后边的就都没有筛选用途了
                                 AccumulateResult::Nonsense => break 'loopIndexColumn,
                                 AccumulateResult::Ok(opValueVec) => a.push(opValueVec)
                             }
@@ -441,14 +439,12 @@ impl<'session> CommandExecutor<'session> {
 
                     let accumulatedOr = match accumulateOr(opValueVec.as_slice())? {
                         AccumulateResult::Conflict => panic!("impossible"),
-                        // 如果and 那么是 a>=0 and a<0 矛盾
-                        // 如果是or 那么是 a>0 or a<=0 这样的废话
-                        AccumulateResult::Nonsense => continue 'loopIndex,
+                        // a>0 or a<=0 这样的废话
+                        AccumulateResult::Nonsense => return Ok(None), //continue 'loopIndex,
                         AccumulateResult::Ok(accumulated) => accumulated,
                     };
 
                     let accumulatedOr: Vec<(Op, GraphValue)> = accumulatedOr.into_iter().map(|(op, value)| { (op, value.clone()) }).collect();
-
 
                     opValueVecVecAcrossIndexFilteredCols.push(vec![accumulatedOr]);
 

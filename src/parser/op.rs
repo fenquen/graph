@@ -107,7 +107,7 @@ impl MathCalcOp {
 pub enum LikePattern {
     /// 对应 like 'a',会在calc0的时候被消化掉变为MathCmpOp::Equal<br>, like null 也会这样
     Equal(String),
-    Redundant,
+    Nonsense,
     StartWith(String),
     EndWith(String),
     Contain(String),
@@ -117,7 +117,7 @@ impl LikePattern {
     pub fn getString(&self) -> Result<&String> {
         match self {
             LikePattern::Equal(s) => Ok(s),
-            LikePattern::Redundant => throw!("can not get string from LikePattern::Redundant"),
+            LikePattern::Nonsense => throw!("can not get string from LikePattern::Redundant"),
             LikePattern::StartWith(s) => Ok(s),
             LikePattern::EndWith(s) => Ok(s),
             LikePattern::Contain(s) => Ok(s),
@@ -135,7 +135,7 @@ pub fn determineLikePattern(likePattern: &str) -> Result<LikePattern> {
     if utils::isPureSomeChar(likePattern, global::百分号_CHAR) {
         // like '%' 和 like '%%'
         if 2 >= likePattern.len() {
-            return Ok(LikePattern::Redundant);
+            return Ok(LikePattern::Nonsense);
         }
 
         // 如果上边的不满足的话,就对应了下边的 两头都是"%"

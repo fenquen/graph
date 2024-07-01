@@ -306,6 +306,7 @@ impl<'session> CommandExecutor<'session> {
                     let distance = latestRowId - meta::ROW_ID_INVALID;
                     let mut concurrency = distance / COUNT_PER_THREAD;
 
+                    // todo scan遍历能不能concurrent 完成
                     if concurrency > 1 {
                         serialScan = false;
 
@@ -465,7 +466,6 @@ impl<'session> CommandExecutor<'session> {
 
                     let mut readCount = 0usize;
 
-                    // todo scan遍历能不能concurrent
                     // 对data条目而不是pointer条目遍历
                     for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(meta::DATA_KEY_PATTERN, Direction::Forward)) {
                         let (dataKeyBinary, rowDataBinary) = iterResult?;
@@ -717,7 +717,6 @@ impl<'session> CommandExecutor<'session> {
 
     /// 当前对relation本身的数据的筛选是通过注入闭包实现的
     // todo 如何去应对重复的pointerKey
-    // todo pointerKey应该同时到committed和uncommitted去搜索
     pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
         where
@@ -771,6 +770,7 @@ impl<'session> CommandExecutor<'session> {
             keys.push(committedPointerKey);
         }
 
+        // todo pointerKey应该同时到committed和uncommitted去搜索 完成
         // 应对uncommitted
         if let Some(tableMutations) = tableMutations {
             let addedPointerKeyRange = tableMutations.range::<Vec<Byte>, RangeFrom<&Vec<Byte>>>(&prefix.to_vec()..);

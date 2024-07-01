@@ -23,14 +23,14 @@ pub(super) fn opValueOrOpValue<'a>(op: Op, value: &'a GraphValue,
         (Op::SqlOp(SqlOp::Like), Op::SqlOp(SqlOp::Like)) => {
             // 用if let因为可能会有 like null, like '%' 含有Redundant踢掉
             if let GraphValue::String(string) = value {
-                if let LikePattern::Redundant = op::determineLikePattern(string)? {
+                if let LikePattern::Nonsense = op::determineLikePattern(string)? {
                     return Ok(MergeResult::Nonsense);
                 }
             }
 
             // 用if let因为可能会有 like null, like '%' 含有Redundant踢掉
             if let GraphValue::String(targetString) = targetValue {
-                if let LikePattern::Redundant = op::determineLikePattern(targetString)? {
+                if let LikePattern::Nonsense = op::determineLikePattern(targetString)? {
                     return Ok(MergeResult::Nonsense);
                 }
             }
@@ -154,14 +154,14 @@ pub(super) fn opValueOrOpValue<'a>(op: Op, value: &'a GraphValue,
                             return ok_merged!((Op::SqlOp(SqlOp::Like), targetValue));
                         }
                     }
-                    (LikePattern::Redundant, _) | (_, LikePattern::Redundant) => return Ok(MergeResult::Nonsense)
+                    (LikePattern::Nonsense, _) | (_, LikePattern::Nonsense) => return Ok(MergeResult::Nonsense)
                 }
             }
         }
         (Op::SqlOp(SqlOp::Like), _) => {
             // 用if let是因为可能会有like null 不是string, like '%' 含有Redundant踢掉
             if let GraphValue::String(string) = value {
-                if let LikePattern::Redundant = op::determineLikePattern(string)? {
+                if let LikePattern::Nonsense = op::determineLikePattern(string)? {
                     return Ok(MergeResult::Nonsense);
                 }
             }
@@ -274,7 +274,7 @@ pub(super) fn opValueOrOpValue<'a>(op: Op, value: &'a GraphValue,
         }
         (_, Op::SqlOp(SqlOp::Like)) => {
             if let GraphValue::String(targetString) = targetValue {
-                if let LikePattern::Redundant = op::determineLikePattern(targetString)? {
+                if let LikePattern::Nonsense = op::determineLikePattern(targetString)? {
                     return Ok(MergeResult::Nonsense);
                 }
             }

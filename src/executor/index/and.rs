@@ -16,7 +16,7 @@ pub(super) fn opValueAndOpValue<'a>(op: Op, value: &'a GraphValue,
     assert!(targetOp.permitByIndex());
     assert!(targetValue.isConstant());
 
-    match (op, targetOp) { // todo 如何应对 string的 like 'a%' 和 >='a' 的融合
+    match (op, targetOp) {
         (Op::SqlOp(SqlOp::Like), Op::SqlOp(SqlOp::Like)) => {
             // like null 当 calc0的时候消化掉变为 =null,故而 value 和 targetValue都是string
             assert!(value.isString());
@@ -180,14 +180,14 @@ pub(super) fn opValueAndOpValue<'a>(op: Op, value: &'a GraphValue,
                         // like '%ara%' and like '%d%' 不能融合 也不矛盾
                         return ok_not_merged!((op,value),(targetOp,targetValue));
                     }
-                    (LikePattern::Redundant, LikePattern::Redundant) => {
+                    (LikePattern::Nonsense, LikePattern::Nonsense) => {
                         return Ok(MergeResult::Nonsense);
                     }
                     // 说了废话 其实也不是矛盾(None)
-                    (LikePattern::Redundant, _) => {
+                    (LikePattern::Nonsense, _) => {
                         return ok_merged!((targetOp,targetValue));
                     }
-                    (_, LikePattern::Redundant) => {
+                    (_, LikePattern::Nonsense) => {
                         return ok_merged!((op,value));
                     }
                 }
@@ -195,7 +195,7 @@ pub(super) fn opValueAndOpValue<'a>(op: Op, value: &'a GraphValue,
         }
         (Op::SqlOp(SqlOp::Like), _) => { // 下边的各类情况分析的太累了,后边的(_,Op::SqlOp(SqlOp::Like)) 需要复用
             if let GraphValue::String(string) = value {
-                if let LikePattern::Redundant = op::determineLikePattern(string)? {
+                if let LikePattern::Nonsense = op::determineLikePattern(string)? {
                     return ok_merged!((targetOp,targetValue));
                 }
             }
@@ -245,6 +245,7 @@ pub(super) fn opValueAndOpValue<'a>(op: Op, value: &'a GraphValue,
                             return ok_merged!((Op::MathCmpOp(MathCmpOp::Equal), targetValue));
                         }
                     }
+                    // todo 如何应对 string的 like 'a%' 和 >='a' 的融合
                     (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
                         // like 'r%' and >'a'
                         // like 'aa%' and >'a'

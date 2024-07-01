@@ -259,8 +259,8 @@ impl Parser {
                         self.pendingChars.push(currentChar);
                     }
                 }
-                // 应对like
-                'l' | 'L' => { // todo 实现对like的parse 完成
+                // todo 实现对like的parse 完成
+                'l' | 'L' => {
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
                         continue;
@@ -421,7 +421,7 @@ impl Parser {
                         "OR" => Element::Op(Op::LogicalOp(LogicalOp::Or)),
                         "AND" => Element::Op(Op::LogicalOp(LogicalOp::And)),
                         "IN" => Element::Op(Op::SqlOp(SqlOp::In)),
-                        // todo 应对 recusive 查询
+                        // todo 应对 recursive 查询
                         _ => {
                             Element::TextLiteral(text)
                         }

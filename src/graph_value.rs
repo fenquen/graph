@@ -428,7 +428,7 @@ impl GraphValue {
                     (GraphValue::String(selfString), GraphValue::String(rightString)) => {
                         match op::determineLikePattern(rightString)? {
                             LikePattern::Equal(_) => Ok(GraphValue::Boolean(selfString == rightString)),
-                            LikePattern::Redundant => Ok(GraphValue::Boolean(true)),
+                            LikePattern::Nonsense => Ok(GraphValue::Boolean(true)),
                             LikePattern::StartWith(s) => Ok(GraphValue::Boolean(selfString.starts_with(&s))),
                             LikePattern::Contain(s) => Ok(GraphValue::Boolean(selfString.contains(&s))),
                             LikePattern::EndWith(s) => Ok(GraphValue::Boolean(selfString.ends_with(&s))),
