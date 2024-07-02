@@ -21,7 +21,7 @@ struct AndDesc<'a> {
 pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<TableFilterProcResult> {
     // 要把tableFilter上涉及到的columnName的expr全部提取
     // tableFilter上的字段名->Vec<(op, value)>
-    let mut tableFilterColName_opValuesVec = HashMap::default();
+    let mut indexableTableFilterColName_opValuesVec = HashMap::default();
 
     // 单个字段上的各个opValue之间 以及 各column之间 是and还是or, 目前感觉实现的还是不够精细
     // 如果是and的话是真的纯and, 如果是or的话 不1定是纯or
@@ -30,7 +30,7 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
     let mut hasExprAbandonedByIndex = false;
     let mut columnNameExist = false;
 
-    tableFilter.collectColNameValue(&mut tableFilterColName_opValuesVec, &mut isPureAnd, &mut isPureOr, &mut hasExprAbandonedByIndex, &mut columnNameExist)?;
+    tableFilter.collectColNameValue(&mut indexableTableFilterColName_opValuesVec, &mut isPureAnd, &mut isPureOr, &mut hasExprAbandonedByIndex, &mut columnNameExist)?;
 
     // 包含pureOr和不是纯or
     let mut orHasNonsense = false;
@@ -40,7 +40,7 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
         return Ok(TableFilterProcResult::NoColumnNameInTableFilter);
     }
 
-    let tableFilterColCount = tableFilterColName_opValuesVec.len();
+    let tableFilterColCount = indexableTableFilterColName_opValuesVec.len();
 
     let mut tableFilterColName_opValueVecVec = HashMap::with_capacity(tableFilterColCount);
 
@@ -50,7 +50,7 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
 
         // 不管如何 都先将opValue先压缩
         'loopTableFilterColumnName:
-        for (tableFilterColumnName, opValuesVec) in &tableFilterColName_opValuesVec {
+        for (tableFilterColumnName, opValuesVec) in &indexableTableFilterColName_opValuesVec {
             // 收集了全部的leaf node到时候遍历溯源
             let mut leafVec = Vec::new();
 
@@ -135,7 +135,7 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
         }
     } else {
         'tableFilterColumnName:
-        for (tableFilterColumnName, opValuesVec) in &tableFilterColName_opValuesVec {
+        for (tableFilterColumnName, opValuesVec) in &indexableTableFilterColName_opValuesVec {
             // 扁平化opValuesVec 变为 opValueVec
             let opValueVec = {
                 let mut opValueVec = Vec::new();
@@ -184,16 +184,20 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
         }
     }
 
-    return Ok(TableFilterProcResult::MaybeCanUseIndex {
-        indexableTableFilterColName_opValueVecVec: tableFilterColName_opValueVecVec,
-        isPureAnd,
-        isPureOr,
-        orHasNonsense,
-    });
+    return Ok(
+        TableFilterProcResult::MaybeCanUseIndex {
+            indexableTableFilterColName_opValueVecVec: tableFilterColName_opValueVecVec,
+            isPureAnd,
+            isPureOr,
+            orHasNonsense,
+        }
+    );
 }
 
 // 生成向上溯源的树 因为它只有parent
-fn and<'a>(opValuesVec: &'a [(Op, Vec<GraphValue>)], parent: Rc<AndDesc<'a>>, leafVec: &mut Vec<AndDesc<'a>>) {
+fn and<'a>(opValuesVec: &'a [(Op, Vec<GraphValue>)],
+           parent: Rc<AndDesc<'a>>,
+           leafVec: &mut Vec<AndDesc<'a>>) {
     for (op, values) in opValuesVec {
         if values.len() > 1 {
             // assert_eq!(*op, Op::SqlOp(SqlOp::In));
