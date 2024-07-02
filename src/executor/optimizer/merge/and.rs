@@ -4,11 +4,11 @@ use crate::graph_value::GraphValue;
 use crate::{ok_merged, ok_not_merged, ok_some_vec};
 use crate::parser::op::{LikePattern, MathCmpOp, Op, SqlOp};
 use anyhow::Result;
-use crate::executor::index::MergeResult;
+use crate::executor::optimizer::merge::MergeResult;
 use crate::parser::op;
 
 /// 踢掉相互矛盾的 和 废话的,如果有矛盾产生那么整条脉络作废,如果是废话那么跳过该元素
-pub(super) fn opValueAndOpValue<'a>(op: Op, value: &'a GraphValue,
+pub fn opValueAndOpValue<'a>(op: Op, value: &'a GraphValue,
                                     targetOp: Op, targetValue: &'a GraphValue) -> Result<MergeResult<'a>> {
     assert!(op.permitByIndex());
     assert!(value.isConstant());

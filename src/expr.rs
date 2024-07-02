@@ -63,27 +63,53 @@ impl Expr {
 
     /// 收集tableFilter上涉及到columnName的expr 把成果收集到dest对应的map
     /// 例如 ((a=1 or a=2) and (b>3 or b=1)) 会收集成为 “a”-> []
-    pub fn collectColNameValue(&self, dest: &mut HashMap<String, Vec<(Op, Vec<GraphValue>)>>, isAnd: &mut bool) -> Result<GraphValue> {
+    pub fn collectColNameValue(&self,
+                               columnName_opValuesVec: &mut HashMap<String, Vec<(Op, Vec<GraphValue>)>>,
+                               isPureAnd: &mut bool,
+                               isPureOr: &mut bool,
+                               hasExprAbandonedByIndex: &mut bool,
+                               columnNameExist: &mut bool) -> Result<GraphValue> {
         match self {
             Expr::Single(element) => {
-                Ok(GraphValue::try_from(element)?)
+                let value = GraphValue::try_from(element)?;
+                if let GraphValue::Pending(_) = &value {
+                    *columnNameExist = true;
+                }
+
+                Ok(value)
             }
             Expr::BiDirection { leftExpr, op, rightExprs } => {
-                let leftValue = leftExpr.collectColNameValue(dest, isAnd)?;
+                let leftValue = leftExpr.collectColNameValue(columnName_opValuesVec, isPureAnd, isPureOr, hasExprAbandonedByIndex, columnNameExist)?;
 
                 let rightValues: Vec<GraphValue> =
-                    rightExprs.iter().map(|rightExpr| { rightExpr.collectColNameValue(dest, isAnd).unwrap() }).collect();
+                    rightExprs.iter().map(|rightExpr| { rightExpr.collectColNameValue(columnName_opValuesVec, isPureAnd, isPureOr, hasExprAbandonedByIndex, columnNameExist).unwrap() }).collect();
+
+                // 如何得到 columnName + 1 这样的index不能使用的情况
+                // val + (number >1 )
+                // 挑选index的条件是 GraphValue::Pending + op.permitByIndex() + graphValue.isConstant
+                if let GraphValue::Pending(_) = &leftValue {
+                    if op.permitByIndex() == false {
+                        *hasExprAbandonedByIndex = true;
+                    } else {
+                        for rightValue in &rightValues {
+                            if rightValue.isConstant() == false {
+                                *hasExprAbandonedByIndex = true;
+                                break;
+                            }
+                        }
+                    }
+                }
 
                 let graphValueIndex = leftValue.calc0(op.clone(), &rightValues)?;
 
                 if let GraphValue::IndexUseful { ref columnName, op, ref values } = graphValueIndex {
-                    let  opValuesVec = dest.getMutWithDefault(columnName);
+                    let opValuesVec = columnName_opValuesVec.getMutWithDefault(columnName);
 
                     if let Op::SqlOp(SqlOp::In) = op {
                         // 如果in的对象只有1个 那么是equal
                         if values.len() == 1 {
                             opValuesVec.push((Op::MathCmpOp(MathCmpOp::Equal), values.clone()));
-                        } else if *isAnd == false {
+                        } else if *isPureAnd == false {
                             for value in values {
                                 opValuesVec.push((Op::MathCmpOp(MathCmpOp::Equal), vec![value.clone()]));
                             }
@@ -97,7 +123,11 @@ impl Expr {
 
                 // 含有or的话 都以它来 不然都是and
                 if let Op::LogicalOp(LogicalOp::Or) = op {
-                    *isAnd = false;
+                    *isPureAnd = false;
+                }
+
+                if let Op::LogicalOp(LogicalOp::And) = op {
+                    *isPureOr = false;
                 }
 
                 Ok(graphValueIndex)

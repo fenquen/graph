@@ -25,8 +25,14 @@ pub enum GraphValue {
     Decimal(f64),
     Null,
 
-    IndexUseful { columnName: String, op: Op, values: Vec<GraphValue> },
+    IndexUseful {
+        columnName: String,
+        op: Op,
+        values: Vec<GraphValue>,
+    },
     IndexUseless,
+
+    IgnoreColumnActualValue,
 }
 
 /// type标识(u8) + 内容长度(u32,对应的是变长的 Pending String PoinstDesc) + 内容
@@ -94,8 +100,8 @@ impl BinaryCodec for GraphValue {
 
 impl Serialize for GraphValue {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-        where
-            S: Serializer,
+    where
+        S: Serializer,
     {
         // 因为没有别的地方可以传递参数来标识了 不得已用threadLocal
         if global::UNTAGGED_ENUM_JSON.get() {
@@ -218,7 +224,7 @@ impl GraphValue {
     // todo calc0的时候是不是应该拦掉 like ‘%a’ 和 like ‘%a%’ 不能 因为 该不能确定对应的column是不是选中的index的第1个的column
     pub fn calc0(&self, op: Op, rightValues: &[GraphValue]) -> Result<GraphValue> {
         if rightValues.len() > 1 {
-            if let Op::SqlOp(SqlOp::In) = op {
+            if let Op::SqlOp(SqlOp::In) = op { // in 是满足 permitByIndex的
                 for rightValue in rightValues {
                     match rightValue { // rightValues需要的都是常量
                         GraphValue::Pending(_) | GraphValue::IndexUseful { .. } | GraphValue::IndexUseless => return Ok(GraphValue::IndexUseless),
@@ -239,6 +245,7 @@ impl GraphValue {
                     GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null => {
                         self.calc(op, rightValues)
                     }
+                    GraphValue::IgnoreColumnActualValue => panic!("impossible")
                 }
             } else {
                 throw!("right values only can be multi when op is in")
@@ -305,6 +312,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 <= &(*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float <= float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 <= &(*integer as f64))),
+                            (GraphValue::IgnoreColumnActualValue, _)|(_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -317,6 +325,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float == float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 == &(*integer as f64))),
                             (GraphValue::Null, GraphValue::Null) => Ok(GraphValue::Boolean(true)),
+                            (GraphValue::IgnoreColumnActualValue, _)|(_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -328,6 +337,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 < &(*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float < float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 < &(*integer as f64))),
+                            (GraphValue::IgnoreColumnActualValue, _)|(_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -339,6 +349,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 > &(*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float > float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 > &(*integer as f64))),
+                            (GraphValue::IgnoreColumnActualValue, _)|(_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -350,6 +361,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 >= &(*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float >= float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 >= &(*integer as f64))),
+                            (GraphValue::IgnoreColumnActualValue, _)|(_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -437,6 +449,7 @@ impl GraphValue {
                     (GraphValue::Null, GraphValue::Null) => Ok(GraphValue::Boolean(true)),
                     (GraphValue::Null, GraphValue::String(_)) => Ok(GraphValue::Boolean(false)),
                     (GraphValue::String(_), GraphValue::Null) => Ok(GraphValue::Boolean(false)),
+                    (GraphValue::IgnoreColumnActualValue, _) | (_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                     _ => throwFormat!("like can only used between strings")
                 }
             }

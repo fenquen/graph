@@ -1,15 +1,12 @@
-use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
-use dashmap::mapref::one::{Ref, RefMut};
+use dashmap::mapref::one::Ref;
 use serde_json::Value;
 use strum_macros::Display;
 use crate::meta::{DBObject, Index, Table};
 use crate::session::Session;
-use crate::{meta, throw, throwFormat};
-use crate::graph_value::GraphValue;
+use crate::{meta, throwFormat};
 use crate::parser::command::Command;
-use crate::parser::command::manage::Set;
-use crate::types::{SelectResultToFront, DBObjectId};
+use crate::types::{DBObjectId, SelectResultToFront};
 use anyhow::Result;
 
 mod create;
@@ -24,6 +21,7 @@ mod mvcc;
 mod vaccum;
 mod manage;
 mod index;
+mod optimizer;
 
 #[macro_export]
 macro_rules! JSON_ENUM_UNTAGGED {

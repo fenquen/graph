@@ -25,16 +25,19 @@ use dashmap::mapref::one::Ref;
 use lazy_static::lazy_static;
 use crate::executor::index::{IndexSearch};
 use crate::executor::mvcc::BytesMutExt;
+use crate::executor::optimizer::filter;
+use crate::executor::optimizer::filter::TableFilterProcResult;
 use crate::parser::op::{LogicalOp, MathCmpOp, Op, SqlOp};
 use crate::session::Session;
 use crate::types::{CommittedPointerKeyProcessor, UncommittedPointerKeyProcessor};
 
 pub(super) struct ScanHooks<A, B, C, D>
-    where
-        A: CommittedPreProcessor,
-        B: CommittedPostProcessor,
-        C: UncommittedPreProcessor,
-        D: UncommittedPostProcessor {
+where
+    A: CommittedPreProcessor,
+    B: CommittedPostProcessor,
+    C: UncommittedPreProcessor,
+    D: UncommittedPostProcessor,
+{
     /// 读取到committed RowData 前
     pub(super) committedPreProcessor: Option<A>,
     /// 读取到committed RowData 后
@@ -62,11 +65,12 @@ impl Default for ScanHooks<
 }
 
 impl<A, B, C, D> ScanHooks<A, B, C, D>
-    where
-        A: CommittedPreProcessor,
-        B: CommittedPostProcessor,
-        C: UncommittedPreProcessor,
-        D: UncommittedPostProcessor {
+where
+    A: CommittedPreProcessor,
+    B: CommittedPostProcessor,
+    C: UncommittedPreProcessor,
+    D: UncommittedPostProcessor,
+{
     pub fn preProcessCommitted(&mut self, columnFamily: &ColumnFamily, dataKey: DataKey) -> Result<bool> {
         if let Some(ref mut committedPreProcessor) = self.committedPreProcessor {
             return committedPreProcessor(columnFamily, dataKey);
@@ -107,9 +111,10 @@ impl<A, B, C, D> ScanHooks<A, B, C, D>
 }
 
 pub struct SearchPointerKeyHooks<A, B>
-    where
-        A: CommittedPointerKeyProcessor,
-        B: UncommittedPointerKeyProcessor {
+where
+    A: CommittedPointerKeyProcessor,
+    B: UncommittedPointerKeyProcessor,
+{
     pub(super) committedPointerKeyProcessor: Option<A>,
     pub(super) uncommittedPointerKeyProcessor: Option<B>,
 }
@@ -158,11 +163,12 @@ impl<'session> CommandExecutor<'session> {
                                                     dataKeys: &[DataKey],
                                                     scanParams: &ScanParams,
                                                     scanHooks: &mut ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
-        where
-            A: CommittedPreProcessor,
-            B: CommittedPostProcessor,
-            C: UncommittedPreProcessor,
-            D: UncommittedPostProcessor {
+    where
+        A: CommittedPreProcessor,
+        B: CommittedPostProcessor,
+        C: UncommittedPreProcessor,
+        D: UncommittedPostProcessor,
+    {
         if dataKeys.is_empty() {
             return Ok(Vec::new());
         }
@@ -255,11 +261,12 @@ impl<'session> CommandExecutor<'session> {
                                                 scanParams: ScanParams,
                                                 select: bool,
                                                 mut scanHooks: ScanHooks<A, B, C, D>) -> Result<Vec<(DataKey, RowData)>>
-        where
-            A: CommittedPreProcessor,
-            B: CommittedPostProcessor,
-            C: UncommittedPreProcessor,
-            D: UncommittedPostProcessor {
+    where
+        A: CommittedPreProcessor,
+        B: CommittedPostProcessor,
+        C: UncommittedPreProcessor,
+        D: UncommittedPostProcessor,
+    {
 
         // todo 使用table id 为 column family 标识
         let columnFamily = Session::getColFamily(&scanParams.table.name)?;
@@ -276,21 +283,59 @@ impl<'session> CommandExecutor<'session> {
                 let mut scanSearch = true;
 
                 if scanParams.tableFilter.is_some() {
-                    // todo 实现 index 完成
-                    if let Some(mut indexSearch) = self.getMostSuitableIndex(&scanParams)? {
-                        indexSearch.columnFamily = &columnFamily;
-                        indexSearch.tableMutationsCurrentTx = tableMutationsCurrentTx;
+                    match filter::processTableFilter(scanParams.tableFilter.as_ref().unwrap())? {
+                        TableFilterProcResult::IndexableTableFilterColHasNonesenseWhenIsPureOr => {
+                            // 没有 tableFilter
+                        }
+                        // 纯and 而且能够index的表达式的成果都是nonsense 用不了index
+                        TableFilterProcResult::AllIndexableTableFilterColsAreNonsenseWhenIsPureAnd { hasExprAbandonedByIndex } => {
+                            // 要是没有非其它以外的话 也是可以能当场计算的
+                            if hasExprAbandonedByIndex == false {
+                                let mut rowData = HashMap::new();
 
-                        indexSearch.mvccKeyBufferPtr = utils::refMut2Ptr(&mut mvccKeyBuffer);
+                                for column in &scanParams.table.columns {
+                                    rowData.insert(column.name.clone(), GraphValue::IgnoreColumnActualValue);
+                                }
 
-                        let mut dbRawIterator = self.session.getDBRawIterator(&columnFamily)?;
-                        indexSearch.dbRawIteratorPtr = utils::refMut2Ptr(&mut dbRawIterator);
+                                let value = scanParams.tableFilter.as_ref().unwrap().calc(Some(&rowData))?;
 
-                        indexSearch.scanHooksPtr = utils::refMut2Ptr(&mut scanHooks);
+                                if value.asBoolean()? == false {
+                                    return Ok(vec![]);
+                                }
+                            }
+                        }
+                        TableFilterProcResult::IndexableTableFilterColHasConflictWhenIsPureAnd => return Ok(vec![]),
+                        // 过滤条件没有写columnName,可以当场计算的
+                        TableFilterProcResult::NoColumnNameInTableFilter => {
+                            let value = scanParams.tableFilter.as_ref().unwrap().calc(None)?;
 
-                        satisfiedRows = self.searchByIndex::<A, B, C, D>(indexSearch)?;
+                            if value.asBoolean()? == false {
+                                return Ok(vec![]);
+                            }
+                        }
+                        TableFilterProcResult::MaybeCanUseIndex {
+                            indexableTableFilterColName_opValueVecVec: tableFilterColName_opValueVecVec,
+                            isPureAnd,
+                            isPureOr,
+                            orHasNonsense
+                        } => {
+                            // todo 实现 index 完成
+                            if let Some(mut indexSearch) = self.getMostSuitableIndex(&scanParams, tableFilterColName_opValueVecVec, isPureAnd, isPureOr, orHasNonsense)? {
+                                indexSearch.columnFamily = &columnFamily;
+                                indexSearch.tableMutationsCurrentTx = tableMutationsCurrentTx;
 
-                        scanSearch = false;
+                                indexSearch.mvccKeyBufferPtr = utils::refMut2Ptr(&mut mvccKeyBuffer);
+
+                                let mut dbRawIterator = self.session.getDBRawIterator(&columnFamily)?;
+                                indexSearch.dbRawIteratorPtr = utils::refMut2Ptr(&mut dbRawIterator);
+
+                                indexSearch.scanHooksPtr = utils::refMut2Ptr(&mut scanHooks);
+
+                                satisfiedRows = self.searchByIndex::<A, B, C, D>(indexSearch)?;
+
+                                scanSearch = false;
+                            }
+                        }
                     }
                 }
 
@@ -719,9 +764,9 @@ impl<'session> CommandExecutor<'session> {
     // todo 如何去应对重复的pointerKey
     pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
-        where
-            A: CommittedPointerKeyProcessor,
-            B: UncommittedPointerKeyProcessor,
+    where
+        A: CommittedPointerKeyProcessor,
+        B: UncommittedPointerKeyProcessor,
     {
         let mut keys = Vec::new();
 
@@ -850,6 +895,10 @@ impl<'session> CommandExecutor<'session> {
 pub(super) fn pruneRowData(mut rowData: RowData,
                            selectedColName: Option<&Vec<String>>) -> Result<RowData> {
     let mut prunedRowData: RowData = HashMap::with_capacity(rowData.len());
+
+    if selectedColName.is_none() {
+        return Ok(rowData);
+    }
 
     for selectedColName in selectedColName.unwrap() {
         let entry = rowData.remove_entry(selectedColName);

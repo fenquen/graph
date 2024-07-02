@@ -3,11 +3,11 @@ use crate::parser::op::{LikePattern, MathCmpOp, Op, SqlOp};
 use crate::{global, ok_merged, ok_not_merged, ok_some_vec, utils};
 use crate::parser::op;
 use anyhow::Result;
-use crate::executor::index::MergeResult;
+use crate::executor::optimizer::merge::MergeResult;
 
 /// 如果能融合的话 得到的vec的len是1 不然是2
 /// 融合是相当有必要的 不然后续index搜索的时候会有很多无谓的重复 对性能有损失的
-pub(super) fn opValueOrOpValue<'a>(op: Op, value: &'a GraphValue,
+pub fn opValueOrOpValue<'a>(op: Op, value: &'a GraphValue,
                                    targetOp: Op, targetValue: &'a GraphValue) -> Result<MergeResult<'a>> {
     assert!(op.permitByIndex());
     assert!(value.isConstant());

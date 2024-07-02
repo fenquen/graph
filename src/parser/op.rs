@@ -29,15 +29,15 @@ impl Op {
     pub fn permitByIndex(&self) -> bool {
         match self {
             Op::MathCmpOp(mathCmpOp) => {
-                if let MathCmpOp::NotEqual = mathCmpOp {
+                if let MathCmpOp::NotEqual = mathCmpOp { // 它是特例
                     false
                 } else {
                     true
                 }
             }
+            Op::SqlOp(_) => true,
             Op::LogicalOp(_) => false,
             Op::MathCalcOp(_) => false,
-            Op::SqlOp(_) => true
         }
     }
 }
