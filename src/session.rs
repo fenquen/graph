@@ -62,7 +62,7 @@ impl Session {
         let selectResultToFront = CommandExecutor::new(self).execute(&mut commands)?;
 
         // todo sql中执行了commit rollback使得当前tx提交后,当前不是inTx了,要是后边还有不是set的sql需要再重起1个tx
-        if self.autoCommit && needTx == false {
+        if self.autoCommit && needTx {
             self.commit()?;
         }
 
