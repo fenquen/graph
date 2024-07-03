@@ -1,7 +1,7 @@
 // Copyright (c) 2024 fenquen(https://github.com/fenquen) licensed under Apache 2.0
 use std::fs::read;
 use crate::graph_value::GraphValue;
-use crate::{ok_merged, ok_not_merged, ok_some_vec};
+use crate::{ok_merged, ok_not_merged};
 use crate::parser::op::{LikePattern, MathCmpOp, Op, SqlOp};
 use anyhow::Result;
 use crate::executor::optimizer::merge::MergeResult;
@@ -245,7 +245,7 @@ pub fn opValueAndOpValue<'a>(op: Op, value: &'a GraphValue,
                             return ok_merged!((Op::MathCmpOp(MathCmpOp::Equal), targetValue));
                         }
                     }
-                    // todo 如何应对 string的 like 'a%' 和 >='a' 的融合
+                    // todo 如何应对 string的 like 'a%' 和 >='a' 的融合 完成
                     (LikePattern::StartWith(string), Op::MathCmpOp(MathCmpOp::GreaterThan)) => {
                         // like 'r%' and >'a'
                         // like 'aa%' and >'a'

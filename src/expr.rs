@@ -63,12 +63,12 @@ impl Expr {
 
     /// 收集tableFilter上涉及到columnName的expr 把成果收集到dest对应的map
     /// 例如 ((a=1 or a=2) and (b>3 or b=1)) 会收集成为 “a”-> []
-    pub fn collectColNameValue(&self,
-                               columnName_opValuesVec: &mut HashMap<String, Vec<(Op, Vec<GraphValue>)>>,
-                               isPureAnd: &mut bool,
-                               isPureOr: &mut bool,
-                               hasExprAbandonedByIndex: &mut bool,
-                               columnNameExist: &mut bool) -> Result<GraphValue> {
+    pub fn collectIndexableColNameOpValue(&self,
+                                          columnName_opValuesVec: &mut HashMap<String, Vec<(Op, Vec<GraphValue>)>>,
+                                          isPureAnd: &mut bool,
+                                          isPureOr: &mut bool,
+                                          hasExprAbandonedByIndex: &mut bool,
+                                          columnNameExist: &mut bool) -> Result<GraphValue> {
         match self {
             Expr::Single(element) => {
                 let value = GraphValue::try_from(element)?;
@@ -79,10 +79,10 @@ impl Expr {
                 Ok(value)
             }
             Expr::BiDirection { leftExpr, op, rightExprs } => {
-                let leftValue = leftExpr.collectColNameValue(columnName_opValuesVec, isPureAnd, isPureOr, hasExprAbandonedByIndex, columnNameExist)?;
+                let leftValue = leftExpr.collectIndexableColNameOpValue(columnName_opValuesVec, isPureAnd, isPureOr, hasExprAbandonedByIndex, columnNameExist)?;
 
                 let rightValues: Vec<GraphValue> =
-                    rightExprs.iter().map(|rightExpr| { rightExpr.collectColNameValue(columnName_opValuesVec, isPureAnd, isPureOr, hasExprAbandonedByIndex, columnNameExist).unwrap() }).collect();
+                    rightExprs.iter().map(|rightExpr| { rightExpr.collectIndexableColNameOpValue(columnName_opValuesVec, isPureAnd, isPureOr, hasExprAbandonedByIndex, columnNameExist).unwrap() }).collect();
 
                 // 如何得到 columnName + 1 这样的index不能使用的情况
                 // val + (number >1 )

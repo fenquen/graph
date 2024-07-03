@@ -49,7 +49,7 @@ pub(in crate::executor) struct IndexSearch<'a> {
     /// 如果说index能够 包含filter的全部字段 和 包含select的全部字段,那么就不用到原表上再搜索了,能够直接就地应对
     pub indexLocalSearch: bool,
 
-    pub isAnd: bool,
+    pub isPureAnd: bool,
     pub scanParams: &'a ScanParams<'a, 'a, 'a>,
 
     // 以下的2个的字段算是拖油瓶的,不想让函数的参数写的长长的1串,都纳入到IndexSearch麾下
@@ -294,7 +294,7 @@ impl<'session> CommandExecutor<'session> {
             opValueVecVecAcrossIndexFilteredCols,
             indexLocalSearch,
             // selectedColNames,
-            isAnd: isPureAnd,
+            isPureAnd: isPureAnd,
             scanParams,
             columnFamily: utils::getDummyRef(),
             tableMutationsCurrentTx: None,
@@ -324,21 +324,43 @@ impl<'session> CommandExecutor<'session> {
         let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
         let mut indexDBRawIterator: DBRawIterator = snapshot.raw_iterator_cf(&indexColumnFamily);
 
-        // or的情况要使用index的话, 过滤条件的字段只能是1个 且是 idnex的打头字段
-        if indexSearch.isAnd == false {
-            assert_eq!(indexSearch.opValueVecVecAcrossIndexFilteredCols.len(), 1);
-        }
-
         // seek那都是要以index的第1个column为切入的, 后边的column是在index数据基础上的筛选
         let opValueVecVecOnIndex1stColumn = indexSearch.opValueVecVecAcrossIndexFilteredCols.first().unwrap();
 
         let mut rowDatas: HashMap<DataKey, (DataKey, RowData)> = HashMap::new();
         let mut dataKeys: HashSet<DataKey> = HashSet::new();
 
-        let mut lowerValueBuffer = BytesMut::new();
-        let mut upperValueBuffer = BytesMut::new();
-
         let mut buffer = BytesMut::new();
+
+        let mut beginPosition = 0usize;
+        if indexSearch.isPureAnd {
+            // 如果打头的是连续的"="可以将它们的binary合并
+            for opValueVecVec in indexSearch.opValueVecVecAcrossIndexFilteredCols {
+                // 单条脉络
+                if opValueVecVec.len() != 1 {
+                    break;
+                }
+
+                // 脉络上只有1对 opValue
+                let opValueVec = &opValueVecVec[0];
+                if opValueVec.len() != 1 {
+                    break;
+                }
+
+                let (op, value) = &opValueVec[0];
+                if let Op::MathCmpOp(MathCmpOp::Equal) = op {
+                    value.encode(&mut buffer)?;
+                } else {
+                    break
+                }
+
+                suffix_plus_plus!(beginPosition);
+            }
+
+
+        } else { // or的情况要使用index的话, 过滤条件的字段只能是1个 且是 idnex的打头字段
+            assert_eq!(indexSearch.opValueVecVecAcrossIndexFilteredCols.len(), 1);
+        }
 
         macro_rules! getKeyIfSome {
             ($dbRawIterator:expr) => {
@@ -368,7 +390,7 @@ impl<'session> CommandExecutor<'session> {
         // opValueVecOnIndex1stColumn 之间不管isAnd如何都是 or
         for opValueVecOnIndex1stColumn in opValueVecVecOnIndex1stColumn {
             // opValueVecOnIndex1stColumn 的各个元素(opValueVec)之间是不论是不是isAnd,都是or
-            if indexSearch.isAnd {
+            if indexSearch.isPureAnd {
                 // 不是用不用like的问题 是 column是不是string
                 if indexSearch.index1stFilterColIsString {
                     let applyFiltersOn1stColValue = |indexKey: &[Byte]| {
@@ -479,6 +501,9 @@ impl<'session> CommandExecutor<'session> {
 
                     continue;
                 }
+
+                let mut lowerValueBuffer = BytesMut::new();
+                let mut upperValueBuffer = BytesMut::new();
 
                 // 这只能应对不含有like的情况
                 let mut lowerValue = None;
@@ -748,7 +773,8 @@ impl<'session> CommandExecutor<'session> {
 
     // 对and来说  前边的column已经满足了 还需要进1步测试
     // 对or来说 不会调用该函数了 因为 要使用index的话 表的过滤条件的字段只能单个 且 要是 index的打头字段
-    fn further<A, B, C, D>(&self, indexKey: &[Byte],
+    fn further<A, B, C, D>(&self,
+                           indexKey: &[Byte],
                            indexSearch: &IndexSearch) -> Result<Option<IndexSearchResult>>
     where
         A: CommittedPreProcessor,
@@ -791,7 +817,7 @@ impl<'session> CommandExecutor<'session> {
             for opValueVecOnRemaingIndexCol in opValueVecVecOnRemaingIndexCol {
                 for (op, value) in opValueVecOnRemaingIndexCol {
                     let satisfy = remainingIndexColValue.calcOneToOne(*op, value)?.asBoolean()?;
-                    if indexSearch.isAnd {
+                    if indexSearch.isPureAnd {
                         if satisfy == false {
                             // 切换到下个 opValueVec
                             continue 'opValueVecVecOnRemaingIndexCol;
@@ -803,13 +829,13 @@ impl<'session> CommandExecutor<'session> {
                     }
                 }
 
-                if indexSearch.isAnd { // 如果是and 到了这边 说明 opValueVecOnRemaingIndexCol 上的筛选全都通过了(它们之间是and)
+                if indexSearch.isPureAnd { // 如果是and 到了这边 说明 opValueVecOnRemaingIndexCol 上的筛选全都通过了(它们之间是and)
                     satisfyOneOpValueVec = true;
                     break 'opValueVecVecOnRemaingIndexCol;
                 }
             }
 
-            if indexSearch.isAnd {
+            if indexSearch.isPureAnd {
                 // 当前这个的column上彻底失败了
                 if satisfyOneOpValueVec == false {
                     return Ok(None);
@@ -817,7 +843,7 @@ impl<'session> CommandExecutor<'session> {
             }
         }
 
-        if indexSearch.isAnd {
+        if indexSearch.isPureAnd {
             if indexSearch.indexLocalSearch {
                 match self.indexLocalSearch::<A, B, C, D>(columnValues, dataKey, indexSearch)? {
                     Some(rowData) => return Ok(Some(IndexSearchResult::Direct((dataKey, rowData)))),
@@ -917,25 +943,4 @@ impl<'session> CommandExecutor<'session> {
 pub(in crate::executor) enum IndexSearchResult {
     Direct((DataKey, RowData)),
     Redirect(DataKey),
-}
-
-#[macro_export]
-macro_rules! ok_some_vec {
-    ($($a:tt)*) => {
-        Ok(Some(vec![$($a)*]))
-    };
-}
-
-#[macro_export]
-macro_rules! ok_merged {
-    ($opValue:expr) => {
-        Ok(MergeResult::Merged($opValue))
-    };
-}
-
-#[macro_export]
-macro_rules! ok_not_merged {
-    ($($opValue:tt)*) => {
-        Ok(MergeResult::NotMerged(vec![$($opValue)*]))
-    };
 }

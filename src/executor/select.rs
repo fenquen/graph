@@ -199,6 +199,7 @@ impl<'session> CommandExecutor<'session> {
                     }
                 }
 
+                // todo selectRelRecursive 如何应对环状的情况 尤其是在不限制endDepth时候
                 // parse的时候已经限制了 要是recursive 是 [1..2) 之类的本质和没有recusive相同 会直接拦掉
                 if let Some(relationDepth) = selectRel.relationDepth {
                     let mut a = HashMap::new();
@@ -484,9 +485,9 @@ impl<'session> CommandExecutor<'session> {
     /// 使用 由端点不断下钻的套路
     pub(super) fn selectRelRecursive(&self,
                                      srcDataKeys: Vec<DataKey>, table: &Table, filter: Option<&Expr>,
-                                     pointerKeyTagNode: KeyTag,
+                                     pointerKeyTagOnNode: KeyTag,
                                      relation: &Table, relationFilter: Option<&Expr>,
-                                     pointerKeyTagRelation: KeyTag,
+                                     pointerKeyTagOnRelation: KeyTag,
                                      mut depthRemaining: usize) -> Result<Vec<(DataKey, RowData)>> {
         let lastRound = depthRemaining == 1;
 
@@ -499,16 +500,17 @@ impl<'session> CommandExecutor<'session> {
             // 得到对应的relation
             // relationFilter在过程中是都要的
             let relationDatas =
-                self.searchDataByPointerKeyPrefix(table, srcDataKey, pointerKeyTagNode, relation, relationFilter)?;
+                self.searchDataByPointerKeyPrefix(table, srcDataKey, pointerKeyTagOnNode, relation, relationFilter)?;
 
             // 遍历各个relationData
             for (relationDataKey, _) in &relationDatas {
-                // 得到这个relationDataKey上的destDataKeys,在过程中对dest没有过滤需要
+                // 得到这个relationDataKey上的destDataKeys
                 let destRowDatas =
+                    // 过程中对dest没有过滤需要
                     if lastRound == false {
-                        self.searchDataByPointerKeyPrefix(relation, *relationDataKey, pointerKeyTagRelation, table, None)?
+                        self.searchDataByPointerKeyPrefix(relation, *relationDataKey, pointerKeyTagOnRelation, table, None)?
                     } else {  // 说明已到了最后了,需要对destDataKeys使用filter
-                        self.searchDataByPointerKeyPrefix(relation, *relationDataKey, pointerKeyTagRelation, table, filter)?
+                        self.searchDataByPointerKeyPrefix(relation, *relationDataKey, pointerKeyTagOnRelation, table, filter)?
                     };
 
                 for (destDataKey, destRowData) in destRowDatas {
@@ -531,9 +533,9 @@ impl<'session> CommandExecutor<'session> {
 
         // 不断递归,以destRowDataKeysTotal起点再向下
         self.selectRelRecursive(destRowDataKeysTotal, table, filter,
-                                pointerKeyTagNode,
+                                pointerKeyTagOnNode,
                                 relation, relationFilter,
-                                pointerKeyTagRelation,
+                                pointerKeyTagOnRelation,
                                 prefix_minus_minus!(depthRemaining))
     }
 

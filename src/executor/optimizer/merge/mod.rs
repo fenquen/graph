@@ -2,6 +2,7 @@ use std::ops::Deref;
 use crate::graph_value::GraphValue;
 use crate::parser::op;
 use crate::parser::op::{LikePattern, Op, SqlOp};
+use anyhow::Result;
 
 pub(in crate::executor) mod or;
 pub(in crate::executor) mod and;
@@ -12,24 +13,24 @@ enum Logical {
     And,
 }
 
-pub enum AccumulateResult<'a> {
+pub(in crate::executor) enum AccumulateResult<'a> {
     Conflict,
     Nonsense,
     Ok(Vec<(Op, &'a GraphValue)>),
 }
 
-pub enum MergeResult<'a> {
+pub(in crate::executor) enum MergeResult<'a> {
     Conflict,
     Nonsense,
     NotMerged(Vec<(Op, &'a GraphValue)>),
     Merged((Op, &'a GraphValue)),
 }
 
-pub fn accumulateOr<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> anyhow::Result<AccumulateResult> {
+pub(in crate::executor) fn accumulateOr<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> anyhow::Result<AccumulateResult> {
     accumulate(opValueVec, Logical::Or)
 }
 
-pub fn accumulateAnd<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> anyhow::Result<AccumulateResult> {
+pub(in crate::executor) fn accumulateAnd<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> anyhow::Result<AccumulateResult> {
     accumulate(opValueVec, Logical::And)
 }
 
@@ -85,7 +86,7 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
                     //assert_eq!(logical, Logical::And);
 
                     // 说明有 a<0 and a>0 这样的矛盾显现了
-                    return anyhow::Result::<(AccumulateResult<'a>, bool)>::Ok((AccumulateResult::Conflict, merged));
+                    return Result::<(AccumulateResult<'a>, bool)>::Ok((AccumulateResult::Conflict, merged));
                 }
                 MergeResult::NotMerged(_) => {
                     accumulated.push((*previousOp, previousValue));
@@ -144,31 +145,6 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
             break;
         }
     }
-    // (a=1 or a=3 or a >0) 运算之后是 (a=1 or a>0) 还是能继续压缩融合的
-    // loop {
-    //     let clone = selfAccumulated.clone();
-    //     selfAccumulated.clear();
-    //
-    //     let mut a = false;
-    //     for (op, value) in clone {
-    //         match accumulate(op, value, &mut selfAccumulated)? {
-    //             (false, _) => return Ok(None),
-    //             (true, merged) => {
-    //                 if merged {
-    //                     a = true;
-    //                 }
-    //             }
-    //         }
-    //     }
-    //
-    //     // 说明未发生过融合,没有进1步融合压缩的可能了
-    //     if a == false {
-    //         break;
-    //     }
-    // }
-
-    // 丑陋的打补丁: 如果原始的opValueVec只包含like '%%' 那么其实也不会压缩
-    // for (op, value) in &selfAccumulated {}
 
     // 没有筛选的条件了 不管是or还是and都意味着是Nonsense
     if selfAccumulated.is_empty() {
@@ -176,4 +152,25 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
     }
 
     Ok(AccumulateResult::Ok(selfAccumulated))
+}
+
+#[macro_export]
+macro_rules! ok_some_vec {
+    ($($a:tt)*) => {
+        Ok(Some(vec![$($a)*]))
+    };
+}
+
+#[macro_export]
+macro_rules! ok_merged {
+    ($opValue:expr) => {
+        Ok(MergeResult::Merged($opValue))
+    };
+}
+
+#[macro_export]
+macro_rules! ok_not_merged {
+    ($($opValue:tt)*) => {
+        Ok(MergeResult::NotMerged(vec![$($opValue)*]))
+    };
 }

@@ -10,29 +10,28 @@ use anyhow::Result;
 use crate::executor::optimizer::merge;
 use crate::expr::Expr;
 
-#[derive(Default)]
-struct AndDesc<'a> {
-    parent: Option<Rc<AndDesc<'a>>>,
-    op: Option<Op>,
-    value: Option<&'a GraphValue>,
-}
-
 /// 提前感知到 and 的时候的 conflict 和 nonsense
 pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<TableFilterProcResult> {
-    // 要把tableFilter上涉及到的columnName的expr全部提取
+    // 要把tableFilter上涉及到的columnName的expr提取, 提取的是最底层的
     // tableFilter上的字段名->Vec<(op, value)>
     let mut indexableTableFilterColName_opValuesVec = HashMap::default();
 
-    // 单个字段上的各个opValue之间 以及 各column之间 是and还是or, 目前感觉实现的还是不够精细
+    // 单个字段上的各个opValue之间 以及 各column之间 是and还是or
     // 如果是and的话是真的纯and, 如果是or的话 不1定是纯or
     let mut isPureAnd = true;
     let mut isPureOr = true;
+    // tableFilter 有没有存在 count = value + 1 这类的含有column name 且不能为index使用的情况
     let mut hasExprAbandonedByIndex = false;
+    // tableFilter里有没有写columnName
     let mut columnNameExist = false;
 
-    tableFilter.collectColNameValue(&mut indexableTableFilterColName_opValuesVec, &mut isPureAnd, &mut isPureOr, &mut hasExprAbandonedByIndex, &mut columnNameExist)?;
+    tableFilter.collectIndexableColNameOpValue(&mut indexableTableFilterColName_opValuesVec,
+                                               &mut isPureAnd,
+                                               &mut isPureOr,
+                                               &mut hasExprAbandonedByIndex,
+                                               &mut columnNameExist)?;
 
-    // 包含pureOr和不是纯or
+    // 当不是pureAnd时候出现过nonsense
     let mut orHasNonsense = false;
 
     // 说明tableFilter上未写column名,那么tableFilter是可以直接计算的
@@ -106,8 +105,8 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
                 }
 
                 // 这个column上的筛选条件是不成立的
-                if confilctCount == opValueVecVec.capacity() {
-                    assert!(opValuesVec.is_empty());
+                if confilctCount == opValueVecVec.len() {
+                    assert!(a.is_empty());
                     return Ok(TableFilterProcResult::IndexableTableFilterColHasConflictWhenIsPureAnd);
                 }
 
@@ -194,6 +193,13 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
     );
 }
 
+#[derive(Default)]
+struct AndDesc<'a> {
+    parent: Option<Rc<AndDesc<'a>>>,
+    op: Option<Op>,
+    value: Option<&'a GraphValue>,
+}
+
 // 生成向上溯源的树 因为它只有parent
 fn and<'a>(opValuesVec: &'a [(Op, Vec<GraphValue>)],
            parent: Rc<AndDesc<'a>>,
@@ -241,7 +247,9 @@ fn and<'a>(opValuesVec: &'a [(Op, Vec<GraphValue>)],
 }
 
 pub(in crate::executor) enum TableFilterProcResult {
-    AllIndexableTableFilterColsAreNonsenseWhenIsPureAnd { hasExprAbandonedByIndex: bool },
+    AllIndexableTableFilterColsAreNonsenseWhenIsPureAnd {
+        hasExprAbandonedByIndex: bool
+    },
     IndexableTableFilterColHasConflictWhenIsPureAnd,
     IndexableTableFilterColHasNonesenseWhenIsPureOr,
     NoColumnNameInTableFilter,

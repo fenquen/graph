@@ -1,6 +1,6 @@
 use crate::graph_value::GraphValue;
 use crate::parser::op::{LikePattern, MathCmpOp, Op, SqlOp};
-use crate::{global, ok_merged, ok_not_merged, ok_some_vec, utils};
+use crate::{global, ok_merged, ok_not_merged, utils};
 use crate::parser::op;
 use anyhow::Result;
 use crate::executor::optimizer::merge::MergeResult;
