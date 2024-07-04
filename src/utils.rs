@@ -145,6 +145,16 @@ impl<'a, T> Iterator for VirtualSlice<'a, T> {
     }
 }
 
+impl<'a, T> VirtualSlice<'a, T> {
+    pub fn new(content: Vec<&'a [T]>) -> VirtualSlice <'a, T> {
+        Self {
+            content,
+            currentVecIndex: 0,
+            currentIndex: 0,
+        }
+    }
+}
+
 #[inline]
 pub fn getDummyRef<'a, T>() -> &'a T {
     unsafe { mem::transmute(ptr::null::<T>()) }

@@ -2,6 +2,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use anyhow::Result;
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
+use crate::types::Byte;
 
 pub trait BinaryCodec {
     type OutputType;
@@ -10,6 +11,8 @@ pub trait BinaryCodec {
     /// 因为读取string的时候不想copy_to_slice()产生copy 想直接对srcByteSlice切片 <br>
     /// 然而Bytes不提供position 且它的len()函数相当的坑 其实是remaining()
     fn decode(srcByteSlice: &mut MyBytes) -> Result<Self::OutputType>;
+
+    fn encode2Slice(&self, destByteSlice: &mut [Byte]) -> Result<usize>;
 
     fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()>;
 }
@@ -29,6 +32,19 @@ impl<T: BinaryCodec<OutputType=T>> BinaryCodec for Vec<T> {
         }
 
         Ok(vec)
+    }
+
+    fn encode2Slice(&self, destByteSlice: &mut [Byte]) -> Result<usize> {
+        let mut totalWriteCount = 0usize;
+
+        for t in self {
+            let writeCount = t.encode2Slice(destByteSlice)?;
+            totalWriteCount += writeCount;
+        }
+
+        assert_eq!(destByteSlice.len(), totalWriteCount);
+
+        Ok(totalWriteCount)
     }
 
     fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
@@ -99,7 +115,7 @@ mod test {
 
             // let iterator = tx.iterator(IteratorMode::Start);
 
-            tx.put_cf(& db.cf_handle("cf1").unwrap(), &[1][..], &[0][..]).unwrap();
+            tx.put_cf(&db.cf_handle("cf1").unwrap(), &[1][..], &[0][..]).unwrap();
             tx.commit().unwrap();
 
             db.create_cf("cf7", &Options::default()).unwrap();

@@ -23,6 +23,7 @@ use crate::executor::optimizer::merge::AccumulateResult;
 use crate::executor::store::{ScanHooks, ScanParams};
 use crate::parser::op;
 use crate::types::{CommittedPostProcessor, CommittedPreProcessor, UncommittedPostProcessor, UncommittedPreProcessor};
+use crate::utils::VirtualSlice;
 
 macro_rules! extractDataKeyFromIndexKey {
     ($indexKey: expr) => {
@@ -64,6 +65,21 @@ pub(in crate::executor) struct IndexSearch<'a> {
 
     /// 说明了index的1st的column是string
     pub index1stFilterColIsString: bool,
+
+    pub indexFilterColTypes: Vec<ColumnType>,
+}
+
+macro_rules! getKeyIfSome {
+    ($dbRawIterator:expr) => {
+        {
+            let key = $dbRawIterator.key();
+            if key.is_none() {
+                break;
+            }
+
+            key.unwrap() as &[Byte]
+        }
+    };
 }
 
 impl<'session> CommandExecutor<'session> {
@@ -167,7 +183,7 @@ impl<'session> CommandExecutor<'session> {
             }
 
             // 到这里的时候 opValueVecVecAcrossIndexFilteredCols 压缩过
-            // 对index的首个的column上的各个opValueVec 各个脉络 排序
+            // 对index的首个的column上的各个opValueVec 各个脉络 排序, opValueVec对应1个的脉络
             for opValueVec in &mut opValueVecVecAcrossIndexFilteredCols[0] {
                 opValueVec.sort_by(|(prevOp, prevValue), (nextOp, nextValue)| {
                     assert!(prevValue.isString());
@@ -190,6 +206,9 @@ impl<'session> CommandExecutor<'session> {
                         // like 相比其它op排到后边
                         (_, Op::SqlOp(SqlOp::Like)) => Ordering::Less,
                         (Op::SqlOp(SqlOp::Like), _) => Ordering::Greater,
+                        // equal 要到前边
+                        (Op::MathCmpOp(MathCmpOp::Equal), _) => Ordering::Less,
+                        (_, Op::MathCmpOp(MathCmpOp::Equal)) => Ordering::Greater,
                         _ => Ordering::Equal
                     }
                 });
@@ -218,19 +237,33 @@ impl<'session> CommandExecutor<'session> {
         // todo 要是有多个index都能应对tableFilter应该挑选哪个 需要考虑 select和filter的涵盖 完成
         // 挑选index 目前的原则有  index的本身能涵盖多少selectedColName, index能涵盖多少过滤条件
         // top 理想的情况是, index的本身能涵盖全部的selectedColName 且 能涵盖全部过滤条件
-        // 要是不能的话 都得要去原始的表上 还是优先 覆盖过滤条件多的
-        // 遍历table的各个index,筛掉不合适的
+        // 要是不能的话 都得要去原始的表上
+        //
         // indexFilteredColNames 由大到小排序
         candiateInices.sort_by(|prev, next| {
-            // 比较 filter用到的字段数量
+            // 比较 filter用到的字段数量 由大到小
             let compareFilterdColCount = next.2.len().cmp(&prev.2.len());
 
-            // 要是相同 然后去比较 select用到的字段数量
+            // filter用到的字段数量相同
             if let Ordering::Equal = compareFilterdColCount {
-                return next.1.cmp(&prev.1);
+
+                // 比较 select用到的字段数量 由大到小
+                let compareSelectedColCount = next.1.cmp(&prev.1);
+
+                // select用到的字段数量相同
+                if let Ordering::Equal = compareSelectedColCount {
+                    // (a=1 and r like '%a')
+                    // 1 个 index 命中 a 另个命中的是 r,
+                    if isPureAnd {
+
+                    }
+                }
+
+                return compareSelectedColCount;
+                //  like
             }
 
-            compareFilterdColCount
+            return compareFilterdColCount;
         });
 
         // 目前的话实现的比较粗糙,排前头的几个要是 indexFilteredColNames 大小相同 选第1个
@@ -244,6 +277,7 @@ impl<'session> CommandExecutor<'session> {
 
         // value 和 column的type是不是匹配
         let mut index1stFilterColIsString = false;
+        let mut indexFilterColTypes = Vec::with_capacity(indexFilteredColNames.len());
         for index in 0..indexFilteredColNames.len() {
             let columnNameFromIndexUsed = &indexFilteredColNames[index];
             for indexFilterColumn in &scanParams.table.columns {
@@ -256,6 +290,8 @@ impl<'session> CommandExecutor<'session> {
                         index1stFilterColIsString = true;
                     }
                 }
+
+                indexFilterColTypes.push(indexFilterColumn.type0);
 
                 let opValueVecVec = opValueVecVecAcrossIndexFilteredCols.get(index).unwrap();
 
@@ -294,7 +330,7 @@ impl<'session> CommandExecutor<'session> {
             opValueVecVecAcrossIndexFilteredCols,
             indexLocalSearch,
             // selectedColNames,
-            isPureAnd: isPureAnd,
+            isPureAnd,
             scanParams,
             columnFamily: utils::getDummyRef(),
             tableMutationsCurrentTx: None,
@@ -302,6 +338,7 @@ impl<'session> CommandExecutor<'session> {
             dbRawIteratorPtr: Default::default(),
             scanHooksPtr: Default::default(),
             index1stFilterColIsString,
+            indexFilterColTypes,
         };
 
         Ok(Some(indexSearch))
@@ -324,18 +361,41 @@ impl<'session> CommandExecutor<'session> {
         let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
         let mut indexDBRawIterator: DBRawIterator = snapshot.raw_iterator_cf(&indexColumnFamily);
 
-        // seek那都是要以index的第1个column为切入的, 后边的column是在index数据基础上的筛选
-        let opValueVecVecOnIndex1stColumn = indexSearch.opValueVecVecAcrossIndexFilteredCols.first().unwrap();
-
         let mut rowDatas: HashMap<DataKey, (DataKey, RowData)> = HashMap::new();
         let mut dataKeys: HashSet<DataKey> = HashSet::new();
 
-        let mut buffer = BytesMut::new();
+        // todo 如果是indexLocal的话 还是要应对重复数据 不像应对datakey那样容易 使用hashMap去掉重复的dataKey 完成
+        let mut processWhenPrecedingColSatisfied = |indexKey: &[Byte], beginPosition: usize| {
+            if let Some(indexSearchResult) = self.further::<A, B, C, D>(beginPosition, indexKey, &indexSearch)? {
+                match indexSearchResult {
+                    IndexSearchResult::Direct((dataKey, rowData)) => { rowDatas.insert(dataKey, (dataKey, rowData)); }
+                    IndexSearchResult::Redirect(dataKey) => { dataKeys.insert(dataKey); }
+                };
+            }
 
+            Result::<()>::Ok(())
+        };
+
+        let process =
+            |rowDatas: HashMap<DataKey, (DataKey, RowData)>, dataKeys: HashSet<DataKey>| {
+                if indexSearch.indexLocalSearch {
+                    let rowDatas = rowDatas.into_values().collect::<Vec<(DataKey, RowData)>>();
+                    return Result::<Vec<(DataKey, RowData)>>::Ok(rowDatas);
+                }
+
+                let dataKeys: Vec<DataKey> = dataKeys.into_iter().collect();
+                let scanHooks: &mut ScanHooks<A, B, C, D> = utils::ptr2RefMut(indexSearch.scanHooksPtr);
+                let rowDatas = self.getRowDatasByDataKeys(dataKeys.as_slice(), indexSearch.scanParams, scanHooks)?;
+
+                Result::<Vec<(DataKey, RowData)>>::Ok(rowDatas)
+            };
+
+        let mut prefixBuffer = BytesMut::new();
         let mut beginPosition = 0usize;
+
         if indexSearch.isPureAnd {
             // 如果打头的是连续的"="可以将它们的binary合并
-            for opValueVecVec in indexSearch.opValueVecVecAcrossIndexFilteredCols {
+            for opValueVecVec in &indexSearch.opValueVecVecAcrossIndexFilteredCols {
                 // 单条脉络
                 if opValueVecVec.len() != 1 {
                     break;
@@ -349,50 +409,51 @@ impl<'session> CommandExecutor<'session> {
 
                 let (op, value) = &opValueVec[0];
                 if let Op::MathCmpOp(MathCmpOp::Equal) = op {
-                    value.encode(&mut buffer)?;
+                    value.encode(&mut prefixBuffer)?;
                 } else {
-                    break
+                    break;
                 }
 
                 suffix_plus_plus!(beginPosition);
             }
-
-
         } else { // or的情况要使用index的话, 过滤条件的字段只能是1个 且是 idnex的打头字段
             assert_eq!(indexSearch.opValueVecVecAcrossIndexFilteredCols.len(), 1);
         }
 
-        macro_rules! getKeyIfSome {
-            ($dbRawIterator:expr) => {
-                {
-                    let key = $dbRawIterator.key();
-                    if key.is_none() {
-                        break;
-                    }
+        // 说明了tableFilter上全都是 "="
+        if beginPosition >= indexSearch.opValueVecVecAcrossIndexFilteredCols.len() {
+            indexDBRawIterator.seek(prefixBuffer.as_ref());
 
-                    key.unwrap() as &[Byte]
+            let indexKey = indexDBRawIterator.key();
+            if indexKey.is_some() {
+                let indexKey = indexKey.unwrap();
+
+                if prefixBuffer.as_ref() == extractIndexRowDataFromIndexKey!(indexKey) {
+                    processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
                 }
-            };
-        }
-
-        // todo 如果是indexLocal的话 还是要应对重复数据 不像应对datakey那样容易 使用hashMap去掉重复的dataKey 完成
-        let mut processWhen1stColSatisfied = |indexKey: &[Byte]| {
-            if let Some(indexSearchResult) = self.further::<A, B, C, D>(indexKey, &indexSearch)? {
-                match indexSearchResult {
-                    IndexSearchResult::Direct((dataKey, rowData)) => { rowDatas.insert(dataKey, (dataKey, rowData)); }
-                    IndexSearchResult::Redirect(dataKey) => { dataKeys.insert(dataKey); }
-                };
             }
 
-            Result::<()>::Ok(())
-        };
+            return process(rowDatas, dataKeys);
+        }
+
+        // seek那都是要以index的第1个column为切入的, 后边的column是在index数据基础上的筛选
+        let opValueVecVecOnIndexFollowing1stColumn = &indexSearch.opValueVecVecAcrossIndexFilteredCols[beginPosition];
+
+        // 当前应对不了string 它不是固定长度的
+        // 先要看看后边的第1个是不是string
+        let following1stColumnType = indexSearch.indexFilterColTypes[beginPosition];
+
+        // 包含 prefix 和 后边第1列的value的buffer
+        let mut lowerValueBuffer = BytesMut::with_capacity(prefixBuffer.len() + following1stColumnType.graphValueSize().unwrap());
+        lowerValueBuffer.put_slice(prefixBuffer.as_ref());
+        let mut upperValueBuffer = lowerValueBuffer.clone();
 
         // opValueVecOnIndex1stColumn 之间不管isAnd如何都是 or
-        for opValueVecOnIndex1stColumn in opValueVecVecOnIndex1stColumn {
+        for opValueVecOnIndexFollowing1stColumn in opValueVecVecOnIndexFollowing1stColumn {
             // opValueVecOnIndex1stColumn 的各个元素(opValueVec)之间是不论是不是isAnd,都是or
             if indexSearch.isPureAnd {
                 // 不是用不用like的问题 是 column是不是string
-                if indexSearch.index1stFilterColIsString {
+                if following1stColumnType == ColumnType::String {
                     let applyFiltersOn1stColValue = |indexKey: &[Byte]| {
                         // 对indexRowData来说只要第1列的value
                         let stringValue = {
@@ -406,7 +467,7 @@ impl<'session> CommandExecutor<'session> {
                             GraphValue::String(string)
                         };
 
-                        for (op, value) in opValueVecOnIndex1stColumn {
+                        for (op, value) in opValueVecOnIndexFollowing1stColumn {
                             if stringValue.calcOneToOne(*op, value)?.asBoolean()? == false {
                                 return Result::<bool>::Ok(false);
                             }
@@ -416,24 +477,26 @@ impl<'session> CommandExecutor<'session> {
                     };
 
                     // 如何应对 like 'a%' and >'a'
-                    for (op, value) in opValueVecOnIndex1stColumn {
+                    for (op, value) in opValueVecOnIndexFollowing1stColumn {
                         assert!(value.isString());
 
-                        buffer.clear();
-                        value.encode(&mut buffer)?;
+                        lowerValueBuffer.clear();
+                        value.encode(&mut lowerValueBuffer)?;
+
+                        VirtualSlice::new(vec![prefixBuffer.as_ref(), lowerValueBuffer.as_ref()]);
 
                         match op {
                             // like 'a' 没有通配,
                             Op::MathCmpOp(MathCmpOp::Equal) => {
-                                indexDBRawIterator.seek(buffer.as_ref());
+                                indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
                                 let indexKey = getKeyIfSome!(indexDBRawIterator);
                                 if applyFiltersOn1stColValue(indexKey)? {
-                                    processWhen1stColSatisfied(indexKey)?;
+                                    processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
                                 }
                             }
                             Op::MathCmpOp(MathCmpOp::GreaterThan) | Op::MathCmpOp(MathCmpOp::GreaterEqual) => {
-                                indexDBRawIterator.seek(buffer.as_ref());
+                                indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
                                 loop {
                                     let indexKey = getKeyIfSome!(indexDBRawIterator);
@@ -443,13 +506,13 @@ impl<'session> CommandExecutor<'session> {
                                         break;
                                     }
 
-                                    processWhen1stColSatisfied(indexKey)?;
+                                    processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                                     indexDBRawIterator.next();
                                 }
                             }
                             Op::MathCmpOp(MathCmpOp::LessEqual) | Op::MathCmpOp(MathCmpOp::LessThan) => {
-                                indexDBRawIterator.seek_for_prev(buffer.as_ref());
+                                indexDBRawIterator.seek_for_prev(lowerValueBuffer.as_ref());
 
                                 loop {
                                     let indexKey = getKeyIfSome!(indexDBRawIterator);
@@ -459,7 +522,7 @@ impl<'session> CommandExecutor<'session> {
                                         break;
                                     }
 
-                                    processWhen1stColSatisfied(indexKey)?;
+                                    processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                                     indexDBRawIterator.prev();
                                 }
@@ -469,10 +532,10 @@ impl<'session> CommandExecutor<'session> {
                                     LikePattern::StartWith(s) => { // like 'a%'
                                         let value = GraphValue::String(s);
 
-                                        buffer.clear();
-                                        value.encode(&mut buffer)?;
+                                        lowerValueBuffer.clear();
+                                        value.encode(&mut lowerValueBuffer)?;
 
-                                        indexDBRawIterator.seek(buffer.as_ref());
+                                        indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
                                         loop {
                                             let indexKey = getKeyIfSome!(indexDBRawIterator);
@@ -484,7 +547,7 @@ impl<'session> CommandExecutor<'session> {
                                                 break;
                                             }
 
-                                            processWhen1stColSatisfied(indexKey)?;
+                                            processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                                             indexDBRawIterator.next();
                                         }
@@ -502,8 +565,13 @@ impl<'session> CommandExecutor<'session> {
                     continue;
                 }
 
-                let mut lowerValueBuffer = BytesMut::new();
-                let mut upperValueBuffer = BytesMut::new();
+                // 以下是pureAnd 且不是 string
+
+                // let mut lowerValueBuffer = BytesMut::new();
+                // let mut upperValueBuffer = BytesMut::new();
+
+                let lowerValueSlice = &mut lowerValueBuffer[prefixBuffer.len()..];
+                let upperValueSlice = &mut upperValueBuffer[prefixBuffer.len()..];
 
                 // 这只能应对不含有like的情况
                 let mut lowerValue = None;
@@ -512,7 +580,7 @@ impl<'session> CommandExecutor<'session> {
                 let mut upperInclusive = false;
 
                 // opValueVec 上的各个筛选条件之间是and 而且已经压缩过的了
-                for (op, value) in opValueVecOnIndex1stColumn {
+                for (op, value) in opValueVecOnIndexFollowing1stColumn {
                     assert!(op.permitByIndex());
                     assert!(value.isConstant());
 
@@ -543,13 +611,13 @@ impl<'session> CommandExecutor<'session> {
                     }
                 }
 
-                lowerValueBuffer.clear();
-                upperValueBuffer.clear();
+                // lowerValueBuffer.clear();
+                // upperValueBuffer.clear();
 
                 match (lowerValue, upperValue) {
                     (Some(lowerValue), Some(upperValue)) => {
-                        lowerValue.encode(&mut lowerValueBuffer)?;
-                        upperValue.encode(&mut upperValueBuffer)?;
+                        lowerValue.encode2Slice(lowerValueSlice)?;
+                        upperValue.encode2Slice(upperValueSlice)?;
 
                         indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
@@ -568,7 +636,7 @@ impl<'session> CommandExecutor<'session> {
                                     }
 
                                     // 处理
-                                    processWhen1stColSatisfied(indexKey)?;
+                                    processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                                     indexDBRawIterator.next();
                                     continue;
@@ -588,13 +656,14 @@ impl<'session> CommandExecutor<'session> {
                             }
 
                             // 处理
-                            processWhen1stColSatisfied(indexKey)?;
+                            processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                             indexDBRawIterator.next();
                         }
                     }
                     (Some(lowerValue), None) => {
-                        lowerValue.encode(&mut lowerValueBuffer)?;
+                        lowerValue.encode2Slice(lowerValueSlice)?;
+
                         indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
                         let mut hasBeyondLower = false;
@@ -613,13 +682,14 @@ impl<'session> CommandExecutor<'session> {
                                 }
                             }
 
-                            processWhen1stColSatisfied(indexKey)?;
+                            processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                             indexDBRawIterator.next()
                         }
                     }
                     (None, Some(upperValue)) => {
-                        upperValue.encode(&mut upperValueBuffer)?;
+                        upperValue.encode2Slice(upperValueSlice)?;
+
                         indexDBRawIterator.seek_for_prev(upperValueBuffer.as_ref());
 
                         let mut startWithUpper = true;
@@ -638,7 +708,7 @@ impl<'session> CommandExecutor<'session> {
                                 }
                             }
 
-                            processWhen1stColSatisfied(indexKey)?;
+                            processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                             indexDBRawIterator.prev();
                         }
@@ -648,78 +718,78 @@ impl<'session> CommandExecutor<'session> {
             } else {
                 // or的时候想要用上index, tableFilter只能有1个字段 ,且是这个index的打头字段
                 // opValueVec 上的各个筛选条件之间是 or 而且已经压缩过的了
-                for (op, value) in opValueVecOnIndex1stColumn {
+                for (op, value) in opValueVecOnIndexFollowing1stColumn {
                     assert!(op.permitByIndex());
                     assert!(value.isConstant());
 
-                    buffer.clear();
-                    value.encode(&mut buffer)?;
+                    lowerValueBuffer.clear();
+                    value.encode(&mut lowerValueBuffer)?;
 
                     match op {
                         Op::MathCmpOp(MathCmpOp::Equal) => {
-                            indexDBRawIterator.seek(buffer.as_ref());
+                            indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
                             loop {
                                 let indexKey = getKeyIfSome!(indexDBRawIterator);
 
                                 // 说明satisfy
-                                if indexKey.starts_with(buffer.as_ref()) == false {
+                                if indexKey.starts_with(lowerValueBuffer.as_ref()) == false {
                                     break;
                                 }
 
-                                processWhen1stColSatisfied(indexKey)?;
+                                processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                                 indexDBRawIterator.next();
                             }
                         }
                         Op::MathCmpOp(MathCmpOp::GreaterEqual) => { // 应对 >= 是简单的 1路到底什么inclusive等都不用管
-                            indexDBRawIterator.seek(buffer.as_ref());
+                            indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
                             loop {
                                 let indexKey = getKeyIfSome!(indexDBRawIterator);
-                                processWhen1stColSatisfied(indexKey)?;
+                                processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                                 indexDBRawIterator.next()
                             }
                         }
                         Op::MathCmpOp(MathCmpOp::GreaterThan) => {
-                            indexDBRawIterator.seek(buffer.as_ref());
+                            indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
                             loop {
                                 let indexKey = getKeyIfSome!(indexDBRawIterator);
 
-                                if indexKey.starts_with(buffer.as_ref()) {
+                                if indexKey.starts_with(lowerValueBuffer.as_ref()) {
                                     indexDBRawIterator.next();
                                     continue;
                                 }
 
-                                processWhen1stColSatisfied(indexKey)?;
+                                processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                                 indexDBRawIterator.next()
                             }
                         }
                         Op::MathCmpOp(MathCmpOp::LessEqual) => {
-                            indexDBRawIterator.seek_for_prev(buffer.as_ref());
+                            indexDBRawIterator.seek_for_prev(lowerValueBuffer.as_ref());
 
                             loop {
                                 let indexKey = getKeyIfSome!(indexDBRawIterator);
-                                processWhen1stColSatisfied(indexKey)?;
+                                processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                                 indexDBRawIterator.prev();
                             }
                         }
                         Op::MathCmpOp(MathCmpOp::LessThan) => {
-                            indexDBRawIterator.seek_for_prev(buffer.as_ref());
+                            indexDBRawIterator.seek_for_prev(lowerValueBuffer.as_ref());
 
                             loop {
                                 let indexKey = getKeyIfSome!(indexDBRawIterator);
 
-                                if indexKey.starts_with(buffer.as_ref()) {
+                                if indexKey.starts_with(lowerValueBuffer.as_ref()) {
                                     indexDBRawIterator.prev();
                                     continue;
                                 }
 
-                                processWhen1stColSatisfied(indexKey)?;
+                                processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                                 indexDBRawIterator.prev();
                             }
@@ -731,21 +801,21 @@ impl<'session> CommandExecutor<'session> {
                                 LikePattern::StartWith(s) => {
                                     let value = GraphValue::String(s);
 
-                                    buffer.clear();
-                                    value.encode(&mut buffer)?;
+                                    lowerValueBuffer.clear();
+                                    value.encode(&mut lowerValueBuffer)?;
 
                                     let s = value.asString()?.as_bytes();
-                                    indexDBRawIterator.seek(buffer.as_ref());
+                                    indexDBRawIterator.seek(lowerValueBuffer.as_ref());
 
                                     loop {
                                         let indexKey = getKeyIfSome!(indexDBRawIterator);
 
-                                        /// 这和原先scan的是手动其检测key的打头很类似
+                                        // 这和原先scan的是手动其检测key的打头很类似
                                         if indexKey[GraphValue::STRING_CONTENT_OFFSET..].starts_with(s) == false {
                                             break;
                                         }
 
-                                        processWhen1stColSatisfied(indexKey)?;
+                                        processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
 
                                         indexDBRawIterator.next();
                                     }
@@ -759,21 +829,13 @@ impl<'session> CommandExecutor<'session> {
             }
         }
 
-        if indexSearch.indexLocalSearch {
-            let rowDatas = rowDatas.into_values().collect::<Vec<(DataKey, RowData)>>();
-            return Ok(rowDatas);
-        }
-
-        let dataKeys: Vec<DataKey> = dataKeys.into_iter().collect();
-        let scanHooks: &mut ScanHooks<A, B, C, D> = utils::ptr2RefMut(indexSearch.scanHooksPtr);
-        let rowDatas = self.getRowDatasByDataKeys(dataKeys.as_slice(), indexSearch.scanParams, scanHooks)?;
-
-        Ok(rowDatas)
+        process(rowDatas, dataKeys)
     }
 
     // 对and来说  前边的column已经满足了 还需要进1步测试
     // 对or来说 不会调用该函数了 因为 要使用index的话 表的过滤条件的字段只能单个 且 要是 index的打头字段
     fn further<A, B, C, D>(&self,
+                           beginPosition: usize,
                            indexKey: &[Byte],
                            indexSearch: &IndexSearch) -> Result<Option<IndexSearchResult>>
     where
@@ -792,7 +854,7 @@ impl<'session> CommandExecutor<'session> {
         let columnValues = Vec::try_from(&mut myBytesRowData)?;
 
         // index用到的只有1个的column
-        if indexSearch.opValueVecVecAcrossIndexFilteredCols.len() == 1 {
+        if indexSearch.opValueVecVecAcrossIndexFilteredCols.len() <= beginPosition {
             if indexSearch.indexLocalSearch {
                 match self.indexLocalSearch::<A, B, C, D>(columnValues, dataKey, indexSearch)? {
                     Some(rowData) => return Ok(Some(IndexSearchResult::Direct((dataKey, rowData)))),

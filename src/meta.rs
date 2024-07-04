@@ -388,6 +388,14 @@ impl ColumnType {
             _ => false
         }
     }
+
+    pub fn graphValueSize(&self) -> Option<usize> {
+        match self {
+            ColumnType::String => None,
+            ColumnType::Integer => Some(GraphValue::TYPE_BYTE_LEN + size_of::<i64>()),
+            ColumnType::Decimal => Some(GraphValue::TYPE_BYTE_LEN + size_of::<f64>())
+        }
+    }
 }
 
 impl FromStr for ColumnType {

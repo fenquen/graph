@@ -31,6 +31,12 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
                                                &mut hasExprAbandonedByIndex,
                                                &mut columnNameExist)?;
 
+    // 应对只有1个expr的情况  (a=1) 不会有or也不会有and,
+    // 那么这个时候isPureAnd是true 这是对的 isPureOr也是true 是错误的需要改对
+    if isPureAnd {
+        isPureOr = false;
+    }
+
     // 当不是pureAnd时候出现过nonsense
     let mut orHasNonsense = false;
 
@@ -167,6 +173,8 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
                         if isPureOr {
                             return Ok(TableFilterProcResult::IndexableTableFilterColHasNonesenseWhenIsPureOr);
                         }
+
+                        orHasNonsense = true;
 
                         // continue 'tableFilterColumnName;
 

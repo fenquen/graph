@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
+use std::mem;
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::Display;
 use crate::graph_error::GraphError;
@@ -66,13 +67,44 @@ impl BinaryCodec for GraphValue {
         }
     }
 
-    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
+    fn encode2Slice(&self, mut destByteSlice: &mut [Byte]) -> Result<usize> {
         match self {
-            GraphValue::Pending(s) => {
-                destByteSlice.put_u8(GraphValue::PENDING);
+            GraphValue::String(s) => {
+                destByteSlice.put_u8(GraphValue::STRING);
+                destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
+
                 destByteSlice.put_u32(s.len() as u32);
+                destByteSlice = &mut destByteSlice[size_of::<u32>()..];
+
                 destByteSlice.put_slice(s.as_bytes());
             }
+            GraphValue::Boolean(s) => {
+                destByteSlice.put_u8(GraphValue::BOOLEAN);
+                destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
+
+                destByteSlice.put_u8(if *s { 1 } else { 0 });
+            }
+            GraphValue::Integer(s) => {
+                destByteSlice.put_u8(GraphValue::INTEGER);
+                destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
+
+                destByteSlice.put_i64(*s);
+            }
+            GraphValue::Decimal(s) => {
+                destByteSlice.put_u8(GraphValue::DECIMAL);
+                destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
+
+                destByteSlice.put_f64(*s);
+            }
+            GraphValue::Null => destByteSlice.put_u8(GraphValue::NULL),
+            _ => panic!("impossible")
+        }
+
+        Ok(self.size().unwrap())
+    }
+
+    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
+        match self {
             GraphValue::String(s) => {
                 destByteSlice.put_u8(GraphValue::STRING);
                 destByteSlice.put_u32(s.len() as u32);
@@ -312,7 +344,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 <= &(*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float <= float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 <= &(*integer as f64))),
-                            (GraphValue::IgnoreColumnActualValue, _)|(_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
+                            (GraphValue::IgnoreColumnActualValue, _) | (_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -325,7 +357,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float == float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 == &(*integer as f64))),
                             (GraphValue::Null, GraphValue::Null) => Ok(GraphValue::Boolean(true)),
-                            (GraphValue::IgnoreColumnActualValue, _)|(_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
+                            (GraphValue::IgnoreColumnActualValue, _) | (_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -337,7 +369,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 < &(*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float < float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 < &(*integer as f64))),
-                            (GraphValue::IgnoreColumnActualValue, _)|(_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
+                            (GraphValue::IgnoreColumnActualValue, _) | (_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -349,7 +381,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 > &(*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float > float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 > &(*integer as f64))),
-                            (GraphValue::IgnoreColumnActualValue, _)|(_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
+                            (GraphValue::IgnoreColumnActualValue, _) | (_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -361,7 +393,7 @@ impl GraphValue {
                             (GraphValue::Decimal(float64), GraphValue::Integer(integer)) => Ok(GraphValue::Boolean(float64 >= &(*integer as f64))),
                             (GraphValue::Decimal(float), GraphValue::Decimal(float0)) => Ok(GraphValue::Boolean(float >= float0)),
                             (GraphValue::Integer(integer), GraphValue::Decimal(float64)) => Ok(GraphValue::Boolean(float64 >= &(*integer as f64))),
-                            (GraphValue::IgnoreColumnActualValue, _)|(_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
+                            (GraphValue::IgnoreColumnActualValue, _) | (_, GraphValue::IgnoreColumnActualValue) => Ok(GraphValue::Boolean(true)),
                             _ => Ok(GraphValue::Boolean(false)),
                         }
                     }
@@ -473,6 +505,20 @@ impl GraphValue {
             GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null => true,
             _ => false
         }
+    }
+
+    /// 固定长度的种类的byte len, 包含外壳
+    pub fn size(&self) -> Option<usize> {
+        let selfByteLen = match self {
+            GraphValue::String(s) => Self::LEN_BYTE_LEN + s.len(),
+            GraphValue::Boolean(b) => mem::size_of::<Byte>(),
+            GraphValue::Integer(integer) => mem::size_of::<i64>(),
+            GraphValue::Decimal(decimal) => mem::size_of::<f64>(),
+            GraphValue::Null => 0,
+            _ => return None
+        };
+
+        Some(Self::TYPE_BYTE_LEN + selfByteLen)
     }
 
     pub fn asIndexUseful(&self) -> Result<(&Op, &[GraphValue])> {

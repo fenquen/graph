@@ -95,4 +95,9 @@ link user(id= 6) to user(id=7) by likes(level =0)
     "sql": "select user[id](id in (1,2,34) )"
 }
 
+{
+    "requestType": "ExecuteSql",
+    "sql": "select user[id](id=1 and name like '%t%' )"
+}
+
 应对 id = num + 1 and

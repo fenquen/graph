@@ -108,11 +108,7 @@ impl<'session> CommandExecutor<'session> {
                     self.session.generateTx()?;
                     commitResult
                 }
-                Command::Rollback => {
-                    let rollbackResult = self.rollback()?;
-                    self.rollback()?;
-                    rollbackResult
-                }
+                Command::Rollback => self.rollback()?,
                 Command::Set(set) => self.set(set)?,
             };
 
@@ -173,8 +169,8 @@ mod test {
 
         impl Serialize for A {
             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-                where
-                    S: Serializer,
+            where
+                S: Serializer,
             {
                 match self {
                     A::S(string) => {
