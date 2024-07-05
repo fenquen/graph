@@ -183,48 +183,52 @@ impl<'session> CommandExecutor<'session> {
             }
 
             // 到这里的时候 opValueVecVecAcrossIndexFilteredCols 压缩过
-            // 对index的首个的column上的各个opValueVec 各个脉络 排序, opValueVec对应1个的脉络
-            for opValueVec in &mut opValueVecVecAcrossIndexFilteredCols[0] {
-                opValueVec.sort_by(|(prevOp, prevValue), (nextOp, nextValue)| {
-                    assert!(prevValue.isString());
-                    assert!(nextValue.isString());
-                    match (prevOp, nextOp) {
-                        (Op::SqlOp(SqlOp::Like), Op::SqlOp(SqlOp::Like)) => {
-                            // like null calc0的时候都已消化掉了 只会是string
-                            let prevLikePattern = op::determineLikePattern(prevValue.asString().unwrap()).unwrap();
-                            let nextLikePattern = op::determineLikePattern(nextValue.asString().unwrap()).unwrap();
+            // 对index的第1个的column上的各个opValueVec 各个脉络 排序, opValueVec对应1个的脉络, 是不是其它的column也要
+            for opValueVecVec in &mut opValueVecVecAcrossIndexFilteredCols {
+                for opValueVec in opValueVecVec {
+                    opValueVec.sort_by(|(prevOp, prevValue), (nextOp, nextValue)| {
+                        match (prevOp, nextOp) {
+                            (Op::SqlOp(SqlOp::Like), Op::SqlOp(SqlOp::Like)) => {
+                                assert!(prevValue.isString());
+                                assert!(nextValue.isString());
 
-                            // like 'a',calc0的时候都已消化掉了 不可能有 LikePattern::Equal
-                            // LikePattern::Redundant 已经在压缩的时候消化掉了 不可能有 LikePattern::Redundant
-                            // 在其中 like 'a%' 优先排到前边
-                            match (&prevLikePattern, &nextLikePattern) {
-                                (LikePattern::StartWith(_), _) => Ordering::Less,
-                                (_, LikePattern::StartWith(_)) => Ordering::Greater,
-                                _ => Ordering::Equal
+                                // like null calc0的时候都已消化掉了 只会是string
+                                let prevLikePattern = op::determineLikePattern(prevValue.asString().unwrap()).unwrap();
+                                let nextLikePattern = op::determineLikePattern(nextValue.asString().unwrap()).unwrap();
+
+                                // like 'a',calc0的时候都已消化掉了 不可能有 LikePattern::Equal
+                                // LikePattern::Redundant 已经在压缩的时候消化掉了 不可能有 LikePattern::Redundant
+                                // 在其中 like 'a%' 优先排到前边
+                                match (&prevLikePattern, &nextLikePattern) {
+                                    (LikePattern::StartWith(_), _) => Ordering::Less,
+                                    (_, LikePattern::StartWith(_)) => Ordering::Greater,
+                                    _ => Ordering::Equal
+                                }
                             }
+                            // like 相比其它op排到后边
+                            (_, Op::SqlOp(SqlOp::Like)) => Ordering::Less,
+                            (Op::SqlOp(SqlOp::Like), _) => Ordering::Greater,
+                            // equal 要到前边
+                            (Op::MathCmpOp(MathCmpOp::Equal), _) => Ordering::Less,
+                            (_, Op::MathCmpOp(MathCmpOp::Equal)) => Ordering::Greater,
+                            _ => Ordering::Equal
                         }
-                        // like 相比其它op排到后边
-                        (_, Op::SqlOp(SqlOp::Like)) => Ordering::Less,
-                        (Op::SqlOp(SqlOp::Like), _) => Ordering::Greater,
-                        // equal 要到前边
-                        (Op::MathCmpOp(MathCmpOp::Equal), _) => Ordering::Less,
-                        (_, Op::MathCmpOp(MathCmpOp::Equal)) => Ordering::Greater,
-                        _ => Ordering::Equal
-                    }
-                });
+                    });
 
-                // 如果第1个是like 而且不是 like 'a%', 结合上边的排序规则(like 'a%'相比别的like要更加靠前), 说明不存在like 'a%',
-                // 那么该index抛弃 因为它违反了如下的rule
-                // 如果是or, like只能是like 'a%',
-                // 如果是and ,如果出现了 like '%a',like '%a%',那么还要有 like 'a%' 和 不是like的相伴随
-                if let (Op::SqlOp(SqlOp::Like), value) = &opValueVec[0] {
-                    match op::determineLikePattern(value.asString()?)? {
-                        LikePattern::StartWith(_) => {}
-                        LikePattern::Contain(_) | LikePattern::EndWith(_) => continue 'loopIndex,
-                        _ => panic!("impossible")
+                    // 如果第1个是like 而且不是 like 'a%', 结合上边的排序规则(like 'a%'相比别的like要更加靠前), 说明不存在like 'a%',
+                    // 那么该index抛弃 因为它违反了如下的rule
+                    // 如果是or, like只能是like 'a%',
+                    // 如果是and ,如果出现了 like '%a',like '%a%',那么还要有 like 'a%' 和 不是like的相伴随
+                    if let (Op::SqlOp(SqlOp::Like), value) = &opValueVec[0] {
+                        match op::determineLikePattern(value.asString()?)? {
+                            LikePattern::StartWith(_) => {}
+                            LikePattern::Contain(_) | LikePattern::EndWith(_) => continue 'loopIndex,
+                            _ => panic!("impossible")
+                        }
                     }
                 }
             }
+
 
             // 不能直接放index 因为它是来源dbObject的 而for 循环结束后dbObject销毁了
             candiateInices.push((dbObjectIndex, indexSelectedColCount, indexFilteredColNames, opValueVecVecAcrossIndexFilteredCols));
@@ -240,27 +244,51 @@ impl<'session> CommandExecutor<'session> {
         // 要是不能的话 都得要去原始的表上
         //
         // indexFilteredColNames 由大到小排序
-        candiateInices.sort_by(|prev, next| {
+        candiateInices.sort_by(|(_, indexSelectedColCountPrev, indexFilteredColNamesPrev, opValueVecVecAcrossIndexFilteredColsPrev),
+                                (_, indexSelectedColCountNext, indexFilteredColNamesNext, opValueVecVecAcrossIndexFilteredColsNext)| {
+
             // 比较 filter用到的字段数量 由大到小
-            let compareFilterdColCount = next.2.len().cmp(&prev.2.len());
+            let compareFilterdColCount = indexFilteredColNamesNext.len().cmp(&indexFilteredColNamesPrev.len());
 
             // filter用到的字段数量相同
             if let Ordering::Equal = compareFilterdColCount {
 
                 // 比较 select用到的字段数量 由大到小
-                let compareSelectedColCount = next.1.cmp(&prev.1);
+                let compareSelectedColCount = indexSelectedColCountNext.cmp(&indexSelectedColCountPrev);
 
                 // select用到的字段数量相同
                 if let Ordering::Equal = compareSelectedColCount {
                     // (a=1 and r like '%a')
                     // 1 个 index 命中 a 另个命中的是 r,
                     if isPureAnd {
+                        fn a(opValueVecVecAcrossIndexFilteredCols: &Vec<Vec<Vec<(Op, GraphValue)>>>) -> usize {
+                            // 实现要求的数量
+                            let mut score = 0usize;
 
+                            'loopOpValueVecVecAcrossIndexFilteredColsNext:
+                            for opValueVecVec in opValueVecVecAcrossIndexFilteredCols {
+                                // column上的多条脉络
+                                for opValueVec in opValueVecVec {
+                                    // column上的1条脉络
+                                    for (op, value) in opValueVec {
+                                        match op {
+                                            Op::MathCmpOp(MathCmpOp::Equal) => {}
+                                            _ => break 'loopOpValueVecVecAcrossIndexFilteredColsNext
+                                        }
+                                    }
+                                }
+
+                                suffix_plus_plus!(score);
+                            }
+
+                            score
+                        }
+
+                        return a(opValueVecVecAcrossIndexFilteredColsNext).cmp(&a(opValueVecVecAcrossIndexFilteredColsPrev));
                     }
                 }
 
                 return compareSelectedColCount;
-                //  like
             }
 
             return compareFilterdColCount;
@@ -444,7 +472,7 @@ impl<'session> CommandExecutor<'session> {
         let following1stColumnType = indexSearch.indexFilterColTypes[beginPosition];
 
         // 包含 prefix 和 后边第1列的value的buffer
-        let mut lowerValueBuffer = BytesMut::with_capacity(prefixBuffer.len() + following1stColumnType.graphValueSize().unwrap());
+        let mut lowerValueBuffer = BytesMut::with_capacity(prefixBuffer.len() + following1stColumnType.graphValueSize().unwrap_or_else(|| 0usize));
         lowerValueBuffer.put_slice(prefixBuffer.as_ref());
         let mut upperValueBuffer = lowerValueBuffer.clone();
 
@@ -454,10 +482,16 @@ impl<'session> CommandExecutor<'session> {
             if indexSearch.isPureAnd {
                 // 不是用不用like的问题 是 column是不是string
                 if following1stColumnType == ColumnType::String {
-                    let applyFiltersOn1stColValue = |indexKey: &[Byte]| {
+                    let applyFiltersOnFollowing1stColValue = |indexKey: &[Byte]| {
                         // 对indexRowData来说只要第1列的value
                         let stringValue = {
                             let indexRowData = extractIndexRowDataFromIndexKey!(indexKey);
+
+                            if indexRowData.starts_with(prefixBuffer.as_ref()) == false {
+                                return Ok(false);
+                            }
+
+                            let indexRowData = &extractIndexRowDataFromIndexKey!(indexKey)[prefixBuffer.len()..];
 
                             assert_eq!(indexRowData[0], GraphValue::STRING);
 
@@ -480,29 +514,35 @@ impl<'session> CommandExecutor<'session> {
                     for (op, value) in opValueVecOnIndexFollowing1stColumn {
                         assert!(value.isString());
 
-                        lowerValueBuffer.clear();
-                        value.encode(&mut lowerValueBuffer)?;
+                        let mut bufferString = BytesMut::with_capacity(prefixBuffer.len() + value.size().unwrap());
+                        bufferString.put_slice(prefixBuffer.as_ref());
 
-                        VirtualSlice::new(vec![prefixBuffer.as_ref(), lowerValueBuffer.as_ref()]);
+                        unsafe { bufferString.set_len(bufferString.capacity()); }
+
+                        let slice = &mut bufferString.as_mut()[prefixBuffer.len()..];
+                        value.encode2Slice(slice)?;
+
+                        // lowerValueBuffer.clear();
+                        // value.encode(&mut lowerValueBuffer)?;
 
                         match op {
                             // like 'a' 没有通配,
                             Op::MathCmpOp(MathCmpOp::Equal) => {
-                                indexDBRawIterator.seek(lowerValueBuffer.as_ref());
+                                indexDBRawIterator.seek(bufferString.as_ref());
 
                                 let indexKey = getKeyIfSome!(indexDBRawIterator);
-                                if applyFiltersOn1stColValue(indexKey)? {
+                                if applyFiltersOnFollowing1stColValue(indexKey)? {
                                     processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
                                 }
                             }
                             Op::MathCmpOp(MathCmpOp::GreaterThan) | Op::MathCmpOp(MathCmpOp::GreaterEqual) => {
-                                indexDBRawIterator.seek(lowerValueBuffer.as_ref());
+                                indexDBRawIterator.seek(bufferString.as_ref());
 
                                 loop {
                                     let indexKey = getKeyIfSome!(indexDBRawIterator);
 
                                     // 用剩下的对stringValue校验
-                                    if applyFiltersOn1stColValue(indexKey)? == false {
+                                    if applyFiltersOnFollowing1stColValue(indexKey)? == false {
                                         break;
                                     }
 
@@ -512,13 +552,13 @@ impl<'session> CommandExecutor<'session> {
                                 }
                             }
                             Op::MathCmpOp(MathCmpOp::LessEqual) | Op::MathCmpOp(MathCmpOp::LessThan) => {
-                                indexDBRawIterator.seek_for_prev(lowerValueBuffer.as_ref());
+                                indexDBRawIterator.seek_for_prev(bufferString.as_ref());
 
                                 loop {
                                     let indexKey = getKeyIfSome!(indexDBRawIterator);
 
                                     // 用剩下的对stringValue校验
-                                    if applyFiltersOn1stColValue(indexKey)? == false {
+                                    if applyFiltersOnFollowing1stColValue(indexKey)? == false {
                                         break;
                                     }
 
@@ -532,10 +572,12 @@ impl<'session> CommandExecutor<'session> {
                                     LikePattern::StartWith(s) => { // like 'a%'
                                         let value = GraphValue::String(s);
 
-                                        lowerValueBuffer.clear();
-                                        value.encode(&mut lowerValueBuffer)?;
+                                        // lowerValueBuffer.clear();
+                                        // value.encode(&mut lowerValueBuffer)?;
 
-                                        indexDBRawIterator.seek(lowerValueBuffer.as_ref());
+                                        value.encode2Slice(slice)?;
+
+                                        indexDBRawIterator.seek(&bufferString.as_ref()[..bufferString.capacity() - 1]);
 
                                         loop {
                                             let indexKey = getKeyIfSome!(indexDBRawIterator);
@@ -543,7 +585,7 @@ impl<'session> CommandExecutor<'session> {
                                             // if indexKey[GraphValue::STRING_CONTENT_OFFSET..].starts_with(s.as_bytes()) {}
 
                                             // 用剩下的对stringValue校验
-                                            if applyFiltersOn1stColValue(indexKey)? == false {
+                                            if applyFiltersOnFollowing1stColValue(indexKey)? == false {
                                                 break;
                                             }
 
@@ -865,10 +907,11 @@ impl<'session> CommandExecutor<'session> {
             return Ok(Some(IndexSearchResult::Redirect(dataKey)));
         }
 
+        // 如不是indexLocalSearch 不能同时满足
         // 因为table的filter可能不会用光index上的全部的字段
-        let remainingIndexColValues = &columnValues[1..=indexSearch.opValueVecVecAcrossIndexFilteredCols.len()];
+        let remainingIndexColValues = &columnValues[beginPosition..indexSearch.opValueVecVecAcrossIndexFilteredCols.len()];
 
-        let opValueVecVecOnRemaingIndexCols = &indexSearch.opValueVecVecAcrossIndexFilteredCols[1..];
+        let opValueVecVecOnRemaingIndexCols = &indexSearch.opValueVecVecAcrossIndexFilteredCols[beginPosition..];
 
         // opValueVecVecOnRemaingIndexCol(脉络) 之间 or
         for (remainingIndexColValue, opValueVecVecOnRemaingIndexCol) in remainingIndexColValues.iter().zip(opValueVecVecOnRemaingIndexCols) {

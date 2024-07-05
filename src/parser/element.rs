@@ -285,7 +285,11 @@ impl Parser {
             let reachEnd = self.advanceChar(advanceCount);
             if reachEnd {
                 self.collectPendingChars(&mut currentElementVec);
-                self.elementVecVec.push(currentElementVec);
+
+                if currentElementVec.is_empty() == false {
+                    self.elementVecVec.push(currentElementVec);
+                }
+
                 break;
             }
         }

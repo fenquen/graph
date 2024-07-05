@@ -1,6 +1,7 @@
 use crate::{global, prefix_plus_plus, throw};
 use crate::parser::command::Command;
 use crate::parser::element::Element;
+use anyhow::Result;
 
 pub mod element;
 pub mod command;
@@ -24,7 +25,7 @@ pub struct Parser {
     currentElementIndex: usize,
 }
 
-pub fn parse(sql: &str) -> anyhow::Result<Vec<Command>> {
+pub fn parse(sql: &str) -> Result<Vec<Command>> {
     if sql.is_empty() {
         return Ok(vec![]);
     }
@@ -53,7 +54,7 @@ impl Parser {
         parser
     }
 
-    fn parse(&mut self) -> anyhow::Result<Vec<Command>> {
+    fn parse(&mut self) -> Result<Vec<Command>> {
         let mut commandVec = Vec::new();
 
         loop {
@@ -100,11 +101,11 @@ impl Parser {
         self.currentElementIndex = 0;
     }
 
-    fn throwSyntaxError<T>(&self) -> anyhow::Result<T> {
+    fn throwSyntaxError<T>(&self) -> Result<T> {
         throw!(&format!("syntax error, sql:{}", self.sql))
     }
 
-    fn throwSyntaxErrorDetail<T>(&self, message: &str) -> anyhow::Result<T> {
+    fn throwSyntaxErrorDetail<T>(&self, message: &str) -> Result<T> {
         throw!(&format!("syntax error, sql:{}, {}", self.sql, message))
     }
 }

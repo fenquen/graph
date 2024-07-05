@@ -77,7 +77,14 @@ link user(id= 6) to user(id=7) by likes(level =0)
 // ---------------------test index-----------------------------------------
 {
     "requestType": "ExecuteSql",
-    "sql": "create table if not exist user (id integer,name string);create index user_id_index on user[id];create index user_name_index on user[name]"
+    "sql": "create table if not exist user (id integer,name string);"
+}
+
+// create index user_id_index on user[id];create index user_name_index on user[name]
+
+{
+    "requestType": "ExecuteSql",
+    "sql": "create index user_id_index on user[id];create index user_id_name_index on user[id, name]"
 }
 
 {

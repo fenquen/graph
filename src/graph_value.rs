@@ -50,7 +50,7 @@ impl BinaryCodec for GraphValue {
                 // let currentPos = srcByteSlice.position();
                 // 不需要绝对的position 需要相对的 上边的绝对的currentPos用不到了
                 let slice = &*srcByteSlice.bytes.slice(..contentLen);
-                // 需要手动advence
+                // 需要手动advence,因为上边的提供的是个的小视图
                 srcByteSlice.bytes.advance(contentLen);
 
                 match typeTag {
@@ -71,28 +71,29 @@ impl BinaryCodec for GraphValue {
         match self {
             GraphValue::String(s) => {
                 destByteSlice.put_u8(GraphValue::STRING);
-                destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
+                // 以下是不需要的,它能够自动的干了需要的和上边的情况相同
+                //destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
 
                 destByteSlice.put_u32(s.len() as u32);
-                destByteSlice = &mut destByteSlice[size_of::<u32>()..];
+               // destByteSlice = &mut destByteSlice[size_of::<u32>()..];
 
                 destByteSlice.put_slice(s.as_bytes());
             }
             GraphValue::Boolean(s) => {
                 destByteSlice.put_u8(GraphValue::BOOLEAN);
-                destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
+                // destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
 
                 destByteSlice.put_u8(if *s { 1 } else { 0 });
             }
             GraphValue::Integer(s) => {
                 destByteSlice.put_u8(GraphValue::INTEGER);
-                destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
+                // destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
 
                 destByteSlice.put_i64(*s);
             }
             GraphValue::Decimal(s) => {
                 destByteSlice.put_u8(GraphValue::DECIMAL);
-                destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
+                // destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
 
                 destByteSlice.put_f64(*s);
             }

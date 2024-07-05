@@ -132,7 +132,6 @@ impl<'session> CommandExecutor<'session> {
     }
 }
 
-
 pub enum IterationCmd {
     Break,
     Continue,

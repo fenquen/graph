@@ -319,6 +319,7 @@ pub struct Table {
     #[serde(skip_serializing, skip_deserializing)]
     /// start from 1
     pub rowIdCounter: AtomicU64,
+    #[serde(skip_serializing, skip_deserializing)]
     pub createIfNotExist: bool,
     pub indexNames: Vec<String>,
 }
