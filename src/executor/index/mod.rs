@@ -183,7 +183,7 @@ impl<'session> CommandExecutor<'session> {
             }
 
             // 到这里的时候 opValueVecVecAcrossIndexFilteredCols 压缩过
-            // 对index的第1个的column上的各个opValueVec 各个脉络 排序, opValueVec对应1个的脉络, 是不是其它的column也要
+            // 对index的各个用到的column上的各个opValueVec 各个脉络 排序, opValueVec对应1个的脉络, 是不是其它的column也要
             for opValueVecVec in &mut opValueVecVecAcrossIndexFilteredCols {
                 for opValueVec in opValueVecVec {
                     opValueVec.sort_by(|(prevOp, prevValue), (nextOp, nextValue)| {
@@ -393,16 +393,17 @@ impl<'session> CommandExecutor<'session> {
         let mut dataKeys: HashSet<DataKey> = HashSet::new();
 
         // todo 如果是indexLocal的话 还是要应对重复数据 不像应对datakey那样容易 使用hashMap去掉重复的dataKey 完成
-        let mut processWhenPrecedingColSatisfied = |indexKey: &[Byte], beginPosition: usize| {
-            if let Some(indexSearchResult) = self.further::<A, B, C, D>(beginPosition, indexKey, &indexSearch)? {
-                match indexSearchResult {
-                    IndexSearchResult::Direct((dataKey, rowData)) => { rowDatas.insert(dataKey, (dataKey, rowData)); }
-                    IndexSearchResult::Redirect(dataKey) => { dataKeys.insert(dataKey); }
-                };
-            }
+        let mut processWhenPrefixFollowing1stColSatisfied =
+            |indexKey: &[Byte], beginPosition: usize| {
+                if let Some(indexSearchResult) = self.further::<A, B, C, D>(beginPosition + 1, indexKey, &indexSearch)? {
+                    match indexSearchResult {
+                        IndexSearchResult::Direct((dataKey, rowData)) => { rowDatas.insert(dataKey, (dataKey, rowData)); }
+                        IndexSearchResult::Redirect(dataKey) => { dataKeys.insert(dataKey); }
+                    };
+                }
 
-            Result::<()>::Ok(())
-        };
+                Result::<()>::Ok(())
+            };
 
         let process =
             |rowDatas: HashMap<DataKey, (DataKey, RowData)>, dataKeys: HashSet<DataKey>| {
@@ -448,6 +449,8 @@ impl<'session> CommandExecutor<'session> {
             assert_eq!(indexSearch.opValueVecVecAcrossIndexFilteredCols.len(), 1);
         }
 
+        log::info!("beginPosition:{}", beginPosition);
+
         // 说明了tableFilter上全都是 "="
         if beginPosition >= indexSearch.opValueVecVecAcrossIndexFilteredCols.len() {
             indexDBRawIterator.seek(prefixBuffer.as_ref());
@@ -457,7 +460,7 @@ impl<'session> CommandExecutor<'session> {
                 let indexKey = indexKey.unwrap();
 
                 if prefixBuffer.as_ref() == extractIndexRowDataFromIndexKey!(indexKey) {
-                    processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                    processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
                 }
             }
 
@@ -487,10 +490,12 @@ impl<'session> CommandExecutor<'session> {
                         let stringValue = {
                             let indexRowData = extractIndexRowDataFromIndexKey!(indexKey);
 
+                            // 不要忘了 prefixBuffer
                             if indexRowData.starts_with(prefixBuffer.as_ref()) == false {
                                 return Ok(false);
                             }
 
+                            // 去掉了prefixBuffer内容的index剩下的内容
                             let indexRowData = &extractIndexRowDataFromIndexKey!(indexKey)[prefixBuffer.len()..];
 
                             assert_eq!(indexRowData[0], GraphValue::STRING);
@@ -514,16 +519,19 @@ impl<'session> CommandExecutor<'session> {
                     for (op, value) in opValueVecOnIndexFollowing1stColumn {
                         assert!(value.isString());
 
-                        let mut bufferString = BytesMut::with_capacity(prefixBuffer.len() + value.size().unwrap());
-                        bufferString.put_slice(prefixBuffer.as_ref());
+                        // 因为string是变长的,只能现用现生成,不像是int等固定长度可以提前分配空间,性能上会降低
+                        let mut bufferString = {
+                            let mut bufferString = BytesMut::with_capacity(prefixBuffer.len() + value.size().unwrap());
+                            bufferString.put_slice(prefixBuffer.as_ref());
 
-                        unsafe { bufferString.set_len(bufferString.capacity()); }
+                            // buffer使用比较容易犯错的地方,你要在它上边打个小窗口(slice)要确保len还不止是capacity
+                            unsafe { bufferString.set_len(bufferString.capacity()); }
+
+                            bufferString
+                        };
 
                         let slice = &mut bufferString.as_mut()[prefixBuffer.len()..];
                         value.encode2Slice(slice)?;
-
-                        // lowerValueBuffer.clear();
-                        // value.encode(&mut lowerValueBuffer)?;
 
                         match op {
                             // like 'a' 没有通配,
@@ -532,7 +540,7 @@ impl<'session> CommandExecutor<'session> {
 
                                 let indexKey = getKeyIfSome!(indexDBRawIterator);
                                 if applyFiltersOnFollowing1stColValue(indexKey)? {
-                                    processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                    processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
                                 }
                             }
                             Op::MathCmpOp(MathCmpOp::GreaterThan) | Op::MathCmpOp(MathCmpOp::GreaterEqual) => {
@@ -546,7 +554,7 @@ impl<'session> CommandExecutor<'session> {
                                         break;
                                     }
 
-                                    processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                    processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                                     indexDBRawIterator.next();
                                 }
@@ -562,7 +570,7 @@ impl<'session> CommandExecutor<'session> {
                                         break;
                                     }
 
-                                    processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                    processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                                     indexDBRawIterator.prev();
                                 }
@@ -589,7 +597,7 @@ impl<'session> CommandExecutor<'session> {
                                                 break;
                                             }
 
-                                            processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                            processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                                             indexDBRawIterator.next();
                                         }
@@ -678,7 +686,7 @@ impl<'session> CommandExecutor<'session> {
                                     }
 
                                     // 处理
-                                    processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                    processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                                     indexDBRawIterator.next();
                                     continue;
@@ -698,7 +706,7 @@ impl<'session> CommandExecutor<'session> {
                             }
 
                             // 处理
-                            processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                            processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                             indexDBRawIterator.next();
                         }
@@ -724,7 +732,7 @@ impl<'session> CommandExecutor<'session> {
                                 }
                             }
 
-                            processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                            processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                             indexDBRawIterator.next()
                         }
@@ -750,7 +758,7 @@ impl<'session> CommandExecutor<'session> {
                                 }
                             }
 
-                            processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                            processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                             indexDBRawIterator.prev();
                         }
@@ -779,7 +787,7 @@ impl<'session> CommandExecutor<'session> {
                                     break;
                                 }
 
-                                processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                                 indexDBRawIterator.next();
                             }
@@ -789,7 +797,7 @@ impl<'session> CommandExecutor<'session> {
 
                             loop {
                                 let indexKey = getKeyIfSome!(indexDBRawIterator);
-                                processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                                 indexDBRawIterator.next()
                             }
@@ -805,7 +813,7 @@ impl<'session> CommandExecutor<'session> {
                                     continue;
                                 }
 
-                                processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                                 indexDBRawIterator.next()
                             }
@@ -815,7 +823,7 @@ impl<'session> CommandExecutor<'session> {
 
                             loop {
                                 let indexKey = getKeyIfSome!(indexDBRawIterator);
-                                processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                                 indexDBRawIterator.prev();
                             }
@@ -831,7 +839,7 @@ impl<'session> CommandExecutor<'session> {
                                     continue;
                                 }
 
-                                processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                                 indexDBRawIterator.prev();
                             }
@@ -857,7 +865,7 @@ impl<'session> CommandExecutor<'session> {
                                             break;
                                         }
 
-                                        processWhenPrecedingColSatisfied(indexKey, beginPosition)?;
+                                        processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
 
                                         indexDBRawIterator.next();
                                     }
@@ -895,7 +903,7 @@ impl<'session> CommandExecutor<'session> {
         let mut myBytesRowData = MyBytes::from(Bytes::from(Vec::from(indexRowData)));
         let columnValues = Vec::try_from(&mut myBytesRowData)?;
 
-        // index用到的只有1个的column
+        // 说明index本身上的对各个col的测试已经都测试通过了
         if indexSearch.opValueVecVecAcrossIndexFilteredCols.len() <= beginPosition {
             if indexSearch.indexLocalSearch {
                 match self.indexLocalSearch::<A, B, C, D>(columnValues, dataKey, indexSearch)? {

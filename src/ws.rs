@@ -138,65 +138,65 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
                 writeStream.send(Message::Text(GraphWsResponse::fail(&e).to_string())).await?;
             }
         }
-
-        async fn processGraphWsRequest(writeStream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
-                                       text: &str,
-                                       session: &mut Session,
-                                       remoteAddr: &SocketAddr) -> Result<()> {
-            let graphWsRequest = serde_json::from_str::<GraphWsRequest>(text);
-            if let Err(e) = graphWsRequest {
-                return Err(anyhow::Error::new(GraphError::new(&e.to_string())));
-            }
-
-            let graphWsRequest = graphWsRequest.unwrap();
-
-
-            log::info!("current thread: {:?}",thread::current().id());
-
-            let mut selectResultToFront = None;
-
-            match graphWsRequest.requestType {
-                RequestType::ExecuteSql => {
-                    if let None = graphWsRequest.sql {
-                        return Ok(());
-                    }
-
-                    let sql = graphWsRequest.sql.unwrap();
-                    if sql.is_empty() || sql.starts_with("--") {
-                        return Ok(());
-                    }
-
-                    selectResultToFront.replace(tokio::task::block_in_place(|| session.executeSql(&sql))?);
-                }
-                RequestType::TestParser => {
-                    if remoteAddr.ip().is_loopback() == false {
-                        throw!("test parser request can only be from localhost");
-                    }
-
-                    if let None = graphWsRequest.sql {
-                        return Ok(());
-                    }
-
-                    let sql = graphWsRequest.sql.unwrap();
-                    if sql.is_empty() || sql.starts_with("--") {
-                        return Ok(());
-                    }
-
-                    parser::parse(&sql)?;
-                }
-                _ => {}
-            }
-
-            match selectResultToFront {
-                Some(s) => writeStream.send(Message::Text(GraphWsResponse::successWithData(s).to_string())).await?,
-                None => writeStream.send(Message::Text(GraphWsResponse::success().to_string())).await?,
-            }
-
-            Ok(())
-        }
     }
 
     log::info!("ws client:{} disconnected", &remoteAddr);
+
+    Ok(())
+}
+
+async fn processGraphWsRequest(writeStream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+                               text: &str,
+                               session: &mut Session,
+                               remoteAddr: &SocketAddr) -> Result<()> {
+    let graphWsRequest = serde_json::from_str::<GraphWsRequest>(text);
+    if let Err(e) = graphWsRequest {
+        return Err(anyhow::Error::new(GraphError::new(&e.to_string())));
+    }
+
+    let graphWsRequest = graphWsRequest.unwrap();
+
+
+    log::info!("current thread: {:?}",thread::current().id());
+
+    let mut selectResultToFront = None;
+
+    match graphWsRequest.requestType {
+        RequestType::ExecuteSql => {
+            if let None = graphWsRequest.sql {
+                return Ok(());
+            }
+
+            let sql = graphWsRequest.sql.unwrap();
+            if sql.is_empty() || sql.starts_with("--") {
+                return Ok(());
+            }
+
+            selectResultToFront.replace(tokio::task::block_in_place(|| session.executeSql(&sql))?);
+        }
+        RequestType::TestParser => {
+            if remoteAddr.ip().is_loopback() == false {
+                throw!("test parser request can only be from localhost");
+            }
+
+            if let None = graphWsRequest.sql {
+                return Ok(());
+            }
+
+            let sql = graphWsRequest.sql.unwrap();
+            if sql.is_empty() || sql.starts_with("--") {
+                return Ok(());
+            }
+
+            parser::parse(&sql)?;
+        }
+        _ => {}
+    }
+
+    match selectResultToFront {
+        Some(s) => writeStream.send(Message::Text(GraphWsResponse::successWithData(s).to_string())).await?,
+        None => writeStream.send(Message::Text(GraphWsResponse::success().to_string())).await?,
+    }
 
     Ok(())
 }
