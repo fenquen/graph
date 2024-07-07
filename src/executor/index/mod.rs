@@ -34,7 +34,6 @@ macro_rules! extractDataKeyFromIndexKey {
     };
 }
 
-
 macro_rules! extractIndexRowDataFromIndexKey {
      ($indexKey: expr) => {
          &$indexKey[..($indexKey.len() - meta::DATA_KEY_BYTE_LEN)]
@@ -69,6 +68,7 @@ pub(in crate::executor) struct IndexSearch<'a> {
     pub indexFilterColTypes: Vec<ColumnType>,
 }
 
+#[macro_export]
 macro_rules! getKeyIfSome {
     ($dbRawIterator:expr) => {
         {
@@ -77,7 +77,7 @@ macro_rules! getKeyIfSome {
                 break;
             }
 
-            key.unwrap() as &[Byte]
+            key.unwrap() as &[crate::types::Byte]
         }
     };
 }
@@ -384,10 +384,9 @@ impl<'session> CommandExecutor<'session> {
         log::info!("searchByIndex, indexSearch.indexLocalSearch:{:?}",indexSearch.indexLocalSearch);
 
         let index = indexSearch.dbObjectIndex.asIndex()?;
-        let snapshot = self.session.getSnapshot()?;
 
         let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
-        let mut indexDBRawIterator: DBRawIterator = snapshot.raw_iterator_cf(&indexColumnFamily);
+        let mut indexDBRawIterator = self.session.getDBRawIterator(&indexColumnFamily)?;
 
         let mut rowDatas: HashMap<DataKey, (DataKey, RowData)> = HashMap::new();
         let mut dataKeys: HashSet<DataKey> = HashSet::new();
@@ -883,7 +882,7 @@ impl<'session> CommandExecutor<'session> {
     }
 
     // 对and来说  前边的column已经满足了 还需要进1步测试
-    // 对or来说 不会调用该函数了 因为 要使用index的话 表的过滤条件的字段只能单个 且 要是 index的打头字段
+    // 对or来说 不会调用该函数了 因为 它 要使用index的话 表的过滤条件的字段只能单个 且 要是 index的打头字段
     fn further<A, B, C, D>(&self,
                            beginPosition: usize,
                            indexKey: &[Byte],
@@ -1018,11 +1017,12 @@ impl<'session> CommandExecutor<'session> {
         Ok(Some(rowData))
     }
 
-    pub(in crate::executor) fn generateIndex(&self, table: &Table,
-                                             indexKeyBuffer: &mut BytesMut,
-                                             dataKey: DataKey,
-                                             rowData: &RowData,
-                                             trash: bool) -> Result<()> {
+    pub(in crate::executor) fn generateIndexData(&self,
+                                                 table: &Table,
+                                                 indexKeyBuffer: &mut BytesMut,
+                                                 dataKey: DataKey,
+                                                 rowData: &RowData,
+                                                 trash: bool) -> Result<()> {
         // 遍历各个index
         for indexName in &table.indexNames {
             let dbObjectIndex = self.getDBObjectByName(indexName)?;

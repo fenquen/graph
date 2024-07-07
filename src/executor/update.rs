@@ -136,7 +136,7 @@ impl<'session> CommandExecutor<'session> {
         let mut rowDataBuffer = BytesMut::new();
         for (ref oldDataKey, rowData) in &mut targetRowDatas {
             // 趁着rowData还是原始模样的时候
-            self.generateIndex(table, &mut keyBuffer, *oldDataKey, rowData, true)?;
+            self.generateIndexData(table, &mut keyBuffer, *oldDataKey, rowData, true)?;
 
             for (columnName, a) in &columnName_a {
                 match a {
@@ -176,7 +176,7 @@ impl<'session> CommandExecutor<'session> {
             self.session.writeUpdateDataMutation(&table.name, oldXmax, newData, newXmin, newXmax, origin);
 
             // 新的data的相应的index
-            self.generateIndex(table, &mut keyBuffer, newDataKey, &rowData, false)?;
+            self.generateIndexData(table, &mut keyBuffer, newDataKey, &rowData, false)?;
 
             // todo update时候如何干掉oldDataKey对应的index
         }

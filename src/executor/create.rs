@@ -1,8 +1,13 @@
 use std::sync::atomic::Ordering;
-use crate::{meta, throw, throwFormat, u64ToByteArrRef};
+use crate::{getKeyIfSome, global, meta, throw, throwFormat, u64ToByteArrRef};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::meta::{DBObject, Index, Table};
 use anyhow::Result;
+use bytes::{BufMut, BytesMut};
+use crate::codec::BinaryCodec;
+use crate::executor::store::ScanParams;
+use crate::session::Session;
+use crate::types::DBRawIterator;
 use crate::utils::HashMapExt;
 
 impl<'session> CommandExecutor<'session> {
@@ -54,7 +59,7 @@ impl<'session> CommandExecutor<'session> {
             throwFormat!("create index failed , target table {} not exist", index.tableName );
         }
         let mut dbObjectTargetTable = dbObjectTargetTable.unwrap();
-        // 隐含了index的对象需要是table
+        // 隐含了index的对象需要是table, 因为是mut的有lock用途, 下边生成index本身的data也不用担心同时表上的数据会有变动
         let targetTable = dbObjectTargetTable.asTableMut()?;
 
         let tableColumnNames: Vec<&str> = targetTable.columns.iter().map(|tableColumn| tableColumn.name.as_str()).collect();
@@ -64,6 +69,9 @@ impl<'session> CommandExecutor<'session> {
                 throwFormat!("table: {} does not contain column: {}", index.tableName ,targetColumnName);
             }
         }
+
+        // todo 新建index的时候要是表上已经有数据需要当场生成index数据
+        self.generateIndexDataForExistingTableData(targetTable, &index)?;
 
         // 分配id
         index.id = meta::DB_OBJECT_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
@@ -89,5 +97,43 @@ impl<'session> CommandExecutor<'session> {
         meta::STORE.metaStore.put(u64ToByteArrRef!(targetTable.id), serde_json::to_string(&DBObject::Table(targetTable.clone()))?.as_bytes())?;
 
         Ok(CommandExecResult::DdlResult)
+    }
+
+    fn generateIndexDataForExistingTableData(&self, table: &Table, index: &Index) -> Result<()> {
+        let mut dbRawIteratorTable: DBRawIterator = meta::STORE.dataStore.raw_iterator_cf(&Session::getColFamily(index.tableName.as_str())?);
+        dbRawIteratorTable.seek(meta::DATA_KEY_PATTERN);
+
+        let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
+
+        let mut indexKeyBuffer = BytesMut::new();
+
+        loop {
+            let dataKey = getKeyIfSome!(dbRawIteratorTable);
+
+            if dataKey.starts_with(meta::DATA_KEY_PATTERN) == false {
+                break;
+            }
+
+            let rowDataBinary = dbRawIteratorTable.value().unwrap();
+
+            let mut scanParams = ScanParams::default();
+            scanParams.table = table;
+            scanParams.selectedColumnNames = Some(&index.columnNames);
+
+            let rowData = self.readRowDataBinary(rowDataBinary, &scanParams)?.unwrap();
+
+            indexKeyBuffer.clear();
+
+            for indexColumnName in &index.columnNames {
+                let columnValue = rowData.get(indexColumnName).unwrap();
+                columnValue.encode(&mut indexKeyBuffer)?;
+            }
+
+            indexKeyBuffer.put_slice(dataKey);
+
+            meta::STORE.dataStore.put_cf(&indexColumnFamily, indexKeyBuffer.as_ref(), global::EMPTY_BINARY.as_slice())?;
+        }
+
+        Ok(())
     }
 }

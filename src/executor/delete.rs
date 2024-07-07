@@ -27,7 +27,7 @@ impl<'session> CommandExecutor<'session> {
 
         // 遍历添加当前tx对应的xmax
         for (targetDataKey, targetRowData) in targetRowDatas {
-            self.generateIndex(table, &mut buffer, targetDataKey, &targetRowData,true)?;
+            self.generateIndexData(table, &mut buffer, targetDataKey, &targetRowData, true)?;
 
             let oldXmax = self.generateDeleteDataXmax(&mut buffer, targetDataKey)?;
             self.session.writeDeleteDataMutation(&delete.tableName, oldXmax);

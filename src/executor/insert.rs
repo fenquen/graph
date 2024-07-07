@@ -34,7 +34,7 @@ impl<'session> CommandExecutor<'session> {
         // 处理相应的index
         // index的key应该是什么样的 columnData + dataKey
         let mut indexKeyBuffer = BytesMut::with_capacity(rowDataBinary.len() + meta::DATA_KEY_BYTE_LEN);
-        self.generateIndex(table, &mut indexKeyBuffer, dataKey, &rowData,false)?;
+        self.generateIndexData(table, &mut indexKeyBuffer, dataKey, &rowData, false)?;
 
         Ok(CommandExecResult::DmlResult)
     }

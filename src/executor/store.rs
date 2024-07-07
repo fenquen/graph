@@ -624,7 +624,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(satisfiedRows)
     }
 
-    fn readRowDataBinary(&self, rowBinary: &[Byte], scanParams: &ScanParams) -> Result<Option<RowData>> {
+    pub(super) fn readRowDataBinary(&self, rowBinary: &[Byte], scanParams: &ScanParams) -> Result<Option<RowData>> {
         // todo 使用meta对象的引用来控制ddl
         let columnNames = scanParams.table.columns.iter().map(|column| column.name.clone()).collect::<Vec<String>>();
 
