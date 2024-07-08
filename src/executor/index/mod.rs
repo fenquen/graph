@@ -1022,7 +1022,9 @@ impl<'session> CommandExecutor<'session> {
                                                  indexKeyBuffer: &mut BytesMut,
                                                  dataKey: DataKey,
                                                  rowData: &RowData,
-                                                 trash: bool) -> Result<()> {
+                                                 delete: bool) -> Result<()> {
+        let dataKeyBinary = &dataKey.to_be_bytes()[..];
+
         // 遍历各个index
         for indexName in &table.indexNames {
             let dbObjectIndex = self.getDBObjectByName(indexName)?;
@@ -1032,6 +1034,11 @@ impl<'session> CommandExecutor<'session> {
 
             indexKeyBuffer.clear();
 
+            // 如果是delete的话将txId写到头部
+            if delete {
+                indexKeyBuffer.put_u64(self.session.getTxId()?);
+            }
+
             // 遍历了index的各个column
             for indexColumnName in &index.columnNames {
                 let columnValue = rowData.get(indexColumnName).unwrap();
@@ -1039,9 +1046,9 @@ impl<'session> CommandExecutor<'session> {
             }
 
             // indexKey的末尾写上dataKey,这样就算row上的data相同也能区分
-            indexKeyBuffer.put_slice(u64ToByteArrRef!(dataKey));
+            indexKeyBuffer.put_slice(dataKeyBinary);
 
-            if trash {
+            if delete {
                 self.session.writeAddIndexMutation(&format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX), (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
             } else {
                 log::info!("generate indexName:{indexName}");

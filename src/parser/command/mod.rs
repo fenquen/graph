@@ -44,7 +44,7 @@ impl Command {
 
     pub fn isDml(&self) -> bool {
         match self {
-            Command::Insert(_) | Command::Link(_) | Command::Update(_) | Command::Unlink(_) => true,
+            Command::Insert(_) | Command::Link(_) | Command::Update(_) |Command::Delete(_)| Command::Unlink(_) => true,
             _ => false
         }
     }

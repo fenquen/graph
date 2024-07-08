@@ -70,9 +70,6 @@ impl<'session> CommandExecutor<'session> {
             }
         }
 
-        // todo 新建index的时候要是表上已经有数据需要当场生成index数据
-        self.generateIndexDataForExistingTableData(targetTable, &index)?;
-
         // 分配id
         index.id = meta::DB_OBJECT_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
 
@@ -83,6 +80,9 @@ impl<'session> CommandExecutor<'session> {
 
         // index对应的垃圾桶的column family,它只是个附庸在index上的纯rocks概念体系里的东西,不是db的概念
         self.session.createColFamily(format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX).as_str())?;
+
+        // todo 新建index的时候要是表上已经有数据需要当场生成index数据
+        self.generateIndexDataForExistingTableData(targetTable, &index)?;
 
         let indexId = u64ToByteArrRef!(index.id);
         let dbObjectIndex = DBObject::Index(index);
@@ -99,6 +99,8 @@ impl<'session> CommandExecutor<'session> {
         Ok(CommandExecResult::DdlResult)
     }
 
+    /// 当创建index的时候,要是table上已经有数据了需要对这些数据创建索引 <br>
+    /// 不使用tx snapshot等概念 直接对数据store本体上手
     fn generateIndexDataForExistingTableData(&self, table: &Table, index: &Index) -> Result<()> {
         let mut dbRawIteratorTable: DBRawIterator = meta::STORE.dataStore.raw_iterator_cf(&Session::getColFamily(index.tableName.as_str())?);
         dbRawIteratorTable.seek(meta::DATA_KEY_PATTERN);
@@ -110,7 +112,7 @@ impl<'session> CommandExecutor<'session> {
         loop {
             let dataKey = getKeyIfSome!(dbRawIteratorTable);
 
-            if dataKey.starts_with(meta::DATA_KEY_PATTERN) == false {
+            if dataKey.starts_with(&[meta::KEY_PREFIX_DATA]) == false {
                 break;
             }
 
@@ -132,6 +134,8 @@ impl<'session> CommandExecutor<'session> {
             indexKeyBuffer.put_slice(dataKey);
 
             meta::STORE.dataStore.put_cf(&indexColumnFamily, indexKeyBuffer.as_ref(), global::EMPTY_BINARY.as_slice())?;
+
+            dbRawIteratorTable.next();
         }
 
         Ok(())

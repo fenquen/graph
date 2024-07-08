@@ -80,7 +80,10 @@ link user(id= 6) to user(id=7) by likes(level =0)
     "sql": "create table if not exist user (id integer,name string);"
 }
 
-// create index user_id_index on user[id];create index user_name_index on user[name]
+{
+    "requestType": "ExecuteSql",
+    "sql": "insert into user values (1,'tom1');insert into user values (2,'tom2');insert into user values (3,'tom3');insert into user values (4,'tom4');insert into user values (5,'tom5');insert into user values (6,'tom6');insert into user values (7,'tom7');insert into user values (8,'tom8')"
+}
 
 {
     "requestType": "ExecuteSql",
@@ -89,7 +92,7 @@ link user(id= 6) to user(id=7) by likes(level =0)
 
 {
     "requestType": "ExecuteSql",
-    "sql": "insert into user values (1,'tom1');insert into user values (2,'tom2');insert into user values (3,'tom3');insert into user values (4,'tom4');insert into user values (5,'tom5');insert into user values (6,'tom6');insert into user values (7,'tom7');insert into user values (8,'tom8')"
+    "sql": "select user[id](id=1 and name like '%t%')"
 }
 
 {
@@ -100,11 +103,6 @@ link user(id= 6) to user(id=7) by likes(level =0)
 {
     "requestType": "ExecuteSql",
     "sql": "select user[id](id in (1,2,34) )"
-}
-
-{
-    "requestType": "ExecuteSql",
-    "sql": "select user[id](id=1 and name like '%t%' )"
 }
 
 应对 id = num + 1 and

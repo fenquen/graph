@@ -93,10 +93,10 @@ impl Session {
 
             if (currentTxId - *meta::TX_ID_START_UP.getRef()) % meta::TX_UNDERGOING_MAX_COUNT as u64 == 0 {
                 // TX_CONCURRENCY_MAX
-                tokio::task::spawn_blocking(move || {
+               // tokio::task::spawn_blocking(move || {
                     let thresholdTx = currentTxId - meta::TX_UNDERGOING_MAX_COUNT as u64;
                     CommandExecutor::vaccumData(thresholdTx);
-                });
+               // });
 
                 // todo 干掉columnFamily "tx_id" 老的txId 完成
                 self.dataStore.delete_range_cf(&cf, u64ToByteArrRef!(meta::TX_ID_INVALID), u64ToByteArrRef!(currentTxId))?;

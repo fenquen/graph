@@ -50,7 +50,7 @@ impl<'session> CommandExecutor<'session> {
 
         let snapshot = self.session.getSnapshot()?;
 
-        // 应对多个tx对相同rowId的数据update而产生的多条新data
+        // 应对多个tx对相同rowId的数据update而产生的多dataStore.cf_handle(tableName.as_str())条新data
         let originDataKeyKey = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, extractRowIdFromDataKey!(dataKey)));
         let originDataKey = snapshot.get_cf(columnFamily, originDataKeyKey)?.unwrap();
         let originDataKey = byte_slice_to_u64!(originDataKey);

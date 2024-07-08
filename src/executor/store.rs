@@ -643,7 +643,7 @@ impl<'session> CommandExecutor<'session> {
         }
 
         if scanParams.tableFilter.is_none() {
-            return Ok(Some(pruneRowData(rowData, scanParams.selectedColumnNames)?));
+            return Ok(Some(rowData));
         }
 
         // todo  select user[id](name like 'tom') 因为未选取name 使得name过滤的时候报错 不能提前prune 完成

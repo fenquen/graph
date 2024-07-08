@@ -113,13 +113,13 @@ pub const POINTER_KEY_TX_ID_OFFSET: usize = POINTER_KEY_MVCC_KEY_TAG_OFFSET + KE
 
 // ---------------------------------------------------------------------------------------
 
-pub const TX_ID_BYTE_LEN: usize = mem::size_of::<TxId>();
+pub const TX_ID_BYTE_LEN: usize = size_of::<TxId>();
 pub const TX_ID_INVALID: TxId = 0;
 pub const TX_ID_FROZEN: TxId = 2;
 pub const TX_ID_MIN: TxId = 3;
 pub const TX_ID_MAX: TxId = TxId::MAX;
 
-pub const TX_UNDERGOING_MAX_COUNT: usize = 100000;
+pub const TX_UNDERGOING_MAX_COUNT: usize = 1;
 
 // ------------------------------------------------------------------------------------------
 

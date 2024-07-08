@@ -1,124 +1,163 @@
+use std::ops::Deref;
 use crate::executor::CommandExecutor;
-use crate::{extractKeyTagFromMvccKey, extractTxIdFromMvccKey, keyPrefixAddRowId,
-            global, meta, u64ToByteArrRef, byte_slice_to_u64, extractRowIdFromKeySlice, extractMvccKeyTagFromPointerKey};
+use crate::{extractKeyTagFromMvccKey, extractTxIdFromMvccKey, getKeyIfSome, keyPrefixAddRowId};
+use crate::{u64ToByteArrRef, byte_slice_to_u64, extractRowIdFromKeySlice, extractMvccKeyTagFromPointerKey};
+use crate::{global, meta};
 use crate::types::{ColumnFamily, DBRawIterator, TxId};
 use anyhow::Result;
 use bytes::{BufMut, BytesMut};
+use dashmap::mapref::multiple::RefMulti;
 use crate::executor::mvcc::BytesMutExt;
+use crate::meta::DBObject;
 
 impl<'session> CommandExecutor<'session> {
     pub fn vaccumData(thresholdTxIdInclude: TxId) -> Result<()> {
-        let tableNames: Vec<String> = meta::NAME_DB_OBJ.iter().map(|pair| pair.getName().clone()).collect();
+        log::info!("vaccum");
+
+        let nameDBObjectVec: Vec<RefMulti<String, DBObject>> = meta::NAME_DB_OBJ.iter().map(|pair| pair).collect();
 
         let dataStore = &meta::STORE.dataStore;
 
-        for tableName in tableNames {
-            if tableName == meta::COLUMN_FAMILY_NAME_TX_ID {
+        for nameDBObject in nameDBObjectVec {
+            let dbObject = nameDBObject.value();
+
+            let dbObjectName = dbObject.getName();
+
+            if dbObjectName == meta::COLUMN_FAMILY_NAME_TX_ID {
                 continue;
             }
 
-            // dataKey mvccKey pointerKey originDataKeyKey
-            let columnFamily: Option<ColumnFamily> = dataStore.cf_handle(tableName.as_str());
+            let columnFamily: Option<ColumnFamily> = dataStore.cf_handle(dbObjectName.as_str());
             if let None = columnFamily {
                 continue;
             }
 
             let columnFamily = columnFamily.unwrap();
-            let mut dbRawIteratorMvccKey: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
-            let mut dbRawIteratorPointerKey: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
 
-            // 先去scan xmax的mvccKey
-            dbRawIteratorMvccKey.seek(meta::MVCC_KEY_PATTERN);
+            match dbObject {
+                // 缺点 因为tx不是在key的头部需要全表扫描
+                DBObject::Table(_) | DBObject::Relation(_) => {
+                    let mut dbRawIteratorMvccKey: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
+                    let mut dbRawIteratorPointerKey: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
 
-            let mut keyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+                    // 先去scan xmax的mvccKey
+                    dbRawIteratorMvccKey.seek(meta::MVCC_KEY_PATTERN);
 
-            loop {
-                let mvccKey = dbRawIteratorMvccKey.key();
-                if let None = mvccKey {
-                    break;
-                }
+                    let mut keyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
 
-                let mvccKey = mvccKey.unwrap();
+                    loop {
+                        let mvccKey = getKeyIfSome!(dbRawIteratorMvccKey);
 
-                // 过头了
-                if mvccKey.starts_with(&[meta::KEY_PREFIX_MVCC]) == false {
-                    break;
-                }
+                        // 过头了
+                        if mvccKey.starts_with(&[meta::KEY_PREFIX_MVCC]) == false {
+                            break;
+                        }
 
-                // keyTag需要是xmax
-                if meta::MVCC_KEY_TAG_XMAX != extractKeyTagFromMvccKey!(mvccKey) {
-                    continue;
-                }
+                        // keyTag需要是xmax
+                        if meta::MVCC_KEY_TAG_XMAX != extractKeyTagFromMvccKey!(mvccKey) {
+                            continue;
+                        }
 
-                let rowId = extractRowIdFromKeySlice!(mvccKey);
-                let xmax = extractTxIdFromMvccKey!(mvccKey);
+                        let rowId = extractRowIdFromKeySlice!(mvccKey);
+                        let xmax = extractTxIdFromMvccKey!(mvccKey);
 
-                // 说明rowId对应的体系都需要干掉
-                if thresholdTxIdInclude >= xmax && xmax != meta::TX_ID_INVALID {
-                    for keyPrefix in meta::KEY_PREFIX_DATA..=meta::KEY_PPREFIX_ORIGIN_DATA_KEY {
-                        dataStore.delete_range_cf(&columnFamily,
-                                                  u64ToByteArrRef!(keyPrefixAddRowId!(keyPrefix, rowId)),
-                                                  u64ToByteArrRef!(keyPrefixAddRowId!(keyPrefix, rowId + 1)))?;
-                    }
-
-                    continue;
-                }
-
-                // thresholdTxIdInclude 后边时候干掉的
-                if xmax != meta::TX_ID_INVALID {
-                    continue;
-                }
-
-                // 以下是原先为了应对txId耗尽回卷应对 其实没有必要
-                // 因为不像pg使用的是32bit的,txId使用64bit的tx能够根本上应对该问题
-                // pg使用32bit原因还是因为当初考虑的不够了 因为当时硬件性能低下每秒处理上百个tx都是够呛的
-                // https://my.oschina.net/postgresqlchina/blog/5547139
-                // 64bit的tx 就算每秒100000个tx也能使用600万year不到
-
-                if false {
-                    // 这里的都是xmax是0的 说明要保留的 xmin的tx要变为TX_ID_FROZEN
-                    // 应对的是data本身部分 也可以说是mvccKey部分
-                    keyBuffer.writeDataMvccXminByRowId(rowId, meta::TX_ID_FROZEN);
-                    // 如果xmin已经是TX_ID_FROZEN了需要跳过
-                    if dataStore.get_cf(&columnFamily, keyBuffer.as_ref())?.is_some() {
-                        continue;
-                    }
-                    dataStore.put_cf(&columnFamily, keyBuffer.as_ref(), global::EMPTY_BINARY)?;
-
-                    // todo 如何应对pointerKey 不需要了
-                    {
-                        // 定位到pointerKey部分
-                        let pointerKeyPrefix = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_POINTER, rowId));
-                        dbRawIteratorPointerKey.seek(pointerKeyPrefix);
-
-                        loop {
-                            let pointerKey = dbRawIteratorPointerKey.key();
-                            if let None = pointerKey {
-                                break;
+                        // rowId对应的各个体系都需要干掉, dataKey mvccKey pointerKey originDataKeyKey
+                        if thresholdTxIdInclude >= xmax && xmax != meta::TX_ID_INVALID {
+                            for keyPrefix in meta::KEY_PREFIX_DATA..=meta::KEY_PPREFIX_ORIGIN_DATA_KEY {
+                                dataStore.delete_range_cf(&columnFamily,
+                                                          u64ToByteArrRef!(keyPrefixAddRowId!(keyPrefix, rowId)),
+                                                          u64ToByteArrRef!(keyPrefixAddRowId!(keyPrefix, rowId + 1)))?;
                             }
 
-                            let pointerKey = pointerKey.unwrap();
+                            continue;
+                        }
 
-                            // 过头了
-                            if pointerKey.starts_with(pointerKeyPrefix) == false {
-                                break;
-                            }
+                        // thresholdTxIdInclude 后边时候干掉的
+                        if xmax != meta::TX_ID_INVALID {
+                            continue;
+                        }
 
-                            // 需要的是xmin
-                            if meta::MVCC_KEY_TAG_XMIN != extractMvccKeyTagFromPointerKey!(pointerKey) {
+                        // 以下是原先为了应对txId耗尽回卷应对 其实没有必要
+                        // 因为不像pg使用的是32bit的,txId使用64bit的tx能够根本上应对该问题
+                        // pg使用32bit原因还是因为当初考虑的不够了 因为当时硬件性能低下每秒处理上百个tx都是够呛的
+                        // https://my.oschina.net/postgresqlchina/blog/5547139
+                        // 64bit的tx 就算每秒100000个tx也能使用600万year不到
+
+                        if false {
+                            // 这里的都是xmax是0的 说明要保留的 xmin的tx要变为TX_ID_FROZEN
+                            // 应对的是data本身部分 也可以说是mvccKey部分
+                            keyBuffer.writeDataMvccXminByRowId(rowId, meta::TX_ID_FROZEN);
+                            // 如果xmin已经是TX_ID_FROZEN了需要跳过
+                            if dataStore.get_cf(&columnFamily, keyBuffer.as_ref())?.is_some() {
                                 continue;
                             }
-
-                            // 需要替换pointerKey末尾的txId
-                            keyBuffer.put_slice(&pointerKey[meta::POINTER_KEY_TX_ID_OFFSET..]);
-                            keyBuffer.put_u64(meta::TX_ID_FROZEN);
-
                             dataStore.put_cf(&columnFamily, keyBuffer.as_ref(), global::EMPTY_BINARY)?;
+
+                            // todo 如何应对pointerKey 不需要了
+                            {
+                                // 定位到pointerKey部分
+                                let pointerKeyPrefix = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_POINTER, rowId));
+                                dbRawIteratorPointerKey.seek(pointerKeyPrefix);
+
+                                loop {
+                                    let pointerKey = dbRawIteratorPointerKey.key();
+                                    if let None = pointerKey {
+                                        break;
+                                    }
+
+                                    let pointerKey = pointerKey.unwrap();
+
+                                    // 过头了
+                                    if pointerKey.starts_with(pointerKeyPrefix) == false {
+                                        break;
+                                    }
+
+                                    // 需要的是xmin
+                                    if meta::MVCC_KEY_TAG_XMIN != extractMvccKeyTagFromPointerKey!(pointerKey) {
+                                        continue;
+                                    }
+
+                                    // 需要替换pointerKey末尾的txId
+                                    keyBuffer.put_slice(&pointerKey[meta::POINTER_KEY_TX_ID_OFFSET..]);
+                                    keyBuffer.put_u64(meta::TX_ID_FROZEN);
+
+                                    dataStore.put_cf(&columnFamily, keyBuffer.as_ref(), global::EMPTY_BINARY)?;
+                                }
+                            }
                         }
+
+                        dbRawIteratorMvccKey.next();
                     }
                 }
+                DBObject::Index(_) => {
+                    let indexTrashColumnFamilyName = format!("{}{}", dbObjectName, meta::INDEX_TRASH_SUFFIX);
 
-                dbRawIteratorMvccKey.next();
+                    let indexTrashColumnFamily: Option<ColumnFamily> = dataStore.cf_handle(indexTrashColumnFamilyName.as_str());
+                    assert!(indexTrashColumnFamily.is_some());
+
+                    let indexTrashColumnFamily = indexTrashColumnFamily.unwrap();
+                    let mut dbRawIteratorIndexTrash: DBRawIterator = dataStore.raw_iterator_cf(&indexTrashColumnFamily);
+
+                    // index trash的key以干掉时候的txId打头
+                    dbRawIteratorIndexTrash.seek_for_prev(thresholdTxIdInclude.to_be_bytes());
+                    //dbRawIteratorIndexTrash.seek_to_last();
+
+                    // 遍历trash上的thresholdTxIdInclude以前的key,得到了index key
+                    loop {
+                        let trashKey = getKeyIfSome!(dbRawIteratorIndexTrash);
+                        let indexKey = &trashKey[meta::TX_ID_BYTE_LEN..];
+
+                        // 到index本体上干掉相应的key
+                        dataStore.delete_cf(&columnFamily, indexKey)?;
+
+                        println!("thresholdTxIdInclude: {thresholdTxIdInclude}, tx:{}",byte_slice_to_u64!(&trashKey[..meta::TX_ID_BYTE_LEN]));
+
+                        dbRawIteratorIndexTrash.prev();
+                    }
+
+                    // 清掉trash上的 thresholdTxIdInclude及其之前内容
+                    dataStore.delete_range_cf(&indexTrashColumnFamily, meta::TX_ID_MIN.to_be_bytes(), (thresholdTxIdInclude + 1).to_be_bytes())?;
+                }
             }
         }
 
