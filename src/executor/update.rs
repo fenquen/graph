@@ -132,7 +132,7 @@ impl<'session> CommandExecutor<'session> {
 
         // todo update的时候能不能直接从binary维度上更改row
         // 遍历各个满足要求的row
-        let mut keyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+        let mut keyBuffer = self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
         let mut rowDataBuffer = BytesMut::new();
         for (ref oldDataKey, rowData) in &mut targetRowDatas {
             // 趁着rowData还是原始模样的时候

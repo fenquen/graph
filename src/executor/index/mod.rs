@@ -374,6 +374,7 @@ impl<'session> CommandExecutor<'session> {
 
     // todo 如果index本身能包含要select的全部字段 那么直接index读取了
     /// index本身也是个table 只不过可以是实际的data加上dataKey
+    /// index搜索的范围目前mutations上的没有去管,因为这个函数是嵌入在scanSatisfiedRows的,它会去找在mutation上的
     pub(in crate::executor) fn searchByIndex<A, B, C, D>(&self, indexSearch: IndexSearch) -> Result<Vec<(DataKey, RowData)>>
     where
         A: CommittedPreProcessor,
@@ -418,7 +419,7 @@ impl<'session> CommandExecutor<'session> {
                 Result::<Vec<(DataKey, RowData)>>::Ok(rowDatas)
             };
 
-        let mut prefixBuffer = BytesMut::new();
+        let mut prefixBuffer = self.newIn();
         let mut beginPosition = 0usize;
 
         if indexSearch.isPureAnd {
@@ -474,7 +475,7 @@ impl<'session> CommandExecutor<'session> {
         let following1stColumnType = indexSearch.indexFilterColTypes[beginPosition];
 
         // 包含 prefix 和 后边第1列的value的buffer
-        let mut lowerValueBuffer = BytesMut::with_capacity(prefixBuffer.len() + following1stColumnType.graphValueSize().unwrap_or_else(|| 0usize));
+        let mut lowerValueBuffer = self.withCapacityIn(prefixBuffer.len() + following1stColumnType.graphValueSize().unwrap_or_else(|| 0usize));
         lowerValueBuffer.put_slice(prefixBuffer.as_ref());
         let mut upperValueBuffer = lowerValueBuffer.clone();
 
@@ -520,7 +521,7 @@ impl<'session> CommandExecutor<'session> {
 
                         // 因为string是变长的,只能现用现生成,不像是int等固定长度可以提前分配空间,性能上会降低
                         let mut bufferString = {
-                            let mut bufferString = BytesMut::with_capacity(prefixBuffer.len() + value.size().unwrap());
+                            let mut bufferString = self.withCapacityIn(prefixBuffer.len() + value.size().unwrap());
                             bufferString.put_slice(prefixBuffer.as_ref());
 
                             // buffer使用比较容易犯错的地方,你要在它上边打个小窗口(slice)要确保len还不止是capacity

@@ -24,7 +24,7 @@ impl<'session> CommandExecutor<'session> {
         let dataAdd = (dataKeyBinary.to_vec(), rowDataBinary.to_vec()) as KV;
 
         // 写 xmin xmax 对应的 mvcc key
-        let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+        let mut mvccKeyBuffer = self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
         let (xminAdd, xmaxAdd) = self.generateAddDataXminXmax(&mut mvccKeyBuffer, dataKey)?;
 
         let origin = self.generateOrigin(dataKey, meta::DATA_KEY_INVALID);
@@ -33,7 +33,7 @@ impl<'session> CommandExecutor<'session> {
 
         // 处理相应的index
         // index的key应该是什么样的 columnData + dataKey
-        let mut indexKeyBuffer = BytesMut::with_capacity(rowDataBinary.len() + meta::DATA_KEY_BYTE_LEN);
+        let mut indexKeyBuffer = self.withCapacityIn(rowDataBinary.len() + meta::DATA_KEY_BYTE_LEN);
         self.generateIndexData(table, &mut indexKeyBuffer, dataKey, &rowData, false)?;
 
         Ok(CommandExecResult::DmlResult)

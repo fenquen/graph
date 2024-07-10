@@ -75,7 +75,7 @@ impl<'session> CommandExecutor<'session> {
             (u64ToByteArrRef!(relDataKey).to_vec(), rowDataBinary.to_vec()) as KV
         };
 
-        let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+        let mut mvccKeyBuffer = self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
         let (xminAdd, xmaxAdd) = self.generateAddDataXminXmax(&mut mvccKeyBuffer, relDataKey)?;
 
         let origin: KV = self.generateOrigin(relDataKey, meta::DATA_KEY_INVALID);
@@ -84,7 +84,7 @@ impl<'session> CommandExecutor<'session> {
 
         //--------------------------------------------------------------------
 
-        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+        let mut pointerKeyBuffer = self.withCapacityIn(meta::POINTER_KEY_BYTE_LEN);
 
         let mut process =
             |selfTable: &Table, selfDataKey: DataKey,

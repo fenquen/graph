@@ -17,6 +17,7 @@ pub struct Config {
     pub metaDir: String,
     pub wsAddr: String,
     pub dataDir: String,
+    pub txUndergoingMaxCount: usize,
 }
 
 impl Default for Config {
@@ -26,6 +27,7 @@ impl Default for Config {
             metaDir: "meta".to_string(),
             wsAddr: "127.0.0.1:9673".to_string(),
             dataDir: "data".to_string(),
+            txUndergoingMaxCount: 10000,
         }
     }
 }

@@ -1,0 +1,7 @@
+[package]
+name = "graph_independent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bumpalo = { version = "3.16.0", features = ["allocator_api"] }

@@ -1,5 +1,5 @@
 #![allow(non_snake_case, unused_imports)]
-#![feature(trait_alias)]
+#![feature(trait_alias, allocator_api)]
 
 mod config;
 mod command_line;

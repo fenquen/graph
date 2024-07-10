@@ -23,7 +23,7 @@ impl<'session> CommandExecutor<'session> {
             self.scanSatisfiedRows(scanParams, true, ScanHooks::default())?
         };
 
-        let mut buffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+        let mut buffer = self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
 
         // 遍历添加当前tx对应的xmax
         for (targetDataKey, targetRowData) in targetRowDatas {
@@ -32,7 +32,6 @@ impl<'session> CommandExecutor<'session> {
             let oldXmax = self.generateDeleteDataXmax(&mut buffer, targetDataKey)?;
             self.session.writeDeleteDataMutation(&delete.tableName, oldXmax);
         }
-
 
         Ok(CommandExecResult::DmlResult)
     }

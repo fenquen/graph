@@ -177,7 +177,7 @@ impl<'session> CommandExecutor<'session> {
 
         let columnFamily = Session::getColFamily(&scanParams.table.name)?;
 
-        let mut mvccKeyBuffer = &mut BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+        let mut mvccKeyBuffer = &mut self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
         let mut rawIterator: DBRawIterator = self.session.getDBRawIterator(&columnFamily)?;
 
         let tableName_mutationsOnTable = self.session.tableName_mutations.read().unwrap();
@@ -274,7 +274,7 @@ impl<'session> CommandExecutor<'session> {
         let tableName_mutationsOnTable = self.session.tableName_mutations.read().unwrap();
         let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(&scanParams.table.name);
 
-        let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
+        let mut mvccKeyBuffer = self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
 
         let mut satisfiedRows =
             if scanParams.tableFilter.is_some() || select {
@@ -770,7 +770,7 @@ impl<'session> CommandExecutor<'session> {
     {
         let mut keys = Vec::new();
 
-        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+        let mut pointerKeyBuffer = self.withCapacityIn(meta::POINTER_KEY_BYTE_LEN);
 
         let columnFamily = Session::getColFamily(tableName)?;
 
@@ -851,7 +851,7 @@ impl<'session> CommandExecutor<'session> {
                                                src: &Table, srcDataKey: DataKey,
                                                pointerKeyTag: KeyTag,
                                                dest: &Table, destFilter: Option<&Expr>) -> Result<Vec<(DataKey, RowData)>> {
-        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+        let mut pointerKeyBuffer = self.withCapacityIn(meta::POINTER_KEY_BYTE_LEN);
         pointerKeyBuffer.writePointerKeyLeadingPart(srcDataKey, pointerKeyTag, dest.id);
 
         let mut targetRelationDataKeys = Vec::new();

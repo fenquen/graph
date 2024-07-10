@@ -8,6 +8,7 @@ use crate::{meta, throwFormat};
 use crate::parser::command::Command;
 use crate::types::{DBObjectId, SelectResultToFront};
 use anyhow::Result;
+use bytes::BytesMut;
 
 mod create;
 mod insert;
@@ -129,6 +130,15 @@ impl<'session> CommandExecutor<'session> {
         }
 
         Ok(dbObject.unwrap())
+    }
+
+    #[inline]
+    fn withCapacityIn(&self, capacity: usize) -> BytesMut {
+        self.session.withCapacityIn(capacity)
+    }
+
+    fn newIn(&self) -> BytesMut {
+        self.session.withCapacityIn(0)
     }
 }
 

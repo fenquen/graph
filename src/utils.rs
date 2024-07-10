@@ -1,11 +1,13 @@
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
 use std::{alloc, mem, ptr};
-use std::alloc::Layout;
+use std::alloc::{Allocator, Global, Layout, System};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, RandomState};
 use anyhow::format_err;
+use bumpalo::Bump;
+use graph_independent::AllocatorExt;
 use crate::suffix_plus_plus;
 use crate::types::Pointer;
 
@@ -146,7 +148,7 @@ impl<'a, T> Iterator for VirtualSlice<'a, T> {
 }
 
 impl<'a, T> VirtualSlice<'a, T> {
-    pub fn new(content: Vec<&'a [T]>) -> VirtualSlice <'a, T> {
+    pub fn new(content: Vec<&'a [T]>) -> VirtualSlice<'a, T> {
         Self {
             content,
             currentVecIndex: 0,

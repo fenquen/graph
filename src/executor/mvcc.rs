@@ -1,3 +1,4 @@
+use std::alloc::Allocator;
 use std::collections::BTreeMap;
 use std::ops::{Index, Range};
 use bytes::{BufMut, BytesMut};
@@ -50,7 +51,7 @@ impl<'session> CommandExecutor<'session> {
 
         let snapshot = self.session.getSnapshot()?;
 
-        // 应对多个tx对相同rowId的数据update而产生的多dataStore.cf_handle(tableName.as_str())条新data
+        // 应对多个tx对相同rowId的数据update而产生的多条新data
         let originDataKeyKey = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, extractRowIdFromDataKey!(dataKey)));
         let originDataKey = snapshot.get_cf(columnFamily, originDataKeyKey)?.unwrap();
         let originDataKey = byte_slice_to_u64!(originDataKey);
@@ -63,7 +64,7 @@ impl<'session> CommandExecutor<'session> {
             // 能确保会至少有xmax是0的 mvcc条目
             // 得知本tx可视范围内该条老data是recently被哪个tx干掉的
             let originDataXmax = extractTxIdFromMvccKey!( dbRawIterator.key().unwrap());
-            // 要和本条data的xmin比较 如果不相等的话 该条因为update产生的data不是第1手的
+            // 要和本条data的xmin比较 如果不相等的话 该条因为update产生的data不是最新鲜的
             if xmin != originDataXmax {
                 // todo 还需要把这条因为update产生的多的new data 干掉 完成
                 let xmax = self.generateDeleteDataXmax(mvccKeyBuffer, dataKey)?;
@@ -277,7 +278,7 @@ pub trait BytesMutExt {
 
     fn writeDataMvccKey(&mut self,
                         dataKey: DataKey,
-                        mvccKeyTag: KeyTag, txid: TxId) -> anyhow::Result<()> {
+                        mvccKeyTag: KeyTag, txid: TxId) -> Result<()> {
         let rowId = extractRowIdFromDataKey!(dataKey);
         self.writeDataMvccKeyByRowId(rowId, mvccKeyTag, txid)
     }

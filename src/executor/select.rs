@@ -355,7 +355,7 @@ impl<'session> CommandExecutor<'session> {
         let table = self.getDBObjectByName(selectTableUnderRels.selectTable.tableName.as_str())?;
         let table = table.asTable()?;
 
-        let mut pointerKeyBuffer = BytesMut::with_capacity(meta::POINTER_KEY_BYTE_LEN);
+        let mut pointerKeyBuffer = self.withCapacityIn(meta::POINTER_KEY_BYTE_LEN);
 
         // 应对对当前的data条目的 对某个relDesc的相应要求
         let mut processRelDesc =

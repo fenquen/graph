@@ -13,10 +13,13 @@ use std::thread::sleep;
 use std::time::Duration;
 use crate::{global, meta, parser, throw, throwFormat, u64ToByteArrRef};
 use anyhow::Result;
+use bumpalo::Bump;
+use bytes::BytesMut;
 use log::log;
 use rocksdb::{BoundColumnFamily, DB, DBAccess, SnapshotWithThreadMode, DBWithThreadMode};
 use rocksdb::{MultiThreaded, OptimisticTransactionDB, Options, Transaction, WriteBatchWithTransaction};
 use tokio::io::AsyncWriteExt;
+use crate::config::{Config, CONFIG};
 use crate::executor::CommandExecutor;
 use crate::parser::command::Command;
 use crate::types::{Byte, ColumnFamily, DBRawIterator, KV, SelectResultToFront, Snapshot, TableMutations, TxId};
@@ -29,6 +32,7 @@ pub struct Session {
     pub tableName_mutations: RwLock<HashMap<String, TableMutations>>,
     snapshot: Option<Snapshot<'static>>,
     pub scanConcurrency: usize,
+    bump: Bump,
 }
 
 impl Session {
@@ -73,7 +77,7 @@ impl Session {
     pub fn commit(&mut self) -> Result<()> {
         // todo sql中执行了commit导致当前tx提交后,当前不是inTx了,调用commit报错,需要commit()不要限制inTx 完成
         if self.notInTx() {
-            return Ok(());
+            return Ok(self.clean());
         }
 
         let mut batch = WriteBatchWithTransaction::<false>::default();
@@ -91,12 +95,12 @@ impl Session {
             // cf需要现用现取 内部使用的是read 而create cf会用到write
             let cf = Session::getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
 
-            if (currentTxId - *meta::TX_ID_START_UP.getRef()) % meta::TX_UNDERGOING_MAX_COUNT as u64 == 0 {
+            if (currentTxId - *meta::TX_ID_START_UP.getRef()) % CONFIG.txUndergoingMaxCount as u64 == 0 {
                 // TX_CONCURRENCY_MAX
-               // tokio::task::spawn_blocking(move || {
-                    let thresholdTx = currentTxId - meta::TX_UNDERGOING_MAX_COUNT as u64;
-                    CommandExecutor::vaccumData(thresholdTx);
-               // });
+                // tokio::task::spawn_blocking(move || {
+                let thresholdTx = currentTxId - CONFIG.txUndergoingMaxCount as u64;
+                CommandExecutor::vaccumData(thresholdTx);
+                // });
 
                 // todo 干掉columnFamily "tx_id" 老的txId 完成
                 self.dataStore.delete_range_cf(&cf, u64ToByteArrRef!(meta::TX_ID_INVALID), u64ToByteArrRef!(currentTxId))?;
@@ -110,9 +114,7 @@ impl Session {
 
         meta::TX_UNDERGOING_COUNT.fetch_sub(1, Ordering::AcqRel);
 
-        self.clean();
-
-        Ok(())
+        Ok(self.clean())
     }
 
     // todo rollback()不要求inTx 完成
@@ -128,6 +130,7 @@ impl Session {
         self.txId = None;
         self.snapshot = None;
         self.tableName_mutations.write().unwrap().clear();
+        self.bump.reset();
     }
 
     pub fn generateTx(&mut self) -> Result<()> {
@@ -292,6 +295,11 @@ impl Session {
             }
         };
     }
+
+    #[inline]
+    pub fn withCapacityIn(&self, capacity: usize) -> BytesMut {
+        BytesMut::with_capacity_in(capacity, &self.bump)
+    }
 }
 
 impl Default for Session {
@@ -303,6 +311,7 @@ impl Default for Session {
             tableName_mutations: Default::default(),
             snapshot: None,
             scanConcurrency: 1,
+            bump: Bump::with_capacity(2048 * 1024 * 1024),
         }
     }
 }
@@ -339,6 +348,8 @@ pub enum Mutation {
 
 #[cfg(test)]
 mod test {
+    use bumpalo::Bump;
+    use bytes::BytesMut;
     use serde::{Deserialize, Serialize};
 
     #[test]
@@ -363,5 +374,31 @@ mod test {
 
         // https://stackoverflow.com/questions/26611664/what-is-the-r-operator-in-rust
         serde_json::from_str::<Object>("").unwrap();
+    }
+
+    #[test]
+    pub fn testBump() {
+        let mut bump = Bump::with_capacity(1000000);
+
+        let mut v0 = Vec::<u8, &Bump>::with_capacity_in(1000000, &bump);
+        v0.push(0);
+        println!("{}", bump.allocated_bytes());
+
+        let mut v1 = Vec::<u8, &Bump>::new_in(&bump);
+        v1.push(1);
+        println!("{}", bump.allocated_bytes());
+
+
+        v0.push(7);
+
+        println!("{}", v0[0]);
+
+        //bump.reset();
+        //println!("{}", bump.allocated_bytes());
+
+        /*bump.alloc(1u64);
+        println!("{}", bump.allocated_bytes());
+        bump.alloc(1u8);
+        println!("{}", bump.allocated_bytes());*/
     }
 }
