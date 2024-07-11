@@ -105,7 +105,7 @@ impl<'session> CommandExecutor<'session> {
         let compatibleCheck = |columnName: &String, columnValue: &GraphValue| {
             match columnName_column.get(columnName) {
                 Some(column) => {
-                    if column.type0.compatible(columnValue) == false {
+                    if column.type0.compatibleWithValue(columnValue) == false {
                         throwFormat!("table:{} , column:{}, is not compatilbe with value:{:?}", update.tableName, columnName, columnValue);
                     }
                 }

@@ -4,6 +4,7 @@ use crate::parser::command::Command;
 use crate::parser::element::Element;
 use crate::parser::Parser;
 use anyhow::Result;
+use crate::graph_value::GraphValue;
 
 impl Parser {
     // todo 实现 default value
@@ -27,7 +28,10 @@ impl Parser {
             self.skipElement(1)?;
 
             let errMessage = "you should wirte \"if not exist\" after create table";
-            self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("not", errMessage)?;
+            match self.getCurrentElementAdvance()? {
+                Element::Not => {}
+                _ => self.throwSyntaxErrorDetail(errMessage)?
+            }
             self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("exist", errMessage)?;
 
             table.createIfNotExist = true;
@@ -51,14 +55,14 @@ impl Parser {
 
         let mut readColumnState = ReadColumnState::ReadColumnName;
         let mut column = Column::default();
+
         loop {
             let element = self.getCurrentElementAdvanceOption();
             if element.is_none() {
                 break;
             }
 
-            let element = element.unwrap();
-            match element {
+            match element.unwrap() {
                 Element::TextLiteral(text) => {
                     // 砍断和text->element->&mut self联系 不然下边的throwSyntaxErrorDetail报错因为是&self的
                     let text = text.to_string();
@@ -70,14 +74,66 @@ impl Parser {
                             readColumnState = ReadColumnState::ReadColumnType;
                         }
                         ReadColumnState::ReadColumnType => {
+                            // 对应columnType的 from_str
                             column.type0 = text.as_str().parse()?;
-                            readColumnState = ReadColumnState::ReadComplete;
 
-                            // 应对 null
-                            // 读取下个element
-                            if let Element::Null = self.getCurrentElement()? {
-                                self.skipElement(1)?;
-                                column.nullable = true;
+                            // 应对跟在column type 后边的 not null 和 default value
+
+                            // 如何应对 ReadNull ReadDefault 灵活的变换先后顺序
+                            #[derive(PartialEq)]
+                            enum ReadColumnConstrainState {
+                                ReadNot,
+                                ReadNull,
+                                ReadDefault,
+                            }
+
+                            let mut not = false;
+                            let mut expectElementTypeVec = vec![];
+
+                            loop {
+                                // 读取next元素以明确起始的应该是哪个
+                                let currentElement = self.getCurrentElementAdvance()?;
+
+                                if expectElementTypeVec.is_empty() == false {
+                                    if expectElementTypeVec.iter().any(|elementType| elementType == &currentElement.getType()) == false {
+                                        self.throwSyntaxError()?;
+                                        panic!();
+                                    }
+                                }
+
+                                expectElementTypeVec = vec![];
+
+                                let state = match currentElement {
+                                    Element::Not => ReadColumnConstrainState::ReadNot,
+                                    Element::Null => ReadColumnConstrainState::ReadNull,
+                                    Element::Default => ReadColumnConstrainState::ReadDefault,
+                                    _ => {
+                                        // 应该是逗号 留给了下边的ReadComplete
+                                        self.skipElement(-1)?;
+                                        readColumnState = ReadColumnState::ReadComplete;
+                                        break;
+                                    }
+                                };
+
+                                match state {
+                                    ReadColumnConstrainState::ReadNot => {
+                                        not = true;
+                                        expectElementTypeVec = vec![Element::NULL];
+                                    }
+                                    ReadColumnConstrainState::ReadNull => {
+                                        if not {
+                                            column.nullable = false;
+                                        } else {
+                                            column.nullable = true;
+                                        }
+                                    }
+                                    ReadColumnConstrainState::ReadDefault => {
+                                        // column type 要和 default value 兼容
+                                        let element = self.getCurrentElementAdvance()?;
+                                        column.type0.shouldCompatibleWithElement(element)?;
+                                        column.defaultValue = Some(element.clone());
+                                    }
+                                }
                             }
                         }
                         ReadColumnState::ReadComplete => {

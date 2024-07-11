@@ -105,4 +105,15 @@ link user(id= 6) to user(id=7) by likes(level =0)
     "sql": "select user[id](id in (1,2,34) )"
 }
 
+// ---------------------------------test default---------------------------------------------------------
+{
+    "requestType": "ExecuteSql",
+    "sql": "create table if not exist user (id integer not null default 0,name string);"
+}
+
+{
+    "requestType": "ExecuteSql",
+    "sql": "insert into user (name) values ('tom1');"
+}
+
 应对 id = num + 1 and

@@ -1,4 +1,4 @@
-use crate::{global, prefix_plus_plus, throw};
+use crate::{global, prefix_plus_plus, throw, throwFormat};
 use crate::parser::command::Command;
 use crate::parser::element::Element;
 use anyhow::Result;
@@ -73,7 +73,7 @@ impl Parser {
                     _ => self.throwSyntaxError()?,
                 };
 
-          //  println!("{:?}\n", command);
+            println!("{:?}\n", command);
 
             commandVec.push(command);
 
@@ -102,11 +102,11 @@ impl Parser {
     }
 
     fn throwSyntaxError<T>(&self) -> Result<T> {
-        throw!(&format!("syntax error, sql:{}", self.sql))
+        throwFormat!("syntax error, sql:{}", self.sql)
     }
 
     fn throwSyntaxErrorDetail<T>(&self, message: &str) -> Result<T> {
-        throw!(&format!("syntax error, sql:{}, {}", self.sql, message))
+        throwFormat!("syntax error, sql:{}, {}", self.sql, message)
     }
 }
 
@@ -116,7 +116,7 @@ mod test {
 
     #[test]
     pub fn testParseCreateTable() {
-        parser::parse("CREATE    TABLE    TEST   ( COLUMN1 string null  ,  COLUMN2 DECIMAL null)").unwrap();
+        parser::parse("create table if not exist user (id integer not null default 0,name string)").unwrap();
     }
 
     #[test]

@@ -4,6 +4,9 @@ use crate::{global, suffix_plus_plus, throw};
 use crate::parser::op::{LogicalOp, MathCalcOp, Op, SqlOp};
 use crate::parser::Parser;
 use anyhow::Result;
+use strum_macros::Display as StrumDisplay;
+
+pub type ElementType = u8;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Element {
@@ -18,9 +21,37 @@ pub enum Element {
     /// 对应"->"
     To,
     Null,
+    Not,
+    Default,
 }
 
 impl Element {
+    pub const TEXT_LITERAL: ElementType = 0;
+    pub const STRING_CONTENT: ElementType = 1;
+    pub const INTEGER_LITERAL: ElementType = 2;
+    pub const DECIMAL_LITERAL: ElementType = 3;
+    pub const OP: ElementType = 4;
+    pub const BOOLEAN: ElementType = 5;
+    pub const TO: ElementType = 6;
+    pub const NULL: ElementType = 7;
+    pub const NOT: ElementType = 8;
+    pub const DEFAULT: ElementType = 9;
+
+    pub(super) fn getType(&self) -> ElementType {
+        match self {
+            Element::TextLiteral(_) => Self::TEXT_LITERAL,
+            Element::StringContent(_) => Self::STRING_CONTENT,
+            Element::IntegerLiteral(_) => Self::INTEGER_LITERAL,
+            Element::DecimalLiteral(_) => Self::DECIMAL_LITERAL,
+            Element::Op(_) => Self::OP,
+            Element::Boolean(_) => Self::BOOLEAN,
+            Element::To => Self::TO,
+            Element::Null => Self::NULL,
+            Element::Not => Self::NOT,
+            Element::Default => Self::DEFAULT,
+        }
+    }
+
     pub(super) fn expectTextLiteralOpt(&self) -> Option<String> {
         if let Element::TextLiteral(text) = self {
             Some(text.to_string())
@@ -80,7 +111,7 @@ impl Element {
         }
     }
 
-    pub(super) fn expectIntegerLiteral(&self) -> anyhow::Result<i64> {
+    pub(super) fn expectIntegerLiteral(&self) -> Result<i64> {
         if let Some(number) = self.expectIntegerLiteralOpt() {
             Ok(number)
         } else {
@@ -100,6 +131,8 @@ impl Display for Element {
             Element::Op(op) => write!(f, "Op({})", op),
             Element::To => write!(f, "To"),
             Element::Null => write!(f, "Null"),
+            Element::Not => write!(f, "Not"),
+            Element::Default => write!(f, "Default")
             // _ => write!(f, "unknown")
         }
     }
@@ -244,8 +277,7 @@ impl Parser {
                         currentElementVec.push(element);
                     }
                 }
-                // 应对null
-                'n' | 'N' => {
+                'n' | 'N' => { // 应对null, not
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
                         continue;
@@ -255,12 +287,28 @@ impl Parser {
                         // 需要了断 pendingChars
                         self.collectPendingChars(&mut currentElementVec);
                         currentElementVec.push(Element::Null);
+                    } else if self.tryPrefecthIgnoreCase(&vec!['o', 't']) {
+                        self.collectPendingChars(&mut currentElementVec);
+                        currentElementVec.push(Element::Not);
                     } else {
                         self.pendingChars.push(currentChar);
                     }
                 }
-                // todo 实现对like的parse 完成
-                'l' | 'L' => {
+                'd' | 'D' => { // 应对default
+                    if self.whetherIn单引号() {
+                        self.pendingChars.push(currentChar);
+                        continue;
+                    }
+
+                    if self.tryPrefecthIgnoreCase(&vec!['e', 'f', 'a', 'u', 'l', 't']) {
+                        // 需要了断 pendingChars
+                        self.collectPendingChars(&mut currentElementVec);
+                        currentElementVec.push(Element::Default);
+                    } else {
+                        self.pendingChars.push(currentChar);
+                    }
+                }
+                'l' | 'L' => {  // todo 实现对like的parse 完成
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
                         continue;
@@ -514,9 +562,8 @@ impl Parser {
     }
 
     pub(super) fn getCurrentElement(&self) -> Result<&Element> {
-        let option = self.getCurrentElementOption();
-        if option.is_some() {
-            Ok(option.unwrap())
+        if let Some(element) = self.getCurrentElementOption() {
+            Ok(element)
         } else {
             self.throwSyntaxErrorDetail("unexpected end of sql")?
         }
@@ -552,14 +599,14 @@ impl Parser {
     }
 
     /// 和parse toke 遍历char不同的是 要是越界了 index会是边界的后边1个 以符合当前的体系
-    pub(super) fn skipElement(&mut self, delta: i32) -> Result<()> {
+    pub(super) fn skipElement(&mut self, delta: i64) -> Result<()> {
         let currentElementVecLen = self.elementVecVec.get(self.currentElementVecIndex).unwrap().len();
 
-        if (self.currentElementIndex as i32 + delta) as usize >= currentElementVecLen {
+        if (self.currentElementIndex as i64 + delta) as usize >= currentElementVecLen {
             self.currentElementIndex = currentElementVecLen;
             self.throwSyntaxError()
         } else {
-            self.currentElementIndex = (self.currentElementIndex as i32 + delta) as usize;
+            self.currentElementIndex = (self.currentElementIndex as i64 + delta) as usize;
             Ok(())
         }
     }

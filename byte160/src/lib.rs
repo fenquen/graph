@@ -5,6 +5,7 @@
     attr(deny(warnings, rust_2018_idioms), allow(dead_code, unused_variables))
 ))]
 #![no_std]
+#![allow(non_snake_case)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 //! Provides abstractions for working with bytes.

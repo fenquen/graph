@@ -7,7 +7,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use crate::graph_error::GraphError;
-use crate::{byte_slice_to_u64, file_goto_start, global, meta, suffix_plus_plus, throw, types, u64ToByteArrRef};
+use crate::{byte_slice_to_u64, file_goto_start, global, meta, suffix_plus_plus, throw, throwFormat, types, u64ToByteArrRef};
 use anyhow::Result;
 use tokio::fs;
 use std::path::Path;
@@ -21,6 +21,7 @@ use std::sync::RwLock;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use crate::config::CONFIG;
 use crate::graph_value::GraphValue;
+use crate::parser::element::Element;
 use crate::session::Session;
 use crate::types::{Byte, DataKey, DBIterator, DBRawIterator, KeyPrefix, KeyTag, RowId, DBObjectId, TxId};
 use crate::utils::TrickyContainer;
@@ -358,11 +359,24 @@ impl FromStr for TableType {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize, Default)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct Column {
     pub name: String,
     pub type0: ColumnType,
+    /// 默认true
     pub nullable: bool,
+    pub defaultValue: Option<Element>,
+}
+
+impl Default for Column {
+    fn default() -> Self {
+        Column {
+            name: String::default(),
+            type0: ColumnType::default(),
+            nullable: true,
+            defaultValue: None,
+        }
+    }
 }
 
 impl PartialEq for Column {
@@ -380,7 +394,7 @@ pub enum ColumnType {
 }
 
 impl ColumnType {
-    pub fn compatible(&self, columnValue: &GraphValue) -> bool {
+    pub fn compatibleWithValue(&self, columnValue: &GraphValue) -> bool {
         match (self, columnValue) {
             (ColumnType::String, GraphValue::String(_)) => true,
             (ColumnType::Integer, GraphValue::Integer(_)) => true,
@@ -388,6 +402,32 @@ impl ColumnType {
             (_, GraphValue::Null) => true,
             _ => false
         }
+    }
+
+    pub fn shouldCompatibleWithValue(&self, columnValue: &GraphValue) -> Result<()> {
+        if self.compatibleWithValue(columnValue) == false {
+            throwFormat!("column type: {:?} and value: {:?} are not compatible", self, columnValue);
+        }
+
+        Ok(())
+    }
+
+    pub fn compatibleWithElement(&self, element: &Element) -> bool {
+        match (self, element) {
+            (ColumnType::String, Element::StringContent(_)) => true,
+            (ColumnType::Integer, Element::IntegerLiteral(_)) => true,
+            (ColumnType::Decimal, Element::DecimalLiteral(_)) => true,
+            (_, Element::Null) => true,
+            _ => false
+        }
+    }
+
+    pub fn shouldCompatibleWithElement(&self, element: &Element) -> Result<()> {
+        if self.compatibleWithElement(element) == false {
+            throwFormat!("column type: {:?} and element: {:?} are not compatible", self, element);
+        }
+
+        Ok(())
     }
 
     pub fn graphValueSize(&self) -> Option<usize> {

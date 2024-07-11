@@ -1,4 +1,5 @@
 #![feature(allocator_api)]
+#![allow(non_snake_case)]
 
 use std::alloc::{Allocator, Global, System};
 use bumpalo::Bump;

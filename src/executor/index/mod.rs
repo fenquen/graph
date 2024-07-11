@@ -325,7 +325,7 @@ impl<'session> CommandExecutor<'session> {
 
                 for opValueVec in opValueVecVec {
                     for (_, value) in opValueVec {
-                        if indexFilterColumn.type0.compatible(value) == false {
+                        if indexFilterColumn.type0.compatibleWithValue(value) == false {
                             throwFormat!("table: {}, column:{}, type:{} is not compatible with value:{}",
                                 scanParams.table.name, columnNameFromIndexUsed, indexFilterColumn.type0, value)
                         }

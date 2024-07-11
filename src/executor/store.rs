@@ -683,12 +683,17 @@ impl<'session> CommandExecutor<'session> {
             // 说明column未写全 需要确认absent的是不是都是nullable
             if insert.columnNames.len() != table.columns.len() {
                 let columnNames = insert.columnNames.clone();
+
                 let absentColumns: Vec<&Column> =
                     collectionMinus0(&table.columns,
                                      &columnNames,
                                      |column, columnName| { &column.name == columnName });
+
                 for absentColumn in absentColumns {
-                    if absentColumn.nullable {
+                    if let Some(element) = &absentColumn.defaultValue {
+                        insert.columnNames.push(absentColumn.name.clone());
+                        insert.columnExprs.push(Expr::Single(element.clone()));
+                    } else if absentColumn.nullable {
                         insert.columnNames.push(absentColumn.name.clone());
                         insert.columnExprs.push(Expr::Single(Element::Null));
                     } else {
@@ -737,24 +742,26 @@ impl<'session> CommandExecutor<'session> {
 
             let mut destByteSlice = BytesMut::new();
 
-            let mut columnName_columnValue = HashMap::with_capacity(table.columns.len());
+            let mut rowData = HashMap::with_capacity(table.columns.len());
 
             // 要以create时候的顺序encode
             for column in &table.columns {
                 let columnExpr = columnName_columnExpr.get(&column.name).unwrap();
 
-                // columnType和value要对上
+                // 计算得到value
                 let columnValue = columnExpr.calc(None)?;
-                if column.type0.compatible(&columnValue) == false {
+
+                // columnType和value要对上
+                if column.type0.compatibleWithValue(&columnValue) == false {
                     throwFormat!("column:{}, type:{} is not compatible with value:{}", column.name, column.type0, columnValue);
                 }
 
                 columnValue.encode(&mut destByteSlice)?;
 
-                columnName_columnValue.insert(column.name.clone(), columnValue);
+                rowData.insert(column.name.clone(), columnValue);
             }
 
-            (destByteSlice, columnName_columnValue)
+            (destByteSlice, rowData)
         };
 
         Ok((destByteSlice.freeze(), columnName_columnValue))
