@@ -1,7 +1,7 @@
+use std::alloc::Allocator;
 use std::borrow::Borrow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
-use std::hash::{BuildHasher, Hash, RandomState};
+use std::collections::{BTreeMap};
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::ptr::NonNull;
@@ -11,18 +11,20 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
-use crate::{global, meta, parser, throw, throwFormat, u64ToByteArrRef};
+use crate::{config, global, meta, parser, throw, throwFormat, u64ToByteArrRef};
 use anyhow::Result;
 use bumpalo::Bump;
+use hashbrown::HashMap;
 use bytes::BytesMut;
 use log::log;
 use rocksdb::{BoundColumnFamily, DB, DBAccess, SnapshotWithThreadMode, DBWithThreadMode};
 use rocksdb::{MultiThreaded, OptimisticTransactionDB, Options, Transaction, WriteBatchWithTransaction};
 use tokio::io::AsyncWriteExt;
+use graph_independent::AllocatorExt;
 use crate::config::{Config, CONFIG};
 use crate::executor::CommandExecutor;
 use crate::parser::command::Command;
-use crate::types::{Byte, ColumnFamily, DBRawIterator, KV, SelectResultToFront, Snapshot, TableMutations, TxId};
+use crate::types::{Byte, ColumnFamily, DBRawIterator, KV, SelectResultToFront, SessionHashMap, SessionVec, Snapshot, TableMutations, TxId};
 use crate::utils::HashMapExt;
 
 pub struct Session {
@@ -32,7 +34,7 @@ pub struct Session {
     pub tableName_mutations: RwLock<HashMap<String, TableMutations>>,
     snapshot: Option<Snapshot<'static>>,
     pub scanConcurrency: usize,
-    bump: Bump,
+    pub bump: Bump,
 }
 
 impl Session {
@@ -95,10 +97,12 @@ impl Session {
             // cf需要现用现取 内部使用的是read 而create cf会用到write
             let cf = Session::getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
 
-            if (currentTxId - *meta::TX_ID_START_UP.getRef()) % CONFIG.txUndergoingMaxCount as u64 == 0 {
+            let txUndergoingMaxCount = CONFIG.txUndergoingMaxCount.load(Ordering::Acquire) as u64;
+
+            if (currentTxId - *meta::TX_ID_START_UP.getRef()) % txUndergoingMaxCount == 0 {
                 // TX_CONCURRENCY_MAX
                 // tokio::task::spawn_blocking(move || {
-                let thresholdTx = currentTxId - CONFIG.txUndergoingMaxCount as u64;
+                let thresholdTx = currentTxId - txUndergoingMaxCount;
                 CommandExecutor::vaccumData(thresholdTx);
                 // });
 
@@ -300,6 +304,16 @@ impl Session {
     pub fn withCapacityIn(&self, capacity: usize) -> BytesMut {
         BytesMut::with_capacity_in(capacity, &self.bump)
     }
+
+    #[inline]
+    pub fn hashMapWithCapacityIn<K, V>(&self, capacity: usize) -> SessionHashMap<K, V> {
+        HashMap::with_capacity_in(capacity, &self.bump)
+    }
+
+    #[inline]
+    pub fn vecWithCapacityIn<T>(&self, capacity: usize) -> SessionVec<T> {
+        Vec::with_capacity_in(capacity, &self.bump)
+    }
 }
 
 impl Default for Session {
@@ -311,7 +325,7 @@ impl Default for Session {
             tableName_mutations: Default::default(),
             snapshot: None,
             scanConcurrency: 1,
-            bump: Bump::with_capacity(2048 * 1024 * 1024),
+            bump: Bump::with_capacity(config::CONFIG.sessionMemotySize),
         }
     }
 }

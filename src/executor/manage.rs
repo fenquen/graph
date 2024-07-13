@@ -1,7 +1,9 @@
+use std::sync::atomic::Ordering;
 use crate::executor::{CommandExecResult, CommandExecutor};
 use anyhow::Result;
+use bumpalo::Bump;
 use crate::parser::command::manage::Set;
-use crate::throw;
+use crate::{config, throw};
 
 impl<'session> CommandExecutor<'session> {
     pub(in crate::executor) fn commit(&mut self) -> Result<CommandExecResult> {
@@ -18,6 +20,13 @@ impl<'session> CommandExecutor<'session> {
         match set {
             Set::SetAutoCommit(b) => self.session.setAutoCommit(*b)?,
             Set::SetScanConcurrency(scanConcurrency) => self.session.scanConcurrency = *scanConcurrency,
+            Set::SetTxUndergoingMaxCount(txUndergoingMaxCount) => {
+                assert!(0 < *txUndergoingMaxCount);
+                config::CONFIG.txUndergoingMaxCount.store(*txUndergoingMaxCount, Ordering::Release);
+            }
+            Set::SetSessionMemorySize(sessionMemorySize) => {
+                self.session.bump = Bump::with_capacity(*sessionMemorySize);
+            }
             // _ => throw!(&format!("{:?} not supported", set))
         }
 

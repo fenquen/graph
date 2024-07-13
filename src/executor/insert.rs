@@ -15,26 +15,28 @@ impl<'session> CommandExecutor<'session> {
         let dbObjectTable = self.getDBObjectByName(&insert.tableName)?;
         let table = dbObjectTable.asTable()?;
 
-        let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
-        let dataKey: DataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, rowId);
+        for (rowDataBinary, rowData) in self.generateInsertValuesBinary(insert, table)? {
+            let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
+            let dataKey: DataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, rowId);
 
-        // 写 data本身的key和value
-        let dataKeyBinary = u64ToByteArrRef!(dataKey);
-        let (rowDataBinary, rowData) = self.generateInsertValuesBinary(insert, table)?;
-        let dataAdd = (dataKeyBinary.to_vec(), rowDataBinary.to_vec()) as KV;
+            // 写 data本身的key和value
+            let dataKeyBinary = u64ToByteArrRef!(dataKey);
 
-        // 写 xmin xmax 对应的 mvcc key
-        let mut mvccKeyBuffer = self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
-        let (xminAdd, xmaxAdd) = self.generateAddDataXminXmax(&mut mvccKeyBuffer, dataKey)?;
+            let dataAdd = (dataKeyBinary.to_vec(), rowDataBinary.to_vec()) as KV;
 
-        let origin = self.generateOrigin(dataKey, meta::DATA_KEY_INVALID);
+            // 写 xmin xmax 对应的 mvcc key
+            let mut mvccKeyBuffer = self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
+            let (xminAdd, xmaxAdd) = self.generateAddDataXminXmax(&mut mvccKeyBuffer, dataKey)?;
 
-        self.session.writeAddDataMutation(&table.name, dataAdd, xminAdd, xmaxAdd, origin);
+            let origin = self.generateOrigin(dataKey, meta::DATA_KEY_INVALID);
 
-        // 处理相应的index
-        // index的key应该是什么样的 columnData + dataKey
-        let mut indexKeyBuffer = self.withCapacityIn(rowDataBinary.len() + meta::DATA_KEY_BYTE_LEN);
-        self.generateIndexData(table, &mut indexKeyBuffer, dataKey, &rowData, false)?;
+            self.session.writeAddDataMutation(&table.name, dataAdd, xminAdd, xmaxAdd, origin);
+
+            // 处理相应的index
+            // index的key应该是什么样的 columnData + dataKey
+            let mut indexKeyBuffer = self.withCapacityIn(rowDataBinary.len() + meta::DATA_KEY_BYTE_LEN);
+            self.generateIndexData(table, &mut indexKeyBuffer, dataKey, &rowData, false)?;
+        }
 
         Ok(CommandExecResult::DmlResult)
     }

@@ -1,5 +1,6 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use hashbrown::{HashMap, HashSet};
+use std::collections::{BTreeMap};
 use std::ops::{Range, RangeFrom};
 use std::sync::atomic::Ordering;
 use std::{cmp, mem, thread};
@@ -18,9 +19,10 @@ use crate::graph_value::GraphValue;
 use crate::meta::{Column, DBObject, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, KeyTag, RowId, Pointer};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, KeyTag, RowId, Pointer, SessionVec};
 use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 use anyhow::Result;
+use bumpalo::Bump;
 use dashmap::mapref::one::Ref;
 use lazy_static::lazy_static;
 use crate::executor::index::{IndexSearch};
@@ -320,7 +322,7 @@ impl<'session> CommandExecutor<'session> {
                             orHasNonsense
                         } => {
                             // todo 实现 index 完成
-                            if let Some(mut indexSearch) = self.getMostSuitableIndex(&scanParams, tableFilterColName_opValueVecVec, isPureAnd, isPureOr, orHasNonsense)? {
+                            if let Some(mut indexSearch) = self.getMostSuitableIndex(&scanParams, tableFilterColName_opValueVecVec, isPureAnd, orHasNonsense)? {
                                 indexSearch.columnFamily = &columnFamily;
                                 indexSearch.tableMutationsCurrentTx = tableMutationsCurrentTx;
 
@@ -658,7 +660,7 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
-    pub(super) fn generateInsertValuesBinary(&self, insert: &mut Insert, table: &Table) -> Result<(Bytes, RowData)> {
+    pub(super) fn generateInsertValuesBinary(&self, insert: &mut Insert, table: &Table) -> Result<SessionVec<(BytesMut, RowData)>> {
         // 要是未显式说明column的话还需要读取table的column
         if insert.useExplicitColumnNames == false {
             for column in &table.columns {
@@ -692,10 +694,10 @@ impl<'session> CommandExecutor<'session> {
                 for absentColumn in absentColumns {
                     if let Some(element) = &absentColumn.defaultValue {
                         insert.columnNames.push(absentColumn.name.clone());
-                        insert.columnExprs.push(Expr::Single(element.clone()));
+                        insert.columnExprVecVec.iter_mut().for_each(|columnExprVec| columnExprVec.push(Expr::Single(element.clone())));
                     } else if absentColumn.nullable {
                         insert.columnNames.push(absentColumn.name.clone());
-                        insert.columnExprs.push(Expr::Single(Element::Null));
+                        insert.columnExprVecVec.iter_mut().for_each(|columnExprVec| columnExprVec.push(Expr::Single(Element::Null)));
                     } else {
                         throwFormat!("table:{}, column:{} is not nullable", table.name, absentColumn.name);
                     }
@@ -705,7 +707,7 @@ impl<'session> CommandExecutor<'session> {
 
         // todo insert时候需要各column全都insert 后续要能支持 null的 GraphValue 完成
         // 确保column数量和value数量相同
-        if insert.columnNames.len() != insert.columnExprs.len() {
+        if insert.columnNames.len() != insert.columnExprVecVec[0].len() {
             throw!("column count does not match value count");
         }
 
@@ -734,37 +736,43 @@ impl<'session> CommandExecutor<'session> {
         }
 
         // todo 如果指明了要insert的column name的话 需要排序 符合表定义时候的column顺序 完成
-        let (destByteSlice, columnName_columnValue) = {
-            let mut columnName_columnExpr = HashMap::with_capacity(insert.columnNames.len());
-            for (columnName, columnExpr) in insert.columnNames.iter().zip(insert.columnExprs.iter()) {
-                columnName_columnExpr.insert(columnName, columnExpr);
-            }
+        let rowDataVec = {
+            let mut vec = self.vecWithCapacityIn(insert.columnExprVecVec.len());
 
-            let mut destByteSlice = BytesMut::new();
-
-            let mut rowData = HashMap::with_capacity(table.columns.len());
-
-            // 要以create时候的顺序encode
-            for column in &table.columns {
-                let columnExpr = columnName_columnExpr.get(&column.name).unwrap();
-
-                // 计算得到value
-                let columnValue = columnExpr.calc(None)?;
-
-                // columnType和value要对上
-                if column.type0.compatibleWithValue(&columnValue) == false {
-                    throwFormat!("column:{}, type:{} is not compatible with value:{}", column.name, column.type0, columnValue);
+            for columnExprVec in &insert.columnExprVecVec {
+                let mut columnName_columnExpr = HashMap::with_capacity(insert.columnNames.len());
+                for (columnName, columnExpr) in insert.columnNames.iter().zip(columnExprVec.iter()) {
+                    columnName_columnExpr.insert(columnName, columnExpr);
                 }
 
-                columnValue.encode(&mut destByteSlice)?;
+                let mut destByteSlice = self.newIn();
 
-                rowData.insert(column.name.clone(), columnValue);
+                let mut rowData: RowData = HashMap::with_capacity(table.columns.len());
+
+                // 要以create时候的顺序encode
+                for column in &table.columns {
+                    let columnExpr = columnName_columnExpr.get(&column.name).unwrap();
+
+                    // 计算得到value
+                    let columnValue = columnExpr.calc(None)?;
+
+                    // columnType和value要对上
+                    if column.type0.compatibleWithValue(&columnValue) == false {
+                        throwFormat!("column:{}, type:{} is not compatible with value:{}", column.name, column.type0, columnValue);
+                    }
+
+                    columnValue.encode(&mut destByteSlice)?;
+
+                    rowData.insert(column.name.clone(), columnValue);
+                }
+
+                vec.push((destByteSlice, rowData))
             }
 
-            (destByteSlice, rowData)
+            vec
         };
 
-        Ok((destByteSlice.freeze(), columnName_columnValue))
+        Ok(rowDataVec)
     }
 
     /// 当前对relation本身的数据的筛选是通过注入闭包实现的

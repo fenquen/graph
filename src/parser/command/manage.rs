@@ -3,6 +3,7 @@ use crate::parser::command::Command;
 use crate::parser::Parser;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use crate::config::Config;
 use crate::global;
 use crate::parser::element::Element;
 
@@ -10,6 +11,8 @@ use crate::parser::element::Element;
 pub enum Set {
     SetAutoCommit(bool),
     SetScanConcurrency(usize),
+    SetTxUndergoingMaxCount(usize),
+    SetSessionMemorySize(usize),
 }
 
 // todo manage体系的命令要通过sql实现 完成
@@ -34,8 +37,49 @@ impl Parser {
 
     pub(in crate::parser) fn parseSet(&mut self) -> Result<Command> {
         let targetName = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase();
+        let targetName = targetName.as_str();
 
-        match targetName.as_str() {
+        match targetName {
+            "scanconcurrency" | "txundergoingmaxcount" | "sessionmemorysize" => {
+                if let Element::IntegerLiteral(value) = self.getCurrentElementAdvance()? {
+                    let value = *value;
+                    if value <= 0 {
+                        self.throwSyntaxErrorDetail("value should be positive")?;
+                    }
+
+                    let mut value = value as usize;
+
+                    match targetName {
+                        "scanconcurrency" => {
+                            // 原来是使用num_cpus的 后来得知rust 1.81 也有 它们都是通过 cgroup sched_getaffinity taolu
+                            let cpuLogicalCoreCount = thread::available_parallelism()?.get();
+
+                            if value > cpuLogicalCoreCount {
+                                value = cpuLogicalCoreCount;
+                            }
+
+                            Ok(Command::Set(Set::SetScanConcurrency(value)))
+                        }
+                        "txundergoingmaxcount" => {
+                            if value < Config::MIN_TX_UNDERGOING_MAX_COUNT {
+                                value = Config::MIN_TX_UNDERGOING_MAX_COUNT;
+                            }
+
+                            Ok(Command::Set(Set::SetTxUndergoingMaxCount(value)))
+                        }
+                        "sessionmemorysize" => {
+                            if value < Config::MIN_SESSION_MEMORY_SIZE {
+                                value = Config::MIN_SESSION_MEMORY_SIZE;
+                            }
+
+                            Ok(Command::Set(Set::SetSessionMemorySize(value)))
+                        }
+                        _ => self.throwSyntaxErrorDetail(&format!("set {} not supported", targetName))?,
+                    }
+                } else {
+                    self.throwSyntaxErrorDetail("value should be integer")?
+                }
+            }
             "autocommit" => {
                 match self.getCurrentElementAdvance()? {
                     Element::Boolean(b) => Ok(Command::Set(Set::SetAutoCommit(*b))),
@@ -48,26 +92,6 @@ impl Parser {
                         }
                     }
                     _ => self.throwSyntaxErrorDetail("set autocommit should use true/false ,0/not 0, on/off")?,
-                }
-            }
-            "scanconcurrency" => {
-                if let Element::IntegerLiteral(scanConcurrency) = self.getCurrentElementAdvance()? {
-                    let mut scanConcurrency = *scanConcurrency as usize;
-
-                    if 0 >= scanConcurrency {
-                        self.throwSyntaxErrorDetail("scan concurrency should be positive")?;
-                    }
-
-                    // 原来是使用num_cpus的 后来得知rust 1.81 也有 它们都是通过 cgroup sched_getaffinity taolu
-                    let cpuLogicalCoreCount = thread::available_parallelism()?.get();
-
-                    if scanConcurrency > cpuLogicalCoreCount {
-                        scanConcurrency = cpuLogicalCoreCount;
-                    }
-
-                    Ok(Command::Set(Set::SetScanConcurrency(scanConcurrency)))
-                } else {
-                    self.throwSyntaxErrorDetail("scan concurrency should be integer")?
                 }
             }
             _ => self.throwSyntaxErrorDetail(&format!("set {} not supported", targetName))?,

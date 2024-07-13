@@ -81,7 +81,7 @@ impl<'session> CommandExecutor<'session> {
         // index对应的垃圾桶的column family,它只是个附庸在index上的纯rocks概念体系里的东西,不是db的概念
         self.session.createColFamily(format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX).as_str())?;
 
-        // todo 新建index的时候要是表上已经有数据需要当场生成index数据
+        // todo 新建index的时候要是表上已经有数据需要当场生成index数据 完成
         self.generateIndexDataForExistingTableData(targetTable, &index)?;
 
         let indexId = u64ToByteArrRef!(index.id);

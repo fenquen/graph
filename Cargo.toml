@@ -25,8 +25,9 @@ tokio-tungstenite = "0.23.1"
 futures-channel = "0.3.30"
 futures-util = "0.3.30"
 rayon = "1.10.0"
-bumpalo = { version = "3.16.0", features = ["allocator_api"] }
+bumpalo = { version = "3.16.0", features = ["allocator_api","allocator-api2"] }
 graph_independent = { path = "graph_independent" }
+hashbrown = { version = "0.14.5", features = ["nightly", "serde"] }
 #enum-ordinalize = "4.3.0"
 
 # https://course.rs/cargo/reference/profiles.html

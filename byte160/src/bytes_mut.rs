@@ -1041,6 +1041,7 @@ impl Drop for BytesMut {
 
         if kind == KIND_VEC {
             unsafe {
+                // 临时应对使用了bump的情况, 这边的话不去deallocate也是可以的因为commit时候会调用reset
                 if self.custom {
                     return;
                 }

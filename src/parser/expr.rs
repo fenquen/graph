@@ -3,12 +3,13 @@ use crate::{global, prefix_plus_plus, suffix_plus_plus};
 use crate::parser::element::Element;
 use crate::parser::op::{Op, SqlOp};
 use crate::parser::Parser;
+use anyhow::Result;
 
 impl Parser {
     // todo 能够应对like
     /// 当link sql解析到表名后边的"("时候 调用该函数 不过调用的时候elementIndex还是"("的前边1个 <br>
     /// stopWhenParseRightComplete 用来应对(a>0+6),0+6未被括号保护,不然的话会解析成  (a>1)+6
-    pub(super) fn parseExpr(&mut self, stopWhenParseRightComplete: bool) -> anyhow::Result<Expr> {
+    pub(super) fn parseExpr(&mut self, stopWhenParseRightComplete: bool) -> Result<Expr> {
         // 像 a = 0+1 的 0+1 是没有用括号保护起来的 需要有这样的标识的
         let mut hasLeading括号 = false;
 
@@ -220,7 +221,7 @@ impl Parser {
 
     /// 单独的函数解析 a in (0,0+6,0+(a+1),)的in后边的括号包含的用","分隔的多个expr
     // 单独的生成小的parser,element只包含expr的
-    pub(super) fn parseInExprs(&mut self) -> anyhow::Result<Vec<Expr>> {
+    pub(super) fn parseInExprs(&mut self) -> Result<Vec<Expr>> {
         // 要以(打头
         self.getCurrentElement()?.expectTextLiteralContent(global::圆括号_STR)?;
 

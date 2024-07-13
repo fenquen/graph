@@ -61,7 +61,7 @@ impl<'session> CommandExecutor<'session> {
             tableName: link.relationName.clone(),
             useExplicitColumnNames: true,
             columnNames: link.relationColumnNames.clone(),
-            columnExprs: link.relationColumnExprs.clone(),
+            columnExprVecVec: vec![link.relationColumnExprs.clone()],
         };
 
         let relation = self.getDBObjectByName(&link.relationName)?;
@@ -71,7 +71,7 @@ impl<'session> CommandExecutor<'session> {
         let relDataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, relRowId);
 
         let dataAdd = {
-            let (rowDataBinary, _) = self.generateInsertValuesBinary(&mut insertValues, &*relation)?;
+            let (rowDataBinary, _) = &self.generateInsertValuesBinary(&mut insertValues, &*relation)?[0];
             (u64ToByteArrRef!(relDataKey).to_vec(), rowDataBinary.to_vec()) as KV
         };
 

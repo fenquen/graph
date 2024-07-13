@@ -116,4 +116,15 @@ link user(id= 6) to user(id=7) by likes(level =0)
     "sql": "insert into user (name) values ('tom1');"
 }
 
+// ------------------------------------test insert into values---------------------------------------------
+{
+    "requestType": "ExecuteSql",
+    "sql": "create table if not exist user (id integer not null default 0,name string);"
+}
+
+{
+    "requestType": "ExecuteSql",
+    "sql": "insert into user (name) values ('tom1'),('tom2');"
+}
+
 应对 id = num + 1 and

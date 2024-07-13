@@ -300,7 +300,7 @@ impl GraphValue {
                             }
 
                             if let GraphValue::String(string) = rightValue {
-                                if let LikePattern::Equal(string) = op::determineLikePattern(string)? {
+                                if let LikePattern::Equal(_) = op::determineLikePattern(string)? {
                                     return Ok(GraphValue::IndexUseful {
                                         columnName: columnName.clone(),
                                         op: Op::MathCmpOp(MathCmpOp::Equal),
@@ -512,9 +512,9 @@ impl GraphValue {
     pub fn size(&self) -> Option<usize> {
         let selfByteLen = match self {
             GraphValue::String(s) => Self::LEN_BYTE_LEN + s.len(),
-            GraphValue::Boolean(b) => mem::size_of::<Byte>(),
-            GraphValue::Integer(integer) => mem::size_of::<i64>(),
-            GraphValue::Decimal(decimal) => mem::size_of::<f64>(),
+            GraphValue::Boolean(_) => mem::size_of::<Byte>(),
+            GraphValue::Integer(_) => mem::size_of::<i64>(),
+            GraphValue::Decimal(_) => mem::size_of::<f64>(),
             GraphValue::Null => 0,
             _ => return None
         };

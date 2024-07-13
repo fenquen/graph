@@ -1,6 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap};
 use std::ops::Bound;
 use std::sync::Arc;
+use bumpalo::Bump;
+use hashbrown::hash_map::DefaultHashBuilder;
+use hashbrown::HashMap;
 use rocksdb::{BoundColumnFamily, DBIteratorWithThreadMode, DBRawIteratorWithThreadMode,
               DBWithThreadMode, MultiThreaded, SnapshotWithThreadMode};
 use serde_json::Value;
@@ -48,3 +51,8 @@ pub type TableMutations = BTreeMap<Vec<Byte>, Vec<Byte>>;
 pub type RelationDepth = (Bound<usize>, Bound<usize>);
 
 pub type Pointer = u64;
+
+pub type SessionVec<'a, T> = Vec<T, &'a Bump>;
+pub type SessionHashMap<'a, K, V> = HashMap<K, V, DefaultHashBuilder, &'a Bump>;
+
+pub type ElementType = u8;

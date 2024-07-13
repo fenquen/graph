@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::graph_value::GraphValue;
 
 impl Parser {
-    // todo 实现 default value
+    // todo 实现 default value 完成
     // todo 实现 if not exist 完成
     // CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)
     pub(in crate::parser) fn parseCreate(&mut self) -> Result<Command> {

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use hashbrown::{HashMap, HashSet};
 use std::ops::Index;
 use serde_json::Value;
 use anyhow::Result;

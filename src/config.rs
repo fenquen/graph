@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::process;
+use std::sync::atomic::AtomicUsize;
 use clap::Parser;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
@@ -11,13 +12,22 @@ lazy_static! {
     pub static ref CONFIG :Config = load();
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub log4RsYamlPath: String,
     pub metaDir: String,
     pub wsAddr: String,
     pub dataDir: String,
-    pub txUndergoingMaxCount: usize,
+    pub sessionMemotySize: usize,
+    pub txUndergoingMaxCount: AtomicUsize,
+}
+
+impl Config {
+    pub const DEFAULT_SESSION_MEMORY_SIZE: usize = 2048 * 1024 * 1024;
+    pub const MIN_SESSION_MEMORY_SIZE: usize = 1024 * 1024 * 1024;
+
+    pub const DEFAULT_TX_UNDERGOING_MAX_COUNT: usize = 10000;
+    pub const MIN_TX_UNDERGOING_MAX_COUNT: usize = 1000;
 }
 
 impl Default for Config {
@@ -27,7 +37,8 @@ impl Default for Config {
             metaDir: "meta".to_string(),
             wsAddr: "127.0.0.1:9673".to_string(),
             dataDir: "data".to_string(),
-            txUndergoingMaxCount: 10000,
+            sessionMemotySize: Config::DEFAULT_SESSION_MEMORY_SIZE,
+            txUndergoingMaxCount: AtomicUsize::new(Config::DEFAULT_TX_UNDERGOING_MAX_COUNT),
         }
     }
 }
@@ -44,7 +55,7 @@ pub fn load() -> Config {
     let mut configJsonFile = match File::open(configFilePath) {
         Ok(f) => f,
         Err(e) => {
-            log::info!("config file:{} not exist, {}",configFilePath, e);
+            log::info!("config file:{} not exist, {}", configFilePath, e);
             process::exit(1);
         }
     };

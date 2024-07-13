@@ -126,7 +126,7 @@ mod test {
 
     #[test]
     pub fn testParseInsert() {
-        parser::parse("insert into user values (1,null)").unwrap();
+        parser::parse("insert into user values (1,null),(1,null)").unwrap();
     }
 
     #[test]

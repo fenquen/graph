@@ -6,9 +6,11 @@ use crate::meta::{DBObject, Index, Table};
 use crate::session::Session;
 use crate::{meta, throwFormat};
 use crate::parser::command::Command;
-use crate::types::{DBObjectId, SelectResultToFront};
+use crate::types::{DBObjectId, SelectResultToFront, SessionVec};
 use anyhow::Result;
+use bumpalo::Bump;
 use bytes::BytesMut;
+use graph_independent::AllocatorExt;
 
 mod create;
 mod insert;
@@ -137,8 +139,19 @@ impl<'session> CommandExecutor<'session> {
         self.session.withCapacityIn(capacity)
     }
 
+    #[inline]
     fn newIn(&self) -> BytesMut {
         self.session.withCapacityIn(0)
+    }
+
+    #[inline]
+    fn vecWithCapacityIn<T>(&self, capacity: usize) -> SessionVec<T> {
+        self.session.vecWithCapacityIn(capacity)
+    }
+
+    #[inline]
+    fn vecNewIn<T>(&self) -> SessionVec<T> {
+        self.session.vecWithCapacityIn(0)
     }
 }
 

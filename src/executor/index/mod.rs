@@ -1,7 +1,7 @@
 use std::alloc::Layout;
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use hashbrown::{HashMap, HashSet};
 use std::ops::Deref;
 use std::rc::Rc;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -91,7 +91,6 @@ impl<'session> CommandExecutor<'session> {
                                            scanParams: &'a ScanParams,
                                            tableFilterColName_opValueVecVec: HashMap<String, Vec<Vec<(Op, GraphValue)>>>,
                                            isPureAnd: bool,
-                                           isPureOr: bool,
                                            orHasNonsense: bool) -> Result<Option<IndexSearch<'a>>> {
         // 说明至少是部分or(tableFilter含有or)
         if orHasNonsense {
@@ -156,7 +155,6 @@ impl<'session> CommandExecutor<'session> {
             let mut opValueVecVecAcrossIndexFilteredCols = Vec::with_capacity(index.columnNames.len());
 
             // 遍历index的各columnName
-            'loopIndexColumnName:
             for indexColumnName in &index.columnNames {
                 if tableFilterColNames.contains(&indexColumnName) == false {
                     break;
@@ -270,7 +268,7 @@ impl<'session> CommandExecutor<'session> {
                                 // column上的多条脉络
                                 for opValueVec in opValueVecVec {
                                     // column上的1条脉络
-                                    for (op, value) in opValueVec {
+                                    for (op, _) in opValueVec {
                                         match op {
                                             Op::MathCmpOp(MathCmpOp::Equal) => {}
                                             _ => break 'loopOpValueVecVecAcrossIndexFilteredColsNext
@@ -996,7 +994,7 @@ impl<'session> CommandExecutor<'session> {
             return Ok(None);
         }
 
-        let mut rowData: RowData = HashMap::with_capacity(index.columnNames.len());
+        let mut rowData: RowData = RowData::with_capacity(index.columnNames.len());
 
         for (columnName, columnValue) in index.columnNames.iter().zip(columnValues) {
             rowData.insert(columnName.clone(), columnValue);

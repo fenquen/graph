@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use hashbrown::{HashMap, HashSet};
 use std::ops::{Bound, RangeFrom};
 use bytes::BytesMut;
 use serde_json::{json, Value};

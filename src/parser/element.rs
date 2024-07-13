@@ -5,8 +5,7 @@ use crate::parser::op::{LogicalOp, MathCalcOp, Op, SqlOp};
 use crate::parser::Parser;
 use anyhow::Result;
 use strum_macros::Display as StrumDisplay;
-
-pub type ElementType = u8;
+use crate::types::ElementType;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Element {
