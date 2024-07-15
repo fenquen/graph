@@ -1,12 +1,14 @@
+use std::alloc::Global;
 use std::collections::{BTreeMap};
 use std::ops::Bound;
 use std::sync::Arc;
 use bumpalo::Bump;
 use hashbrown::hash_map::DefaultHashBuilder;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use rocksdb::{BoundColumnFamily, DBIteratorWithThreadMode, DBRawIteratorWithThreadMode,
               DBWithThreadMode, MultiThreaded, SnapshotWithThreadMode};
 use serde_json::Value;
+use graph_independent::AllocatorExt;
 use crate::executor::{CommandExecutor, IterationCmd};
 use crate::graph_value::GraphValue;
 
@@ -33,8 +35,6 @@ pub type TxId = u64;
 
 pub type KV = (Vec<Byte>, Vec<Byte>);
 
-pub type RowData = HashMap<String, GraphValue>;
-
 pub trait CommittedPreProcessor = FnMut(&ColumnFamily, DataKey) -> anyhow::Result<bool>;
 pub trait CommittedPostProcessor = FnMut(&ColumnFamily, DataKey, &RowData) -> anyhow::Result<bool>;
 pub trait UncommittedPreProcessor = FnMut(&TableMutations, DataKey) -> anyhow::Result<bool>;
@@ -52,7 +52,10 @@ pub type RelationDepth = (Bound<usize>, Bound<usize>);
 
 pub type Pointer = u64;
 
+pub type RowData<A = Global> = HashMap<String, GraphValue, DefaultHashBuilder, A>;
+
 pub type SessionVec<'a, T> = Vec<T, &'a Bump>;
 pub type SessionHashMap<'a, K, V> = HashMap<K, V, DefaultHashBuilder, &'a Bump>;
+pub type SessionHashSet<'a, T> = HashSet<T, DefaultHashBuilder, &'a Bump>;
 
 pub type ElementType = u8;

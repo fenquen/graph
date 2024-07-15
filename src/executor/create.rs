@@ -107,7 +107,7 @@ impl<'session> CommandExecutor<'session> {
 
         let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
 
-        let mut indexKeyBuffer = BytesMut::new();
+        let mut indexKeyBuffer = self.newIn();
 
         loop {
             let dataKey = getKeyIfSome!(dbRawIteratorTable);

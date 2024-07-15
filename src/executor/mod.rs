@@ -1,3 +1,4 @@
+use std::hash::Hash;
 use std::sync::atomic::AtomicU64;
 use dashmap::mapref::one::Ref;
 use serde_json::Value;
@@ -6,11 +7,12 @@ use crate::meta::{DBObject, Index, Table};
 use crate::session::Session;
 use crate::{meta, throwFormat};
 use crate::parser::command::Command;
-use crate::types::{DBObjectId, SelectResultToFront, SessionVec};
+use crate::types::{DBObjectId, SelectResultToFront, SessionHashMap, SessionHashSet, SessionVec};
 use anyhow::Result;
 use bumpalo::Bump;
 use bytes::BytesMut;
 use graph_independent::AllocatorExt;
+use crate::utils::Lengthable;
 
 mod create;
 mod insert;
@@ -135,13 +137,20 @@ impl<'session> CommandExecutor<'session> {
     }
 
     #[inline]
+    fn newIn(&self) -> BytesMut {
+        self.withCapacityIn(0)
+    }
+
+    #[inline]
     fn withCapacityIn(&self, capacity: usize) -> BytesMut {
         self.session.withCapacityIn(capacity)
     }
 
+    // ---------------------------------------------------------
+
     #[inline]
-    fn newIn(&self) -> BytesMut {
-        self.session.withCapacityIn(0)
+    fn vecNewIn<T>(&self) -> SessionVec<T> {
+        self.vecWithCapacityIn(0)
     }
 
     #[inline]
@@ -149,9 +158,46 @@ impl<'session> CommandExecutor<'session> {
         self.session.vecWithCapacityIn(capacity)
     }
 
+    /// 注意capacity要尽量在前边, 如果这样(dataKeys, dataKeys.len)会报错提示moved
+    fn collectIntoVecWithCapacity<T>(&self, intoIterator: impl IntoIterator<Item=T> + Lengthable) -> SessionVec<T> {
+        let mut sessionVec = self.vecWithCapacityIn(intoIterator.length());
+        IntoIterator::into_iter(intoIterator).collect_into(&mut sessionVec);
+        sessionVec
+    }
+
+    fn collectVecWithCapacity<T>(&self, iterator: impl Iterator<Item=T> + Lengthable) -> SessionVec<T> {
+        let mut sessionVec = self.vecWithCapacityIn(iterator.length());
+        Iterator::collect_into(iterator, &mut sessionVec);
+        sessionVec
+    }
+
+    fn collectVec<T>(&self, iterator: impl Iterator<Item=T>) -> SessionVec<T> {
+        let mut sessionVec = self.vecNewIn();
+        Iterator::collect_into(iterator, &mut sessionVec);
+        sessionVec
+    }
+
+    // -----------------------------------------------------------
+
     #[inline]
-    fn vecNewIn<T>(&self) -> SessionVec<T> {
-        self.session.vecWithCapacityIn(0)
+    fn hashMapNewIn<K, V>(&self) -> SessionHashMap<K, V> {
+        self.hashMapWithCapacityIn(0)
+    }
+
+    #[inline]
+    fn hashMapWithCapacityIn<K, V>(&self, capacity: usize) -> SessionHashMap<K, V> {
+        self.session.hashMapWithCapacityIn(capacity)
+    }
+
+    // ------------------------------------------------------------------
+    #[inline]
+    fn hashSetWithCapacityIn<T: Hash + Eq>(&self, capacity: usize) -> SessionHashSet<T> {
+        self.session.hashSetWithCapacityIn(capacity)
+    }
+
+    #[inline]
+    fn hashSetNewIn<T: Hash + Eq>(&self) -> SessionHashSet<T> {
+        self.hashSetWithCapacityIn(0)
     }
 }
 

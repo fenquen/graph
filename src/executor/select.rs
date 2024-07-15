@@ -539,8 +539,8 @@ impl<'session> CommandExecutor<'session> {
                                 prefix_minus_minus!(depthRemaining))
     }
 
+    #[inline]
     fn processRowDatasToDisplay(&self, rowDatas: Vec<(DataKey, RowData)>) -> Vec<Value> {
-        let rowDatas: Vec<RowData> = rowDatas.into_iter().map(|(_, rowData)| rowData).collect();
-        JSON_ENUM_UNTAGGED!(rowDatas.into_iter().map(|rowData| serde_json::to_value(&rowData).unwrap()).collect())
+        JSON_ENUM_UNTAGGED!(rowDatas.into_iter().map(|(dataKey,rowData)| serde_json::to_value(&rowData).unwrap()).collect())
     }
 }

@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 #![feature(trait_alias)]
 #![feature(allocator_api)]
+#![feature(iter_collect_into)]
 #![allow(unused)]
 
 mod config;

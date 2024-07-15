@@ -13,7 +13,7 @@ use crate::expr::Expr;
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
 use crate::parser::command::update::Update;
-use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, KV, RowData, RowId, TableMutations};
+use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, KV, RowData, RowId, SessionHashMap, TableMutations};
 use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 use anyhow::Result;
 use crate::meta::Table;
@@ -25,7 +25,7 @@ impl<'session> CommandExecutor<'session> {
         let table = dbObjectTable.asTable()?;
 
         let columnName_column = {
-            let mut columnName_column = HashMap::with_capacity(table.columns.len());
+            let mut columnName_column = self.hashMapWithCapacityIn(table.columns.len());
             for column in &table.columns {
                 columnName_column.insert(column.name.to_string(), column.clone());
             }
@@ -100,7 +100,7 @@ impl<'session> CommandExecutor<'session> {
             NeedCalc(&'a Expr),
         }
 
-        let mut columnName_a: HashMap<String, A> = HashMap::with_capacity(update.columnName_expr.len());
+        let mut columnName_a = self.hashMapWithCapacityIn(update.columnName_expr.len());
 
         let compatibleCheck = |columnName: &String, columnValue: &GraphValue| {
             match columnName_column.get(columnName) {
@@ -133,7 +133,8 @@ impl<'session> CommandExecutor<'session> {
         // todo update的时候能不能直接从binary维度上更改row
         // 遍历各个满足要求的row
         let mut keyBuffer = self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
-        let mut rowDataBuffer = BytesMut::new();
+        let mut rowDataBuffer = self.newIn();
+
         for (ref oldDataKey, rowData) in &mut targetRowDatas {
             // 趁着rowData还是原始模样的时候
             self.generateIndexData(table, &mut keyBuffer, *oldDataKey, rowData, true)?;

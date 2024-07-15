@@ -2,6 +2,7 @@ use std::alloc::Allocator;
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap};
+use std::hash::Hash;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::ptr::NonNull;
@@ -14,7 +15,7 @@ use std::time::Duration;
 use crate::{config, global, meta, parser, throw, throwFormat, u64ToByteArrRef};
 use anyhow::Result;
 use bumpalo::Bump;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use bytes::BytesMut;
 use log::log;
 use rocksdb::{BoundColumnFamily, DB, DBAccess, SnapshotWithThreadMode, DBWithThreadMode};
@@ -24,7 +25,7 @@ use graph_independent::AllocatorExt;
 use crate::config::{Config, CONFIG};
 use crate::executor::CommandExecutor;
 use crate::parser::command::Command;
-use crate::types::{Byte, ColumnFamily, DBRawIterator, KV, SelectResultToFront, SessionHashMap, SessionVec, Snapshot, TableMutations, TxId};
+use crate::types::{Byte, ColumnFamily, DBRawIterator, KV, SelectResultToFront, SessionHashMap, SessionHashSet, SessionVec, Snapshot, TableMutations, TxId};
 use crate::utils::HashMapExt;
 
 pub struct Session {
@@ -306,13 +307,18 @@ impl Session {
     }
 
     #[inline]
+    pub fn vecWithCapacityIn<T>(&self, capacity: usize) -> SessionVec<T> {
+        Vec::with_capacity_in(capacity, &self.bump)
+    }
+
+    #[inline]
     pub fn hashMapWithCapacityIn<K, V>(&self, capacity: usize) -> SessionHashMap<K, V> {
         HashMap::with_capacity_in(capacity, &self.bump)
     }
 
     #[inline]
-    pub fn vecWithCapacityIn<T>(&self, capacity: usize) -> SessionVec<T> {
-        Vec::with_capacity_in(capacity, &self.bump)
+    pub fn hashSetWithCapacityIn<T: Hash + Eq>(&self, capacity: usize) -> SessionHashSet<T> {
+        HashSet::with_capacity_in(capacity, &self.bump)
     }
 }
 

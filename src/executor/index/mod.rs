@@ -16,7 +16,7 @@ use crate::{byte_slice_to_u32, byte_slice_to_u64, global, meta, suffix_plus_plus
 use crate::codec::{BinaryCodec, MyBytes};
 use crate::executor::store;
 use crate::session::Session;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, Pointer, RowData, TableMutations};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, Pointer, RowData, SessionHashMap, SessionHashSet, TableMutations};
 use anyhow::Result;
 use crate::executor::optimizer::merge;
 use crate::executor::optimizer::merge::AccumulateResult;
@@ -387,8 +387,8 @@ impl<'session> CommandExecutor<'session> {
         let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
         let mut indexDBRawIterator = self.session.getDBRawIterator(&indexColumnFamily)?;
 
-        let mut rowDatas: HashMap<DataKey, (DataKey, RowData)> = HashMap::new();
-        let mut dataKeys: HashSet<DataKey> = HashSet::new();
+        let mut rowDatas: SessionHashMap<DataKey, (DataKey, RowData)> = self.hashMapNewIn();
+        let mut dataKeys: SessionHashSet<DataKey> = self.hashSetNewIn();
 
         // todo 如果是indexLocal的话 还是要应对重复数据 不像应对datakey那样容易 使用hashMap去掉重复的dataKey 完成
         let mut processWhenPrefixFollowing1stColSatisfied =
@@ -404,13 +404,14 @@ impl<'session> CommandExecutor<'session> {
             };
 
         let process =
-            |rowDatas: HashMap<DataKey, (DataKey, RowData)>, dataKeys: HashSet<DataKey>| {
+            |rowDatas: SessionHashMap<DataKey, (DataKey, RowData)>, dataKeys: SessionHashSet<DataKey>| {
                 if indexSearch.indexLocalSearch {
                     let rowDatas = rowDatas.into_values().collect::<Vec<(DataKey, RowData)>>();
                     return Result::<Vec<(DataKey, RowData)>>::Ok(rowDatas);
                 }
 
-                let dataKeys: Vec<DataKey> = dataKeys.into_iter().collect();
+                let dataKeys = self.collectIntoVecWithCapacity(dataKeys);
+
                 let scanHooks: &mut ScanHooks<A, B, C, D> = utils::ptr2RefMut(indexSearch.scanHooksPtr);
                 let rowDatas = self.getRowDatasByDataKeys(dataKeys.as_slice(), indexSearch.scanParams, scanHooks)?;
 
@@ -519,11 +520,13 @@ impl<'session> CommandExecutor<'session> {
 
                         // 因为string是变长的,只能现用现生成,不像是int等固定长度可以提前分配空间,性能上会降低
                         let mut bufferString = {
-                            let mut bufferString = self.withCapacityIn(prefixBuffer.len() + value.size().unwrap());
+                            let capacity = prefixBuffer.len() + value.size().unwrap();
+
+                            let mut bufferString = self.withCapacityIn(capacity);
                             bufferString.put_slice(prefixBuffer.as_ref());
 
                             // buffer使用比较容易犯错的地方,你要在它上边打个小窗口(slice)要确保len还不止是capacity
-                            unsafe { bufferString.set_len(bufferString.capacity()); }
+                            unsafe { bufferString.set_len(capacity); }
 
                             bufferString
                         };

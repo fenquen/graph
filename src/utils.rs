@@ -4,7 +4,7 @@ use std::{alloc, mem, ptr};
 use std::alloc::{Allocator, Global, Layout, System};
 use std::borrow::Borrow;
 use std::hash::{BuildHasher, Hash, RandomState};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use anyhow::format_err;
 use bumpalo::Bump;
 use graph_independent::AllocatorExt;
@@ -195,6 +195,28 @@ pub fn isPureSomeChar(str: &str, target: char) -> bool {
     }
 
     true
+}
+
+pub trait Lengthable {
+    fn length(&self) -> usize;
+}
+
+impl<T, A: Allocator> Lengthable for Vec<T, A> {
+    fn length(&self) -> usize {
+        self.len()
+    }
+}
+
+impl<K, V, S, A: Allocator> Lengthable for HashMap<K, V, S, A> {
+    fn length(&self) -> usize {
+        self.len()
+    }
+}
+
+impl<T, S, A: Allocator> Lengthable for HashSet<T, S, A> {
+    fn length(&self) -> usize {
+        self.len()
+    }
 }
 
 #[cfg(test)]
