@@ -9,16 +9,17 @@ use crate::parser::command::insert::Insert;
 use crate::parser::command::link::Link;
 use crate::types::{DataKey, KeyTag, KV, RowId, CommittedPreProcessor};
 use anyhow::Result;
+use crate::session::Session;
 
 impl<'session> CommandExecutor<'session> {
     /// 它本质是向relation对应的data file写入
     /// 两个元素之间的relation只看种类不看里边的属性的
     pub(super) fn link(&self, link: &Link) -> Result<CommandExecResult> {
         // 得到表的对象
-        let srcTable = self.getDBObjectByName(link.srcTableName.as_str())?;
+        let srcTable = Session::getDBObjectByName(link.srcTableName.as_str())?;
         let srcTable = srcTable.asTable()?;
 
-        let destTable = self.getDBObjectByName(link.destTableName.as_str())?;
+        let destTable = Session::getDBObjectByName(link.destTableName.as_str())?;
         let destTable = destTable.asTable()?;
 
         // 对src table和dest table调用expr筛选
@@ -64,7 +65,7 @@ impl<'session> CommandExecutor<'session> {
             columnExprVecVec: vec![link.relationColumnExprs.clone()],
         };
 
-        let relation = self.getDBObjectByName(&link.relationName)?;
+        let relation = Session::getDBObjectByName(&link.relationName)?;
         let relation = relation.asRelation()?;
 
         let relRowId: RowId = relation.rowIdCounter.fetch_add(1, Ordering::AcqRel);

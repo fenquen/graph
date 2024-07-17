@@ -20,13 +20,13 @@ impl<'session> CommandExecutor<'session> {
     /// 应对 unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13) 和原来link基本相同
     /// 和原来的link套路相同是它反过来的
     fn unlinkLinkStyle(&self, unlinkLinkStyle: &UnlinkLinkStyle) -> anyhow::Result<CommandExecResult> {
-        let relation = self.getDBObjectByName(&unlinkLinkStyle.relationName)?;
+        let relation = Session::getDBObjectByName(&unlinkLinkStyle.relationName)?;
         let relation = relation.asRelation()?;
 
-        let destTable = self.getDBObjectByName(&unlinkLinkStyle.destTableName)?;
+        let destTable = Session::getDBObjectByName(&unlinkLinkStyle.destTableName)?;
         let destTable = destTable.asTable()?;
 
-        let srcTable = self.getDBObjectByName(&unlinkLinkStyle.srcTableName)?;
+        let srcTable = Session::getDBObjectByName(&unlinkLinkStyle.srcTableName)?;
         let srcTable = srcTable.asTable()?;
 
         let relationColumnFamily = Session::getColFamily(unlinkLinkStyle.relationName.as_str())?;

@@ -5,12 +5,13 @@ use crate::parser::command::delete::Delete;
 use types::CommittedPreProcessor;
 use crate::executor::store::{ScanHooks, ScanParams};
 use anyhow::Result;
+use crate::session::Session;
 
 impl<'session> CommandExecutor<'session> {
     // todo rel不能直接delete 应该先把rel上的点全都取消 rel不存在src和dest的点 然后
     /// 得到满足expr的record 然后把它的xmax变为当前的txId
     pub(super) fn delete(&self, delete: &Delete) -> Result<CommandExecResult> {
-        let table = self.getDBObjectByName(delete.tableName.as_str())?;
+        let table = Session::getDBObjectByName(delete.tableName.as_str())?;
         let table = table.asTable()?;
 
         let targetRowDatas = {

@@ -81,11 +81,11 @@ lazy_static! {
 // ----------------------------------------------------------------------
 
 /// tag 用到POINTER前缀的key上的1Byte
-pub const KEY_TAG_BYTE_LEN: usize = mem::size_of::<KeyTag>();
+pub const KEY_TAG_BYTE_LEN: usize = size_of::<KeyTag>();
 
 // ----------------------------------------------------------------------
 
-pub const DB_OBJECT_ID_BYTE_LEN: usize = mem::size_of::<DBObjectId>();
+pub const DB_OBJECT_ID_BYTE_LEN: usize = size_of::<DBObjectId>();
 
 // ----------------------------------------------------------------------
 
@@ -111,6 +111,7 @@ pub const POINTER_KEY_BYTE_LEN: usize = {
 pub const POINTER_KEY_TARGET_DATA_KEY_OFFSET: usize = POINTER_KEY_BYTE_LEN - TX_ID_BYTE_LEN - KEY_TAG_BYTE_LEN - DATA_KEY_BYTE_LEN;
 pub const POINTER_KEY_MVCC_KEY_TAG_OFFSET: usize = POINTER_KEY_TARGET_DATA_KEY_OFFSET + DATA_KEY_BYTE_LEN;
 pub const POINTER_KEY_TX_ID_OFFSET: usize = POINTER_KEY_MVCC_KEY_TAG_OFFSET + KEY_TAG_BYTE_LEN;
+pub const POINTER_KEY_TARGET_DB_OBJECT_ID_OFFSET: usize = DATA_KEY_BYTE_LEN + KEY_TAG_BYTE_LEN;
 
 // ---------------------------------------------------------------------------------------
 
@@ -193,16 +194,6 @@ macro_rules! extractPrefixFromKeySlice {
     };
 }
 
-#[macro_export]
-macro_rules! extractTargetDataKeyFromPointerKey {
-    ($pointerKey: expr) => {
-        {
-            let slice = &$pointerKey[meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET..(meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET + meta::DATA_KEY_BYTE_LEN)];
-            byte_slice_to_u64!(slice) as crate::types::DataKey
-        }
-    };
-}
-
 /// txId 是在 mvccKey 末尾
 #[macro_export]
 macro_rules! extractTxIdFromMvccKey {
@@ -210,6 +201,23 @@ macro_rules! extractTxIdFromMvccKey {
         {
             let txIdSlice = &$mvccKey[(meta::MVCC_KEY_BYTE_LEN - meta::TX_ID_BYTE_LEN)..meta::MVCC_KEY_BYTE_LEN];
             byte_slice_to_u64!(txIdSlice) as crate::types::TxId
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! extractKeyTagFromMvccKey {
+    ($mvccKey: expr) => {
+        $mvccKey[meta::DATA_KEY_BYTE_LEN] as crate::types::KeyTag
+    };
+}
+
+#[macro_export]
+macro_rules! extractTargetDataKeyFromPointerKey {
+    ($pointerKey: expr) => {
+        {
+            let slice = &$pointerKey[meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET..(meta::POINTER_KEY_TARGET_DATA_KEY_OFFSET + meta::DATA_KEY_BYTE_LEN)];
+            crate::byte_slice_to_u64!(slice) as crate::types::DataKey
         }
     };
 }
@@ -233,13 +241,23 @@ macro_rules! extractMvccKeyTagFromPointerKey {
 }
 
 #[macro_export]
-macro_rules! extractKeyTagFromMvccKey {
-    ($mvccKey: expr) => {
-        $mvccKey[meta::DATA_KEY_BYTE_LEN] as crate::types::KeyTag
+macro_rules! extractTargetDBObjectIdFromPointerKey {
+    ($pointerKey: expr) => {
+        {
+            let slice = &$pointerKey[meta::POINTER_KEY_TARGET_DB_OBJECT_ID_OFFSET..(meta::POINTER_KEY_TARGET_DB_OBJECT_ID_OFFSET + meta::DB_OBJECT_ID_BYTE_LEN)];
+            crate::byte_slice_to_u64!(slice) as crate::types::DBObjectId
+        }
     };
 }
 
-#[derive(Serialize, Deserialize)]
+#[macro_export]
+macro_rules! extractDirectionKeyTagFromPointerKey {
+    ($pointerKey: expr) => {
+        $pointerKey[meta::DATA_KEY_BYTE_LEN] as crate::types::KeyTag
+    };
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub enum DBObject {
     Table(Table),
     Index(Index),
@@ -259,6 +277,14 @@ impl DBObject {
         }
     }
 
+    pub fn asTableOption(&self) -> Option<&Table> {
+        if let DBObject::Table(table) = self {
+            Some(table)
+        } else {
+            None
+        }
+    }
+
     pub fn asTableMut(&mut self) -> Result<&mut Table> {
         if let DBObject::Table(table) = self {
             Ok(table)
@@ -275,11 +301,27 @@ impl DBObject {
         }
     }
 
+    pub fn asIndexOption(&self) -> Option<&Index> {
+        if let DBObject::Index(index) = self {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
     pub fn asRelation(&self) -> Result<&Table> {
         if let DBObject::Relation(table) = self {
             Ok(table)
         } else {
             throw!(&format!("{} is not a relation", self.getName()))
+        }
+    }
+
+    pub fn asRelationOption(&self) -> Option<&Table> {
+        if let DBObject::Relation(table) = self {
+            Some(table)
+        } else {
+            None
         }
     }
 

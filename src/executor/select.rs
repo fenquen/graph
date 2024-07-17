@@ -15,6 +15,7 @@ use crate::parser::command::select::{EndPointType, RelDesc, Select, SelectRel, S
 use anyhow::{anyhow, Result};
 use crate::executor::store::{ScanHooks, ScanParams, SearchPointerKeyHooks};
 use crate::expr::Expr;
+use crate::session::Session;
 use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 
 impl<'session> CommandExecutor<'session> {
@@ -31,7 +32,7 @@ impl<'session> CommandExecutor<'session> {
 
     /// 普通的和rdbms相同的 select
     fn selectTable(&self, selectTable: &SelectTable) -> Result<CommandExecResult> {
-        let table = self.getDBObjectByName(selectTable.tableName.as_str())?;
+        let table = Session::getDBObjectByName(selectTable.tableName.as_str())?;
         let table = table.asTable()?;
 
         let rowDatas = {
@@ -78,7 +79,7 @@ impl<'session> CommandExecutor<'session> {
             // 为什么要使用{} 不然的话有概率死锁
             // https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
             let relationDatas: Vec<(DataKey, RowData)> = {
-                let relation = self.getDBObjectByName(selectRel.relationName.as_ref().unwrap())?;
+                let relation = Session::getDBObjectByName(selectRel.relationName.as_ref().unwrap())?;
                 let relation = relation.asRelation()?;
 
                 let scanParams = ScanParams {
@@ -97,13 +98,13 @@ impl<'session> CommandExecutor<'session> {
             // 融合了当前的selectRel的满足条件的全部的relationDatas的全部的destDataKey
             let mut destDataKeysInSelectRel = HashSet::new();
 
-            let srcTable = self.getDBObjectByName(&selectRel.srcTableName)?;
+            let srcTable = Session::getDBObjectByName(&selectRel.srcTableName)?;
             let srcTable = srcTable.asTable()?;
 
-            let destTable = self.getDBObjectByName(selectRel.destTableName.as_ref().unwrap())?;
+            let destTable = Session::getDBObjectByName(selectRel.destTableName.as_ref().unwrap())?;
             let destTable = destTable.asTable()?;
 
-            let relation = self.getDBObjectByName(selectRel.relationName.as_ref().unwrap())?;
+            let relation = Session::getDBObjectByName(selectRel.relationName.as_ref().unwrap())?;
             let relation = relation.asRelation()?;
 
             // 遍历当前的selectRel的多条relationData
@@ -352,7 +353,7 @@ impl<'session> CommandExecutor<'session> {
     /// 相当是在原来基础上再加上对data指向的rel的筛选
     fn selectTableUnderRels(&self, selectTableUnderRels: &SelectTableUnderRels) -> Result<CommandExecResult> {
         // 先要以普通select table体系筛选 然后对pointerKey筛选
-        let table = self.getDBObjectByName(selectTableUnderRels.selectTable.tableName.as_str())?;
+        let table = Session::getDBObjectByName(selectTableUnderRels.selectTable.tableName.as_str())?;
         let table = table.asTable()?;
 
         let mut pointerKeyBuffer = self.withCapacityIn(meta::POINTER_KEY_BYTE_LEN);
@@ -424,7 +425,7 @@ impl<'session> CommandExecutor<'session> {
             |nodeDataKey: DataKey| {
                 // 遍历relDesc,看data是不是都能满足
                 for relDesc in &selectTableUnderRels.relDescVec {
-                    let relation = self.getDBObjectByName(relDesc.relationName.as_str())?;
+                    let relation = Session::getDBObjectByName(relDesc.relationName.as_str())?;
                     let relation = relation.asRelation()?;
 
                     // 是不是能满足当前relDesc要求

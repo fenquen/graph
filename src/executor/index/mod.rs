@@ -86,7 +86,7 @@ impl<'session> CommandExecutor<'session> {
     // todo table对应的index列表 是不是应该融入到table对象(table本身记录他的indexNames) 完成
     // todo index应对like
     // todo 识别何时应该使用index和使用哪种index 完成
-    // 对self使用 'a的原因是 dbObjectIndex是通过 self.getDBObjectByName() 得到 含有的生命周期是 'session
+    // 对self使用 'a的原因是 dbObjectIndex是通过 Session::getDBObjectByName() 得到 含有的生命周期是 'session
     pub(super) fn getMostSuitableIndex<'a>(&'a self,
                                            scanParams: &'a ScanParams,
                                            tableFilterColName_opValueVecVec: HashMap<String, Vec<Vec<(Op, GraphValue)>>>,
@@ -139,7 +139,7 @@ impl<'session> CommandExecutor<'session> {
 
         'loopIndex:
         for indexName in &scanParams.table.indexNames {
-            let dbObjectIndex = self.getDBObjectByName(indexName)?;
+            let dbObjectIndex = Session::getDBObjectByName(indexName)?;
             let index = dbObjectIndex.asIndex()?;
 
             // filter能用到index的几个字段
@@ -1029,7 +1029,7 @@ impl<'session> CommandExecutor<'session> {
 
         // 遍历各个index
         for indexName in &table.indexNames {
-            let dbObjectIndex = self.getDBObjectByName(indexName)?;
+            let dbObjectIndex = Session::getDBObjectByName(indexName)?;
             let index = dbObjectIndex.asIndex()?;
 
             assert_eq!(table.name, index.tableName);

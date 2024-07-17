@@ -59,21 +59,23 @@ impl Parser {
 
         loop {
             let command =
-                match self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_uppercase().as_str() {
-                    "CREATE" => self.parseCreate()?,
-                    "INSERT" => self.parseInsert()?,
-                    "LINK" => self.parseLink(false)?,
-                    "DELETE" => self.parseDelete()?,
-                    "UPDATE" => self.parseUpdate()?,
-                    "SELECT" => self.parseSelect()?,
-                    "UNLINK" => self.parseUnlink()?,
-                    "COMMIT" => self.parseCommit()?,
-                    "ROLLBACK" => self.parseRollback()?,
-                    "SET" => self.parseSet()?,
+                match self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase().as_str() {
+                    "create" => self.parseCreate()?,
+                    "drop" => self.parseDrop()?,
+                    "insert" => self.parseInsert()?,
+                    "link" => self.parseLink(false)?,
+                    "delete" => self.parseDelete()?,
+                    "update" => self.parseUpdate()?,
+                    "select" => self.parseSelect()?,
+                    "unlink" => self.parseUnlink()?,
+                    "commit" => self.parseCommit()?,
+                    "rollback" => self.parseRollback()?,
+                    "set" => self.parseSet()?,
+                    "show" => self.parseShow()?,
                     _ => self.throwSyntaxError()?,
                 };
 
-            println!("{:?}\n", command);
+            log::debug!("{:?}\n", command);
 
             commandVec.push(command);
 
@@ -184,5 +186,10 @@ mod test {
     #[test]
     pub fn testAutocommit() {
         parser::parse("set autocommit true").unwrap();
+    }
+
+    #[test]
+    pub fn testDrop() {
+        parser::parse("drop relation a").unwrap();
     }
 }

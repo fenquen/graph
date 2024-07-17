@@ -15,6 +15,7 @@ use std::time::Duration;
 use crate::{config, global, meta, parser, throw, throwFormat, u64ToByteArrRef};
 use anyhow::Result;
 use bumpalo::Bump;
+use dashmap::mapref::one::{Ref, RefMut};
 use hashbrown::{HashMap, HashSet};
 use bytes::BytesMut;
 use log::log;
@@ -24,14 +25,16 @@ use tokio::io::AsyncWriteExt;
 use graph_independent::AllocatorExt;
 use crate::config::{Config, CONFIG};
 use crate::executor::CommandExecutor;
+use crate::meta::DBObject;
 use crate::parser::command::Command;
-use crate::types::{Byte, ColumnFamily, DBRawIterator, KV, SelectResultToFront, SessionHashMap, SessionHashSet, SessionVec, Snapshot, TableMutations, TxId};
+use crate::types::{Byte, ColumnFamily, DBObjectId, DBRawIterator, KV, SelectResultToFront, SessionHashMap, SessionHashSet, SessionVec, Snapshot, TableMutations, TxId};
 use crate::utils::HashMapExt;
 
 pub struct Session {
     autoCommit: bool,
     txId: Option<TxId>,
     dataStore: &'static DB,
+    metaStore: &'static DB,
     pub tableName_mutations: RwLock<HashMap<String, TableMutations>>,
     snapshot: Option<Snapshot<'static>>,
     pub scanConcurrency: usize,
@@ -40,7 +43,7 @@ pub struct Session {
 
 impl Session {
     pub fn new() -> Self {
-        Default::default()
+        Session::default()
     }
 
     /// 如果是autoCommit 该调用是个tx 可能传递的&str包含了多个独立的sql
@@ -199,12 +202,66 @@ impl Session {
         }
     }
 
+    #[inline]
     pub fn getDBRawIterator(&self, columnFamily: &ColumnFamily) -> Result<DBRawIterator> {
         Ok(self.getSnapshot()?.raw_iterator_cf(columnFamily))
     }
 
-    pub fn createColFamily(&self, columnFamilyName: &str) -> Result<()> {
-        Ok(meta::STORE.dataStore.create_cf(columnFamilyName, &Options::default())?)
+    #[inline]
+    pub fn createColFamily(&self, name: &str) -> Result<()> {
+        Ok(self.dataStore.create_cf(name, &Options::default())?)
+    }
+
+    #[inline]
+    pub fn putUpdateMeta(&self, dbObjectId: DBObjectId, dbObject: &DBObject) -> Result<()> {
+        let key = &dbObjectId.to_be_bytes()[..];
+        Ok(self.metaStore.put(key, serde_json::to_string(dbObject)?.as_bytes())?)
+    }
+
+    #[inline]
+    pub fn dropColFamily(&self, name: &str) -> Result<()> {
+        Ok(self.dataStore.drop_cf(name)?)
+    }
+
+    #[inline]
+    pub fn deleteMeta(&self, dbObjectId: DBObjectId) -> Result<()> {
+        let key = &dbObjectId.to_be_bytes()[..];
+        Ok(self.metaStore.delete(key)?)
+    }
+
+    /// 直接上手datastore
+    #[inline]
+    pub fn deleteUnderCf(&self, key: &[Byte], columnFamily: &ColumnFamily) -> Result<()> {
+        Ok(self.dataStore.delete_cf(columnFamily, key)?)
+    }
+
+    #[inline]
+    pub fn deleteRangeUnderCf(&self, columnFamily: &ColumnFamily, from: &[Byte], to: &[Byte]) -> Result<()> {
+        Ok(self.dataStore.delete_range_cf(columnFamily, from, to)?)
+    }
+
+    // todo getDBObjectByName用不到self迁移到session 完成
+    pub fn getDBObjectByName(dbObjectName: &str) -> Result<Ref<String, DBObject>> {
+        match meta::NAME_DB_OBJ.get(dbObjectName) {
+            None => throwFormat!("db object:{} not exist", dbObjectName),
+            Some(dbObject) => Ok(dbObject)
+        }
+    }
+
+    /// 可以起到独占锁的效果
+    pub fn getDBObjectMutByName(dbObjectName: &str) -> Result<RefMut<String, DBObject>> {
+        match meta::NAME_DB_OBJ.get_mut(dbObjectName) {
+            None => throwFormat!("db object:{} not exist", dbObjectName),
+            Some(dbObject) => Ok(dbObject)
+        }
+    }
+
+    pub fn removeDBObjectByName(dbObjectName: &str) -> Result<()> {
+        if let None = meta::NAME_DB_OBJ.remove(dbObjectName) {
+            throwFormat!("db object:{} not exist", dbObjectName);
+        }
+
+        Ok(())
     }
 
     pub fn writeAddDataMutation(&self,
@@ -327,6 +384,7 @@ impl Default for Session {
         Session {
             autoCommit: true,
             dataStore: &meta::STORE.dataStore,
+            metaStore: &meta::STORE.metaStore,
             txId: None,
             tableName_mutations: Default::default(),
             snapshot: None,

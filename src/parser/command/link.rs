@@ -5,6 +5,7 @@ use crate::parser::command::Command;
 use crate::parser::element::Element;
 use crate::parser::op::{MathCmpOp, Op};
 use crate::parser::Parser;
+use anyhow::Result;
 
 // todo 后续要改变当前的relation保存体系
 /// link user(id = 1) to car(color = 'red') by usage(number = 2)
@@ -24,8 +25,8 @@ pub struct Link {
 
 impl Parser {
     // link user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13)
-    // todo 能不能实现 ```link user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre```
-    pub(in crate::parser) fn parseLink(&mut self, regardLastPartAsFilter: bool) -> anyhow::Result<Command> {
+    // todo 实现 ```link user(id=1 and 0=6) -usage(number = 9) -> car -own(number=1)-> tyre```
+    pub(in crate::parser) fn parseLink(&mut self, regardLastPartAsFilter: bool) -> Result<Command> {
         let mut link = Link::default();
 
         #[derive(Clone, Copy)]
@@ -74,6 +75,7 @@ impl Parser {
 
         link.relationName = self.getCurrentElementAdvance()?.expectTextLiteral("relation name")?;
 
+        // 如果是true的话是用在unlink上,relation名字后边的括号是对relation的筛选条件
         if regardLastPartAsFilter {
             let nextElement = self.getCurrentElementOption();
             if nextElement.is_none() {
@@ -84,7 +86,7 @@ impl Parser {
             nextElement.expectTextLiteralContent(global::圆括号_STR)?;
 
             link.relationFilterExpr = Some(self.parseExpr(false)?);
-        } else {
+        } else { // 应对的是建立关系的时候, 相当于是insert
             // 下边要解析 by usage (a=0,a=(1212+0))的后边的括号部分了
             // 和parseInExprs使用相同的套路,当(数量和)数量相同的时候说明收敛结束了,因为会以")"收尾
             let mut 括号数量 = 0;
@@ -104,7 +106,7 @@ impl Parser {
             }
 
             let mut parseState = ParseState::ParseColumnName;
-            let mut exprElementVec = Default::default();
+            let mut exprElementVec = Vec::new();
             loop {
                 let currentElement =
                     match self.getCurrentElementAdvanceOption() {

@@ -5,12 +5,13 @@ use std::sync::Arc;
 use bumpalo::Bump;
 use hashbrown::hash_map::DefaultHashBuilder;
 use hashbrown::{HashMap, HashSet};
-use rocksdb::{BoundColumnFamily, DBIteratorWithThreadMode, DBRawIteratorWithThreadMode,
-              DBWithThreadMode, MultiThreaded, SnapshotWithThreadMode};
+use rocksdb::{BoundColumnFamily, DBIteratorWithThreadMode, DBRawIteratorWithThreadMode};
+use rocksdb::{DBWithThreadMode, MultiThreaded, SnapshotWithThreadMode};
 use serde_json::Value;
 use graph_independent::AllocatorExt;
 use crate::executor::{CommandExecutor, IterationCmd};
 use crate::graph_value::GraphValue;
+use anyhow::Result;
 
 /// 到后台的sql可能是由多个小sql构成的 单个小select的sql对应个Vec<Value>
 pub type SelectResultToFront = Vec<Vec<Value>>;
@@ -35,15 +36,15 @@ pub type TxId = u64;
 
 pub type KV = (Vec<Byte>, Vec<Byte>);
 
-pub trait CommittedPreProcessor = FnMut(&ColumnFamily, DataKey) -> anyhow::Result<bool>;
-pub trait CommittedPostProcessor = FnMut(&ColumnFamily, DataKey, &RowData) -> anyhow::Result<bool>;
-pub trait UncommittedPreProcessor = FnMut(&TableMutations, DataKey) -> anyhow::Result<bool>;
-pub trait UncommittedPostProcessor = FnMut(&TableMutations, DataKey, &RowData) -> anyhow::Result<bool>;
+pub trait CommittedPreProcessor = FnMut(&ColumnFamily, DataKey) -> Result<bool>;
+pub trait CommittedPostProcessor = FnMut(&ColumnFamily, DataKey, &RowData) -> Result<bool>;
+pub trait UncommittedPreProcessor = FnMut(&TableMutations, DataKey) -> Result<bool>;
+pub trait UncommittedPostProcessor = FnMut(&TableMutations, DataKey, &RowData) -> Result<bool>;
 
 /// columnFamily committedPointerKey(会随着变化) prefix(不会变化)
-pub trait CommittedPointerKeyProcessor = FnMut(&ColumnFamily, &[Byte], &[Byte]) -> anyhow::Result<IterationCmd>;
+pub trait CommittedPointerKeyProcessor = FnMut(&ColumnFamily, &[Byte], &[Byte]) -> Result<IterationCmd>;
 /// tableMutations addedPointerKey(会随着变化) prefix(不会变化)
-pub trait UncommittedPointerKeyProcessor = FnMut(&TableMutations, &[Byte], &[Byte]) -> anyhow::Result<IterationCmd>;
+pub trait UncommittedPointerKeyProcessor = FnMut(&TableMutations, &[Byte], &[Byte]) -> Result<IterationCmd>;
 
 pub type TableMutations = BTreeMap<Vec<Byte>, Vec<Byte>>;
 

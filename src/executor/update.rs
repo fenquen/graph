@@ -17,11 +17,12 @@ use crate::types::{Byte, ColumnFamily, DataKey, DBIterator, KV, RowData, RowId, 
 use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 use anyhow::Result;
 use crate::meta::Table;
+use crate::session::Session;
 
 impl<'session> CommandExecutor<'session> {
     // todo 要是point还有rel的联系不能update 完成
     pub(super) fn update(&self, update: &Update) -> Result<CommandExecResult> {
-        let dbObjectTable = self.getDBObjectByName(update.tableName.as_str())?;
+        let dbObjectTable = Session::getDBObjectByName(update.tableName.as_str())?;
         let table = dbObjectTable.asTable()?;
 
         let columnName_column = {

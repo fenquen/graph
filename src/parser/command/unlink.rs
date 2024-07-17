@@ -8,6 +8,7 @@ use crate::parser::command::select::{EndPointType, RelDesc};
 use crate::parser::element::Element;
 use crate::parser::op::{Op, SqlOp};
 use crate::parser::Parser;
+use anyhow::Result;
 
 pub type UnlinkLinkStyle = Link;
 
@@ -25,9 +26,9 @@ pub struct UnlinkSelfStyle {
 }
 
 impl Parser {
-    /// unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13) <br>
-    /// todo unlink user(id >1 ) as start in usage (number = 7) ,as end in own(number =7) 感觉不该用到unlink上,反而应该用到select上
-    pub(in crate::parser) fn parseUnlink(&mut self) -> anyhow::Result<Command> {
+    /// unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number > 13) <br>
+    /// unlink user(id >1 ) as start in usage (number = 7) ,as end in own(number > 7)
+    pub(in crate::parser) fn parseUnlink(&mut self) -> Result<Command> {
         // 尝试先用link的套路parse
         if let Ok(Command::Link(link)) = self.parseLink(true) {
             return Ok(Command::Unlink(Unlink::LinkStyle(link)));

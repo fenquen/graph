@@ -26,7 +26,7 @@ impl<'session> CommandExecutor<'session> {
         self.session.createColFamily(table.name.as_str())?;
 
         // todo 使用 u64的tableId 为key 完成
-        let key = u64ToByteArrRef!(table.id);
+        let tableId = table.id;
 
         let dbObject =
             if isTable == false {
@@ -35,7 +35,7 @@ impl<'session> CommandExecutor<'session> {
                 DBObject::Table(table)
             };
 
-        meta::STORE.metaStore.put(key, serde_json::to_string(&dbObject)?.as_bytes())?;
+        self.session.putUpdateMeta(tableId, &dbObject)?;
 
         // map
         meta::NAME_DB_OBJ.insert(dbObject.getName(), dbObject);
@@ -84,17 +84,18 @@ impl<'session> CommandExecutor<'session> {
         // todo 新建index的时候要是表上已经有数据需要当场生成index数据 完成
         self.generateIndexDataForExistingTableData(targetTable, &index)?;
 
-        let indexId = u64ToByteArrRef!(index.id);
+        let indexId = index.id;
         let dbObjectIndex = DBObject::Index(index);
 
         // 落地 index
-        meta::STORE.metaStore.put(indexId, serde_json::to_string(&dbObjectIndex)?.as_bytes())?;
+        self.session.putUpdateMeta(indexId, &dbObjectIndex)?;
+        // map 更新
         meta::NAME_DB_OBJ.insert(dbObjectIndex.getName(), dbObjectIndex);
 
         // todo 如何知道表涉及到的index有哪些,要有table和相应的index的联系 完成
-        // 回写更新后的表的信息
+        // 回写更新后的表的信息落地
         targetTable.indexNames.push(indexName);
-        meta::STORE.metaStore.put(u64ToByteArrRef!(targetTable.id), serde_json::to_string(&DBObject::Table(targetTable.clone()))?.as_bytes())?;
+        self.session.putUpdateMeta(targetTable.id, &DBObject::Table(targetTable.clone()))?;
 
         Ok(CommandExecResult::DdlResult)
     }

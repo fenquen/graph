@@ -27,6 +27,8 @@ mod vaccum;
 mod manage;
 mod index;
 mod optimizer;
+mod drop;
+mod show;
 
 #[macro_export]
 macro_rules! JSON_ENUM_UNTAGGED {
@@ -65,18 +67,6 @@ impl<'session> CommandExecutor<'session> {
 
         for command in commands {
             let executionResult = match command {
-                Command::CreateIndex(index) => {
-                    let index = Index {
-                        id: DBObjectId::default(),
-                        name: index.name.clone(),
-                        tableName: index.tableName.clone(),
-                        columnNames: index.columnNames.clone(),
-                        rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
-                        createIfNotExist: index.createIfNotExist,
-                    };
-
-                    self.createIndex(index)?
-                }
                 Command::CreateTable(table) => {
                     let table = Table {
                         id: DBObjectId::default(),
@@ -89,6 +79,21 @@ impl<'session> CommandExecutor<'session> {
                     };
 
                     self.createTable(table, true)?
+                }
+                Command::DropTable(tableName) => self.dropTable(tableName)?,
+                Command::DropRelation(relationName) => self.dropRelation(relationName)?,
+                Command::DropIndex(indexName) => self.dropIndex(indexName)?,
+                Command::CreateIndex(index) => {
+                    let index = Index {
+                        id: DBObjectId::default(),
+                        name: index.name.clone(),
+                        tableName: index.tableName.clone(),
+                        columnNames: index.columnNames.clone(),
+                        rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
+                        createIfNotExist: index.createIfNotExist,
+                    };
+
+                    self.createIndex(index)?
                 }
                 Command::CreateRelation(table) => {
                     let table = Table {
@@ -115,25 +120,20 @@ impl<'session> CommandExecutor<'session> {
                 }
                 Command::Rollback => self.rollback()?,
                 Command::Set(set) => self.set(set)?,
+                Command::ShowIndice(dbObject) => self.showIndice(dbObject.as_ref())?,
+                Command::ShowRelations => self.showRelations()?,
+                Command::ShowTables => self.showTables()?,
+                _ => throwFormat!("unsupported command: {:?}", command)
             };
 
             // 如何应对多个的select
             if let CommandExecResult::SelectResult(valueVec) = executionResult {
-                println!("{}\n", serde_json::to_string(&valueVec)?);
+                log::debug!("{}\n", serde_json::to_string(&valueVec)?);
                 valueVecVec.push(valueVec);
             }
         }
 
         Ok(valueVecVec)
-    }
-
-    fn getDBObjectByName(&self, dbObjectName: &str) -> Result<Ref<String, DBObject>> {
-        let dbObject = meta::NAME_DB_OBJ.get(dbObjectName);
-        if dbObject.is_none() {
-            throwFormat!("db object:{} not exist", dbObjectName);
-        }
-
-        Ok(dbObject.unwrap())
     }
 
     #[inline]

@@ -412,7 +412,7 @@ impl<'session> CommandExecutor<'session> {
                                         let selectedColumnNames: Option<&Vec<String>> = selectedColumnNamesPointer.map(|selectedColumnNamesPointer| mem::transmute(selectedColumnNamesPointer as *const Vec<String>));
                                         let scanHooks: &mut ScanHooks<A, B, C, D> = mem::transmute(scanHooksPointer as *mut ScanHooks<A, B, C, D>);
 
-                                        let table = commandExecutor.getDBObjectByName(tableName.as_str())?;
+                                        let table = Session::getDBObjectByName(tableName.as_str())?;
                                         let table = table.asTable()?;
 
                                         let snapshot = commandExecutor.session.getSnapshot()?;
