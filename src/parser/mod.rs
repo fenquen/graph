@@ -66,7 +66,7 @@ impl Parser {
                     "link" => self.parseLink(false)?,
                     "delete" => self.parseDelete()?,
                     "update" => self.parseUpdate()?,
-                    "select" => self.parseSelect()?,
+                    "select" => self.parseSelect(true)?,
                     "unlink" => self.parseUnlink()?,
                     "commit" => self.parseCommit()?,
                     "rollback" => self.parseRollback()?,
@@ -75,7 +75,7 @@ impl Parser {
                     _ => self.throwSyntaxError()?,
                 };
 
-            log::debug!("{:?}\n", command);
+            println!("{:?}\n", command);
 
             commandVec.push(command);
 
@@ -114,6 +114,7 @@ impl Parser {
 
 #[cfg(test)]
 mod test {
+    use std::fmt::Debug;
     use crate::parser;
 
     #[test]
@@ -135,7 +136,7 @@ mod test {
     pub fn testParseSelect() {
         // parser::parse("select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> wheel").unwrap();
         // parser::parse("select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)").unwrap();
-        // parser::parse("select user(id = 1) -likes recursive(3..]-> user(age > 2)").unwrap();
+        // parser::parse("select user(id = 1) -likes recursive(1..]-> user(age > 2)").unwrap();
         // parser::parse("select user as user0 limit 1 offset 0").unwrap();
         parser::parse("select user[id,name](id=1 and 0=6 and name like '%a')").unwrap();
     }
@@ -149,7 +150,8 @@ mod test {
         // parser::parse("link user ((a = 1) = true)").unwrap();
         // parser::parse("link user (((a = 1)) = true)").unwrap();
         // parser::parse("link user ( a in (a,b,d))").unwrap();
-        parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
+        // parser::parse("link user ( a in ((a = 1) = true)) to company (id > 1 and ( name = 'a' or code = 1 + 0 and true)) by usage(a=0,a=1212+0,d=1)").unwrap();
+        parser::parse("link user(id=1 and 0=6) -usage(number = 9) -> car -own(number=1)-> tyre").unwrap();
     }
 
     #[test]

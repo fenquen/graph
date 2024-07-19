@@ -29,7 +29,7 @@ impl<'session> CommandExecutor<'session> {
                     }
                     DBObject::Relation(relation) => {
                         let bufferCapacity = meta::DATA_KEY_BYTE_LEN + meta::KEY_TAG_BYTE_LEN + meta::DB_OBJECT_ID_BYTE_LEN;
-                        
+
                         let mut bufferFrom = self.withCapacityIn(bufferCapacity);
                         let mut bufferTo = self.withCapacityIn(bufferCapacity);
 
@@ -100,7 +100,7 @@ impl<'session> CommandExecutor<'session> {
         }
 
         self.session.dropColFamily(tableName)?;
-        self.session.deleteMeta(dbObject.getId())?;
+        self.session.deleteMeta(table.id)?;
 
         drop(dbObject);
 

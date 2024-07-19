@@ -3,18 +3,18 @@ use serde::{Deserialize, Serialize};
 use crate::expr::Expr;
 use crate::global;
 use crate::parser::command::Command;
-use crate::parser::command::link::Link;
+use crate::parser::command::link::{Link, LinkTo};
 use crate::parser::command::select::{EndPointType, RelDesc};
 use crate::parser::element::Element;
 use crate::parser::op::{Op, SqlOp};
 use crate::parser::Parser;
 use anyhow::Result;
 
-pub type UnlinkLinkStyle = Link;
+pub type UnlinkLinkToStyle = LinkTo;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Unlink {
-    LinkStyle(UnlinkLinkStyle),
+    LinkToStyle(UnlinkLinkToStyle),
     SelfStyle(UnlinkSelfStyle),
 }
 
@@ -26,14 +26,15 @@ pub struct UnlinkSelfStyle {
 }
 
 impl Parser {
-    /// unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number > 13) <br>
+    /// unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number > 11) <br>
     /// unlink user(id >1 ) as start in usage (number = 7) ,as end in own(number > 7)
     pub(in crate::parser) fn parseUnlink(&mut self) -> Result<Command> {
         // 尝试先用link的套路parse
-        if let Ok(Command::Link(link)) = self.parseLink(true) {
-            return Ok(Command::Unlink(Unlink::LinkStyle(link)));
+        if let Ok(Command::Link(Link::LinkTo(linkToStyle))) = self.parseLink(true) {
+            return Ok(Command::Unlink(Unlink::LinkToStyle(linkToStyle)));
         }
 
+        // 以下是应对 self style 逻辑
         let mut unlinkSelfStyle = UnlinkSelfStyle::default();
 
         // 说明不是link的书写模式,重置index
@@ -55,11 +56,13 @@ impl Parser {
 
         // 循环1趟的小loop 单单读取 tableName table的filter
         loop {
-            let currentElement = self.getCurrentElementAdvanceOption();
-            if let None = currentElement {
-                return Ok(Command::Unlink(Unlink::SelfStyle(unlinkSelfStyle)));
-            }
-            let currentElement = currentElement.unwrap().clone();
+            let currentElement = {
+                let currentElement = self.getCurrentElementAdvanceOption();
+                if let None = currentElement {
+                    return Ok(Command::Unlink(Unlink::SelfStyle(unlinkSelfStyle)));
+                }
+                currentElement.unwrap().clone()
+            };
 
             match state {
                 State::ReadEndPointName => {

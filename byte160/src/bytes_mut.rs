@@ -11,7 +11,6 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use std::alloc::{Allocator, Global};
 use crate::buf::{IntoIter, UninitSlice};
 use crate::bytes::Vtable;
 #[allow(unused)]

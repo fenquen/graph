@@ -4,7 +4,7 @@ use crate::{extractTargetDataKeyFromPointerKey, meta, byte_slice_to_u64, types};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::executor::mvcc::BytesMutExt;
 use crate::executor::store::{ScanHooks, ScanParams};
-use crate::parser::command::unlink::{Unlink, UnlinkLinkStyle, UnlinkSelfStyle};
+use crate::parser::command::unlink::{Unlink, UnlinkLinkToStyle, UnlinkSelfStyle};
 use crate::session::Session;
 use crate::types::{ColumnFamily, DataKey, CommittedPreProcessor};
 
@@ -12,14 +12,14 @@ impl<'session> CommandExecutor<'session> {
     // todo pointer指向点和边的xmin xmax如何应对
     pub(super) fn unlink(&self, unlink: &Unlink) -> anyhow::Result<CommandExecResult> {
         match unlink {
-            Unlink::LinkStyle(unlinkLinkStyle) => self.unlinkLinkStyle(unlinkLinkStyle),
+            Unlink::LinkToStyle(unlinkLinkStyle) => self.unlinkLinkStyle(unlinkLinkStyle),
             Unlink::SelfStyle(unlinkSelfStyle) => self.unlinkSelfStyle(unlinkSelfStyle),
         }
     }
 
     /// 应对 unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13) 和原来link基本相同
     /// 和原来的link套路相同是它反过来的
-    fn unlinkLinkStyle(&self, unlinkLinkStyle: &UnlinkLinkStyle) -> anyhow::Result<CommandExecResult> {
+    fn unlinkLinkStyle(&self, unlinkLinkStyle: &UnlinkLinkToStyle) -> anyhow::Result<CommandExecResult> {
         let relation = Session::getDBObjectByName(&unlinkLinkStyle.relationName)?;
         let relation = relation.asRelation()?;
 

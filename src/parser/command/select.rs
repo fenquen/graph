@@ -43,6 +43,8 @@ pub struct SelectRel {
     pub relationName: Option<String>,
     pub relationColumnNames: Option<Vec<String>>,
     pub relationFilter: Option<Expr>,
+    pub relationInsertColumnNames: Option<Vec<String>>,
+    pub relationInsertColumnExprs: Option<Vec<Expr>>,
     pub relationDepth: Option<RelationDepth>,
     pub relationAlias: Option<String>,
 
@@ -91,8 +93,8 @@ impl FromStr for EndPointType {
 
 impl Parser {
     // todo 实现 select user(id >1 ) as user0 ,in usage (number = 7) ,end in own(number =7)
-    /// ```select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) as usage0-> car -own(number=1)-> tyre```
-    pub(in crate::parser) fn parseSelect(&mut self) -> anyhow::Result<Command> {
+    /// ```select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) recursive (1..] as usage0-> car -own(number=1)-> tyre```
+    pub(in crate::parser) fn parseSelect(&mut self, regardRelPartAsFilter: bool) -> Result<Command> {
         // https://doc.rust-lang.org/reference/items/enumerations.html
         #[repr(u8)]
         #[derive(Clone, Copy, PartialEq, PartialOrd)]
@@ -104,15 +106,15 @@ impl Parser {
             ReadSrcLimitOffset,
 
             ReadRelationName, // 可选
-            ReadRelationColumnNames,// 可选
-            ReadRelationFilterExpr,// 可选
+            ReadRelationColumnNames, // 可选
+            ReadRelationFilterExpr, // 可选
             ReadRelationDepth,
-            ReadRelationAlias,// 可选
+            ReadRelationAlias, // 可选
 
-            ReadDestName,// 可选
-            ReadDestColumnNames,// 可选
-            ReadDestFilterExpr,// 可选
-            ReadDestAlias,// 可选
+            ReadDestName, // 可选
+            ReadDestColumnNames, // 可选
+            ReadDestFilterExpr, // 可选
+            ReadDestAlias, // 可选
             ReadDestLimitOffset,
 
             TryNextRound,
@@ -276,7 +278,14 @@ impl Parser {
                 State::ReadRelationFilterExpr => {
                     if currentElement.expectTextLiteralContentBool(global::圆括号_STR) {
                         self.skipElement(-1)?;
-                        selectRel.relationFilter = Some(self.parseExpr(false)?);
+
+                        if regardRelPartAsFilter { // 正常套路
+                            selectRel.relationFilter = Some(self.parseExpr(false)?);
+                        } else { // link
+                            let (relationInsertColumnNames, relationInsertColumnExprs) = self.parseRelInsertValues()?;
+                            selectRel.relationInsertColumnNames = Some(relationInsertColumnNames);
+                            selectRel.relationInsertColumnExprs = Some(relationInsertColumnExprs);
+                        }
                     } else {
                         self.skipElement(-1)?;
                     }

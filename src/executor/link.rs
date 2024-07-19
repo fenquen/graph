@@ -6,27 +6,33 @@ use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::executor::store::{ScanHooks, ScanParams};
 use crate::meta::Table;
 use crate::parser::command::insert::Insert;
-use crate::parser::command::link::Link;
+use crate::parser::command::link::{Link, LinkTo};
 use crate::types::{DataKey, KeyTag, KV, RowId, CommittedPreProcessor};
 use anyhow::Result;
+use crate::parser::command::select::SelectRel;
 use crate::session::Session;
 
 impl<'session> CommandExecutor<'session> {
-    /// 它本质是向relation对应的data file写入
-    /// 两个元素之间的relation只看种类不看里边的属性的
     pub(super) fn link(&self, link: &Link) -> Result<CommandExecResult> {
-        // 得到表的对象
-        let srcTable = Session::getDBObjectByName(link.srcTableName.as_str())?;
-        let srcTable = srcTable.asTable()?;
+        match link {
+            Link::LinkTo(linkTo) => self.linkTo(linkTo),
+            Link::LinkChain(selctRels) => self.linkChain(selctRels)
+        }
+    }
 
-        let destTable = Session::getDBObjectByName(link.destTableName.as_str())?;
-        let destTable = destTable.asTable()?;
+    fn linkTo(&self, linkToStyle: &LinkTo) -> Result<CommandExecResult> {
+        // 得到表的对象
+        let dbObjectSrcTable = Session::getDBObjectByName(linkToStyle.srcTableName.as_str())?;
+        let srcTable = dbObjectSrcTable.asTable()?;
+
+        let dbObjectDestTable = Session::getDBObjectByName(linkToStyle.destTableName.as_str())?;
+        let destTable = dbObjectDestTable.asTable()?;
 
         // 对src table和dest table调用expr筛选
         let srcSatisfiedVec = {
             let scanParams = ScanParams {
                 table: srcTable,
-                tableFilter: link.srcTableFilterExpr.as_ref(),
+                tableFilter: linkToStyle.srcTableFilterExpr.as_ref(),
                 ..Default::default()
             };
 
@@ -43,7 +49,7 @@ impl<'session> CommandExecutor<'session> {
         let destSatisfiedVec = {
             let scanParams = ScanParams {
                 table: destTable,
-                tableFilter: link.destTableFilterExpr.as_ref(),
+                tableFilter: linkToStyle.destTableFilterExpr.as_ref(),
                 ..Default::default()
             };
 
@@ -59,14 +65,14 @@ impl<'session> CommandExecutor<'session> {
 
         // add rel本身的data
         let mut insertValues = Insert {
-            tableName: link.relationName.clone(),
+            tableName: linkToStyle.relationName.clone(),
             useExplicitColumnNames: true,
-            columnNames: link.relationColumnNames.clone(),
-            columnExprVecVec: vec![link.relationColumnExprs.clone()],
+            columnNames: linkToStyle.relationColumnNames.clone(),
+            columnExprVecVec: vec![linkToStyle.relationColumnExprs.clone()],
         };
 
-        let relation = Session::getDBObjectByName(&link.relationName)?;
-        let relation = relation.asRelation()?;
+        let dbObjectRelation = Session::getDBObjectByName(&linkToStyle.relationName)?;
+        let relation = dbObjectRelation.asRelation()?;
 
         let relRowId: RowId = relation.rowIdCounter.fetch_add(1, Ordering::AcqRel);
         let relDataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, relRowId);
@@ -154,5 +160,9 @@ impl<'session> CommandExecutor<'session> {
         }
 
         Ok(CommandExecResult::DmlResult)
+    }
+
+    fn linkChain(&self, selctRels: &[SelectRel]) -> Result<CommandExecResult> {
+        todo!()
     }
 }

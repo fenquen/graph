@@ -118,23 +118,22 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
         let mut a = false;
 
         for (op, value) in clone {
-            if let (accumulateResult, merged) = accumulate(op, value, &mut selfAccumulated)? {
-                match accumulateResult {
-                    AccumulateResult::Conflict => {
-                        //assert_eq!(logical, Logical::And);
+            let (accumulateResult, merged) = accumulate(op, value, &mut selfAccumulated)?;
+            match accumulateResult {
+                AccumulateResult::Conflict => {
+                    //assert_eq!(logical, Logical::And);
 
-                        return Ok(AccumulateResult::Conflict);
+                    return Ok(AccumulateResult::Conflict);
+                }
+                AccumulateResult::Nonsense => {
+                    match logical {
+                        Logical::Or => return Ok(AccumulateResult::Nonsense),
+                        Logical::And => continue,
                     }
-                    AccumulateResult::Nonsense => {
-                        match logical {
-                            Logical::Or => return Ok(AccumulateResult::Nonsense),
-                            Logical::And => continue,
-                        }
-                    }
-                    _ => {
-                        if merged {
-                            a = true;
-                        }
+                }
+                _ => {
+                    if merged {
+                        a = true;
                     }
                 }
             }
