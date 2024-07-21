@@ -367,6 +367,13 @@ pub struct Table {
     pub indexNames: Vec<String>,
 }
 
+impl Table {
+    #[inline]
+    pub fn nextRowId(&self) -> RowId {
+        self.rowIdCounter.fetch_add(1, Ordering::AcqRel)
+    }
+}
+
 impl Clone for Table {
     fn clone(&self) -> Self {
         Table {

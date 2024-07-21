@@ -35,7 +35,7 @@ impl<'session> CommandExecutor<'session> {
         let relationRowDatas = {
             let scanParams = ScanParams {
                 table: relation,
-                tableFilter: unlinkLinkStyle.relationFilterExpr.as_ref(),
+                tableFilter: unlinkLinkStyle.relationFilter.as_ref(),
                 ..Default::default()
             };
 
@@ -72,9 +72,9 @@ impl<'session> CommandExecutor<'session> {
                     let mut scanParams = ScanParams::default();
                     scanParams.table = srcTable;
                     scanParams.tableFilter = if processSrc {
-                        unlinkLinkStyle.srcTableFilterExpr.as_ref()
+                        unlinkLinkStyle.srcTableFilter.as_ref()
                     } else {
-                        unlinkLinkStyle.destTableFilterExpr.as_ref()
+                        unlinkLinkStyle.destTableFilter.as_ref()
                     };
                     scanParams.selectedColumnNames = None;
 

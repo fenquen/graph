@@ -79,7 +79,7 @@ impl<'session> CommandExecutor<'session> {
             // 为什么要使用{} 不然的话有概率死锁
             // https://savannahar68.medium.com/deadlock-issues-in-rusts-dashmap-a-practical-case-study-ad08f10c2849
             let relationDatas: Vec<(DataKey, RowData)> = {
-                let relation = Session::getDBObjectByName(selectRel.relationName.as_ref().unwrap())?;
+                let relation = Session::getDBObjectByName(selectRel.relationName.as_str())?;
                 let relation = relation.asRelation()?;
 
                 let scanParams = ScanParams {
@@ -101,10 +101,10 @@ impl<'session> CommandExecutor<'session> {
             let srcTable = Session::getDBObjectByName(&selectRel.srcTableName)?;
             let srcTable = srcTable.asTable()?;
 
-            let destTable = Session::getDBObjectByName(selectRel.destTableName.as_ref().unwrap())?;
+            let destTable = Session::getDBObjectByName(selectRel.destTableName.as_str())?;
             let destTable = destTable.asTable()?;
 
-            let relation = Session::getDBObjectByName(selectRel.relationName.as_ref().unwrap())?;
+            let relation = Session::getDBObjectByName(selectRel.relationName.as_str())?;
             let relation = relation.asRelation()?;
 
             // 遍历当前的selectRel的多条relationData
@@ -257,16 +257,16 @@ impl<'session> CommandExecutor<'session> {
                             srcRowDatas,
                             relationName: None,
                             relationData: None,
-                            destName: selectRel.destAlias.as_ref().unwrap_or_else(|| selectRel.destTableName.as_ref().unwrap()).clone(),
+                            destName: selectRel.destAlias.as_ref().unwrap_or_else(|| &selectRel.destTableName).clone(),
                             destRowDatas,
                         }
                     } else {
                         SelectResult {
                             srcName: selectRel.srcAlias.as_ref().unwrap_or_else(|| &selectRel.srcTableName).clone(),
                             srcRowDatas,
-                            relationName: Some(selectRel.relationAlias.as_ref().unwrap_or_else(|| selectRel.relationName.as_ref().unwrap()).clone()),
+                            relationName: Some(selectRel.relationAlias.as_ref().unwrap_or_else(|| &selectRel.relationName).clone()),
                             relationData: Some(relationData),
-                            destName: selectRel.destAlias.as_ref().unwrap_or_else(|| selectRel.destTableName.as_ref().unwrap()).clone(),
+                            destName: selectRel.destAlias.as_ref().unwrap_or_else(|| &selectRel.destTableName).clone(),
                             destRowDatas,
                         }
                     };

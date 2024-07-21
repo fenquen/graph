@@ -1,80 +1,120 @@
 use std::sync::atomic::Ordering;
 use bytes::BytesMut;
-use log::Level::Debug;
 use crate::{global, keyPrefixAddRowId, meta, types, u64ToByteArrRef};
 use crate::executor::{CommandExecResult, CommandExecutor};
 use crate::executor::store::{ScanHooks, ScanParams};
 use crate::meta::Table;
 use crate::parser::command::insert::Insert;
 use crate::parser::command::link::{Link, LinkTo};
-use crate::types::{DataKey, KeyTag, KV, RowId, CommittedPreProcessor};
+use crate::types::{DataKey, KeyTag, KV, RowId, CommittedPreProcessor, RowData, SessionVec};
 use anyhow::Result;
 use crate::parser::command::select::SelectRel;
-use crate::session::Session;
+use crate::session::{Mutation, Session};
 
 impl<'session> CommandExecutor<'session> {
     pub(super) fn link(&self, link: &Link) -> Result<CommandExecResult> {
-        match link {
-            Link::LinkTo(linkTo) => self.linkTo(linkTo),
-            Link::LinkChain(selctRels) => self.linkChain(selctRels)
+        // 要是偷懒的话vec直接保存String就可以了,不过还是想更优秀,去掉不必要的string的clone,下边会为了这个目的用到不少的显式生命周期标注
+        let mut mutationsDest = self.vecNewIn();
+        let mut linkToVec = Vec::new();
+
+        let a = match link {
+            Link::LinkTo(linkTo) => {
+                let (commandExecResult, _) = self.linkTo(linkTo, None, &mut mutationsDest)?;
+                Ok(commandExecResult)
+            }
+            Link::LinkChain(selctRels) => {
+                linkToVec = selctRels.iter().map(|selectRel| {
+                    let mut linkTo = LinkTo::default();
+
+                    linkTo.srcTableName = selectRel.srcTableName.clone();
+                    linkTo.srcTableFilter = selectRel.srcFilter.clone();
+
+                    linkTo.destTableName = selectRel.destTableName.clone();
+                    linkTo.destTableFilter = selectRel.destFilter.clone();
+
+                    linkTo.relationName = selectRel.relationName.clone();
+                    linkTo.relationColumnNames = selectRel.relationInsertColumnNames.as_ref().unwrap().clone();
+                    linkTo.relationColumnExprs = selectRel.relationInsertColumnExprs.as_ref().unwrap().clone();
+
+                    linkTo
+                }).collect();
+
+                self.linkChain(&linkToVec, &mut mutationsDest)
+            }
+        };
+
+        for (tableName, mutation) in mutationsDest {
+            self.session.writeMutation(tableName, mutation);
         }
+
+        a
     }
 
-    fn linkTo(&self, linkToStyle: &LinkTo) -> Result<CommandExecResult> {
+    /// 返回的另外1个对象是 dest上的数据
+    fn linkTo<'a>(&self,
+                  linkTo: &'a LinkTo,
+                  lastRoundDestSatisfiedDatas: Option<Vec<(DataKey, RowData)>>,
+                  mutationsDest: &mut SessionVec<(&'a String, Mutation)>) -> Result<(CommandExecResult, Option<Vec<(DataKey, RowData)>>)> {
         // 得到表的对象
-        let dbObjectSrcTable = Session::getDBObjectByName(linkToStyle.srcTableName.as_str())?;
+        let dbObjectSrcTable = Session::getDBObjectByName(linkTo.srcTableName.as_str())?;
         let srcTable = dbObjectSrcTable.asTable()?;
 
-        let dbObjectDestTable = Session::getDBObjectByName(linkToStyle.destTableName.as_str())?;
+        let dbObjectDestTable = Session::getDBObjectByName(linkTo.destTableName.as_str())?;
         let destTable = dbObjectDestTable.asTable()?;
 
         // 对src table和dest table调用expr筛选
-        let srcSatisfiedVec = {
-            let scanParams = ScanParams {
-                table: srcTable,
-                tableFilter: linkToStyle.srcTableFilterExpr.as_ref(),
-                ..Default::default()
-            };
+        let srcSatisfiedDatas = {
+            match lastRoundDestSatisfiedDatas {
+                Some(lastRoundDestSatisfiedDatas) => lastRoundDestSatisfiedDatas,
+                None => {
+                    let scanParams = ScanParams {
+                        table: srcTable,
+                        tableFilter: linkTo.srcTableFilter.as_ref(),
+                        ..Default::default()
+                    };
 
-            let srcSatisfiedVec = self.scanSatisfiedRows(scanParams, false, ScanHooks::default())?;
+                    let srcSatisfiedDatas = self.scanSatisfiedRows(scanParams, false, ScanHooks::default())?;
 
-            // src 空的 link 不成立
-            if srcSatisfiedVec.is_empty() {
-                return Ok(CommandExecResult::DmlResult);
+                    // src 空的 link 不成立
+                    if srcSatisfiedDatas.is_empty() {
+                        return Ok((CommandExecResult::DmlResult, None));
+                    }
+
+                    srcSatisfiedDatas
+                }
             }
-
-            srcSatisfiedVec
         };
 
-        let destSatisfiedVec = {
+        let destSatisfiedDatas = {
             let scanParams = ScanParams {
                 table: destTable,
-                tableFilter: linkToStyle.destTableFilterExpr.as_ref(),
+                tableFilter: linkTo.destTableFilter.as_ref(),
                 ..Default::default()
             };
 
-            let destSatisfiedVec = self.scanSatisfiedRows(scanParams, false, ScanHooks::default())?;
+            let destSatisfiedDatas = self.scanSatisfiedRows(scanParams, false, ScanHooks::default())?;
 
             // dest 空的 link 不成立
-            if destSatisfiedVec.is_empty() {
-                return Ok(CommandExecResult::DmlResult);
+            if destSatisfiedDatas.is_empty() {
+                return Ok((CommandExecResult::DmlResult, None));
             }
 
-            destSatisfiedVec
+            destSatisfiedDatas
         };
 
         // add rel本身的data
         let mut insertValues = Insert {
-            tableName: linkToStyle.relationName.clone(),
+            tableName: linkTo.relationName.clone(),
             useExplicitColumnNames: true,
-            columnNames: linkToStyle.relationColumnNames.clone(),
-            columnExprVecVec: vec![linkToStyle.relationColumnExprs.clone()],
+            columnNames: linkTo.relationColumnNames.clone(),
+            columnExprVecVec: vec![linkTo.relationColumnExprs.clone()],
         };
 
-        let dbObjectRelation = Session::getDBObjectByName(&linkToStyle.relationName)?;
+        let dbObjectRelation = Session::getDBObjectByName(&linkTo.relationName)?;
         let relation = dbObjectRelation.asRelation()?;
 
-        let relRowId: RowId = relation.rowIdCounter.fetch_add(1, Ordering::AcqRel);
+        // 得到相应的dataKey
+        let relRowId: RowId = relation.nextRowId();
         let relDataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, relRowId);
 
         let dataAdd = {
@@ -87,18 +127,20 @@ impl<'session> CommandExecutor<'session> {
 
         let origin: KV = self.generateOrigin(relDataKey, meta::DATA_KEY_INVALID);
 
-        self.session.writeAddDataMutation(&relation.name, dataAdd, xminAdd, xmaxAdd, origin);
+        // self.session.writeAddDataMutation(&relation.name, dataAdd, xminAdd, xmaxAdd, origin);
+        self.session.writeAddDataMutation2Dest(&linkTo.relationName, dataAdd, xminAdd, xmaxAdd, origin, mutationsDest);
 
         //--------------------------------------------------------------------
 
         let mut pointerKeyBuffer = self.withCapacityIn(meta::POINTER_KEY_BYTE_LEN);
 
         let mut process =
-            |selfTable: &Table, selfDataKey: DataKey,
+            |tableName: &'a String, selfDataKey: DataKey,
              pointerKeyTag: KeyTag,
              targetTable: &Table, targetDataKey: DataKey| {
                 let (xmin, xmax) = self.generateAddPointerXminXmax(&mut pointerKeyBuffer, selfDataKey, pointerKeyTag, targetTable.id, targetDataKey)?;
-                self.session.writeAddPointerMutation(&selfTable.name, xmin, xmax);
+                //self.session.writeAddPointerMutation(&selfTable.name, xmin, xmax);
+                self.session.writeAddPointerMutation2Dest(tableName, xmin, xmax, mutationsDest);
 
                 Result::<()>::Ok(())
             };
@@ -108,13 +150,13 @@ impl<'session> CommandExecutor<'session> {
         {
             // todo 要是srcSatisfiedVec太大如何应对 挨个遍历set不现实
             // 尚未设置过滤条件 得到的是全部的
-            if srcSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
-                for srcDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    process(srcTable, srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation, relDataKey)?;
+            if srcSatisfiedDatas[0].0 == global::TOTAL_DATA_OF_TABLE {
+                for srcDataKey in srcSatisfiedDatas[1].0..=srcSatisfiedDatas[2].0 {
+                    process(&linkTo.srcTableName, srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation, relDataKey)?;
                 }
             } else {
-                for (srcDataKey, _) in &srcSatisfiedVec {
-                    process(srcTable, *srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation, relDataKey)?;
+                for (srcDataKey, _) in &srcSatisfiedDatas {
+                    process(&linkTo.srcTableName, *srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation, relDataKey)?;
                 }
             }
         }
@@ -124,23 +166,23 @@ impl<'session> CommandExecutor<'session> {
         // key + dest的tableId + dest的key
         {
             // 尚未设置过滤条件 得到的是全部的
-            if srcSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
-                for srcDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    process(relation, relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, srcDataKey)?;
+            if srcSatisfiedDatas[0].0 == global::TOTAL_DATA_OF_TABLE {
+                for srcDataKey in srcSatisfiedDatas[1].0..=srcSatisfiedDatas[2].0 {
+                    process(&linkTo.relationName, relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, srcDataKey)?;
                 }
             } else {
-                for (srcDataKey, _) in &srcSatisfiedVec {
-                    process(relation, relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, *srcDataKey)?;
+                for (srcDataKey, _) in &srcSatisfiedDatas {
+                    process(&linkTo.relationName, relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, *srcDataKey)?;
                 }
             }
 
-            if destSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
-                for destDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    process(relation, relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, destDataKey)?;
+            if destSatisfiedDatas[0].0 == global::TOTAL_DATA_OF_TABLE {
+                for destDataKey in srcSatisfiedDatas[1].0..=srcSatisfiedDatas[2].0 {
+                    process(&linkTo.relationName, relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, destDataKey)?;
                 }
             } else {
-                for (destDataKey, _) in &destSatisfiedVec {
-                    process(relation, relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, *destDataKey)?;
+                for (destDataKey, _) in &destSatisfiedDatas {
+                    process(&linkTo.relationName, relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, *destDataKey)?;
                 }
             }
         }
@@ -148,21 +190,36 @@ impl<'session> CommandExecutor<'session> {
         // 对dest来说
         // key + rel的tableId + rel的key
         {
-            if destSatisfiedVec[0].0 == global::TOTAL_DATA_OF_TABLE {
-                for destDataKey in srcSatisfiedVec[1].0..=srcSatisfiedVec[2].0 {
-                    process(destTable, destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation, relDataKey)?;
+            if destSatisfiedDatas[0].0 == global::TOTAL_DATA_OF_TABLE {
+                for destDataKey in srcSatisfiedDatas[1].0..=srcSatisfiedDatas[2].0 {
+                    process(&linkTo.destTableName, destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation, relDataKey)?;
                 }
             } else {
-                for (destDataKey, _) in &destSatisfiedVec {
-                    process(destTable, *destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation, relDataKey)?;
+                for (destDataKey, _) in &destSatisfiedDatas {
+                    process(&linkTo.destTableName, *destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation, relDataKey)?;
                 }
             }
         }
 
-        Ok(CommandExecResult::DmlResult)
+        Ok((CommandExecResult::DmlResult, Some(destSatisfiedDatas)))
     }
 
-    fn linkChain(&self, selctRels: &[SelectRel]) -> Result<CommandExecResult> {
-        todo!()
+    fn linkChain<'a>(&self,
+                     linkTos: &'a [LinkTo],
+                     mutationsDest: &mut SessionVec<(&'a String, Mutation)>) -> Result<CommandExecResult> {
+        let mut lastRoundDestSatisfiedDatas = None;
+
+        // 将 selectRel 转换成为 linkTo
+        for linkTo in linkTos {
+            (_, lastRoundDestSatisfiedDatas) = self.linkTo(&linkTo, lastRoundDestSatisfiedDatas, mutationsDest)?;
+
+            // 要是中途出现了断档,之前连线要全部的废掉
+            if lastRoundDestSatisfiedDatas.is_none() {
+                mutationsDest.clear();
+                return Ok(CommandExecResult::DmlResult);
+            }
+        }
+
+        Ok(CommandExecResult::DmlResult)
     }
 }

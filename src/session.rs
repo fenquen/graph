@@ -35,7 +35,7 @@ pub struct Session {
     txId: Option<TxId>,
     dataStore: &'static DB,
     metaStore: &'static DB,
-    pub tableName_mutations: RwLock<HashMap<String, TableMutations>>,
+    pub tableName_mutationsOnTable: RwLock<HashMap<String, TableMutations>>,
     snapshot: Option<Snapshot<'static>>,
     pub scanConcurrency: usize,
     pub bump: Bump,
@@ -88,7 +88,7 @@ impl Session {
 
         let mut batch = WriteBatchWithTransaction::<false>::default();
 
-        for (tableName, mutations) in self.tableName_mutations.read().unwrap().iter() {
+        for (tableName, mutations) in self.tableName_mutationsOnTable.read().unwrap().iter() {
             let colFamily = Session::getColFamily(tableName)?;
             for (key, value) in mutations {
                 batch.put_cf(&colFamily, key, value);
@@ -137,7 +137,7 @@ impl Session {
     fn clean(&mut self) {
         self.txId = None;
         self.snapshot = None;
-        self.tableName_mutations.write().unwrap().clear();
+        self.tableName_mutationsOnTable.write().unwrap().clear();
         self.bump.reset();
     }
 
@@ -156,7 +156,7 @@ impl Session {
         }
         self.txId = Some(meta::TX_ID_COUNTER.fetch_add(1, Ordering::AcqRel));
         self.snapshot = Some(self.dataStore.snapshot());
-        self.tableName_mutations.write().unwrap().clear();
+        self.tableName_mutationsOnTable.write().unwrap().clear();
 
         Ok(())
     }
@@ -267,8 +267,7 @@ impl Session {
     pub fn writeAddDataMutation(&self,
                                 tableName: &String,
                                 data: KV,
-                                xmin: KV,
-                                xmax: KV,
+                                xmin: KV, xmax: KV,
                                 origin: KV) {
         let addMutation =
             Mutation::AddData {
@@ -281,18 +280,46 @@ impl Session {
         self.writeMutation(tableName, addMutation);
     }
 
+    pub fn writeAddDataMutation2Dest<'a>(&self,
+                                         tableName: &'a String,
+                                         data: KV,
+                                         xmin: KV, xmax: KV,
+                                         origin: KV, dest: &mut SessionVec<(&'a String, Mutation)>) {
+        let addData =
+            Mutation::AddData {
+                data,
+                xmin,
+                xmax,
+                origin,
+            };
+
+        dest.push((tableName, addData))
+    }
+
     pub fn writeAddPointerMutation(&self,
                                    tableName: &String,
                                    xmin: KV, xmax: KV) {
-        let addMutation =
+        let addPointer =
             Mutation::AddPointer {
                 xmin,
                 xmax,
             };
 
-        self.writeMutation(tableName, addMutation);
+        self.writeMutation(tableName, addPointer);
     }
 
+    pub fn writeAddPointerMutation2Dest<'a>(&self,
+                                            tableName: &'a String,
+                                            xmin: KV, xmax: KV,
+                                            dest: &mut SessionVec<(&'a String, Mutation)>) {
+        let addPointer =
+            Mutation::AddPointer {
+                xmin,
+                xmax,
+            };
+
+        dest.push((tableName, addPointer))
+    }
 
     pub fn writeUpdateDataMutation(&self,
                                    tableName: &String,
@@ -312,20 +339,23 @@ impl Session {
         self.writeMutation(tableName, updateMutation);
     }
 
+    #[inline]
     pub fn writeDeleteDataMutation(&self, tableName: &String, oldXmax: KV) {
         self.writeMutation(tableName, Mutation::DeleteData { oldXmax })
     }
 
+    #[inline]
     pub fn writeDeletePointerMutation(&self, tableName: &String, oldXmax: KV) {
         self.writeMutation(tableName, Mutation::DeletePointer { oldXmax })
     }
 
+    #[inline]
     pub fn writeAddIndexMutation(&self, indexName: &String, data: KV) {
         self.writeMutation(indexName, Mutation::AddIndex { data })
     }
 
-    fn writeMutation(&self, dbObjectName: &String, mutation: Mutation) {
-        let mut tableName_mutationsOnTable = self.tableName_mutations.write().unwrap();
+    pub fn writeMutation(&self, dbObjectName: &String, mutation: Mutation) {
+        let mut tableName_mutationsOnTable = self.tableName_mutationsOnTable.write().unwrap();
         let mutationsOnTable = tableName_mutationsOnTable.getMutWithDefault(dbObjectName);
 
         match mutation {
@@ -386,7 +416,7 @@ impl Default for Session {
             dataStore: &meta::STORE.dataStore,
             metaStore: &meta::STORE.metaStore,
             txId: None,
-            tableName_mutations: Default::default(),
+            tableName_mutationsOnTable: Default::default(),
             snapshot: None,
             scanConcurrency: 1,
             bump: Bump::with_capacity(config::CONFIG.sessionMemotySize),

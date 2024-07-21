@@ -40,7 +40,7 @@ pub struct SelectRel {
     pub srcLimit: Option<usize>,
     pub srcOffset: Option<usize>,
 
-    pub relationName: Option<String>,
+    pub relationName: String,
     pub relationColumnNames: Option<Vec<String>>,
     pub relationFilter: Option<Expr>,
     pub relationInsertColumnNames: Option<Vec<String>>,
@@ -48,7 +48,7 @@ pub struct SelectRel {
     pub relationDepth: Option<RelationDepth>,
     pub relationAlias: Option<String>,
 
-    pub destTableName: Option<String>,
+    pub destTableName: String,
     pub destColumnNames: Option<Vec<String>>,
     pub destFilter: Option<Expr>,
     pub destAlias: Option<String>,
@@ -257,7 +257,7 @@ impl Parser {
                 }
                 State::ReadRelationName => {
                     if let Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) = currentElement {
-                        selectRel.relationName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
+                        selectRel.relationName = self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?;
                     } else { // 未写 realition 那么后边的全部都不会有了
                         break;
                     }
@@ -281,7 +281,7 @@ impl Parser {
 
                         if regardRelPartAsFilter { // 正常套路
                             selectRel.relationFilter = Some(self.parseExpr(false)?);
-                        } else { // link
+                        } else { // 这是应对link的,当前想不到更佳的办法,本着复用最大话的原则,只能先这样了
                             let (relationInsertColumnNames, relationInsertColumnExprs) = self.parseRelInsertValues()?;
                             selectRel.relationInsertColumnNames = Some(relationInsertColumnNames);
                             selectRel.relationInsertColumnExprs = Some(relationInsertColumnExprs);
@@ -337,11 +337,11 @@ impl Parser {
                 }
                 State::ReadDestName => {
                     if let Element::To = currentElement {
-                        selectRel.destTableName = Some(self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?);
+                        selectRel.destTableName = self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?;
 
                         // 如果对relation使用recursive的话 起点和终点都要是相同的table
                         if let Some(_) = selectRel.relationDepth {
-                            if selectRel.srcTableName.as_str() != selectRel.destTableName.as_ref().unwrap() {
+                            if selectRel.srcTableName.as_str() != selectRel.destTableName.as_str() {
                                 self.throwSyntaxErrorDetail("when use relation recursive query, start,end node should belong to same table")?;
                             }
                         }
@@ -397,9 +397,11 @@ impl Parser {
                     if let Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) = currentElement {
                         self.skipElement(-1)?;
 
+                        // 到了下个的轮回了,上轮的dest变为下轮的src
+                        // 对struct剩下的可以default的字段如何批量调用生成
                         // https://qastack.cn/programming/19650265/is-there-a-faster-shorter-way-to-initialize-variables-in-a-rust-struct
                         let selectRel0 = SelectRel {
-                            srcTableName: selectRel.destTableName.as_ref().unwrap().clone(),
+                            srcTableName: selectRel.destTableName.clone(),
                             srcColumnNames: selectRel.destColumnNames.clone(),
                             srcFilter: selectRel.destFilter.clone(),
                             srcAlias: selectRel.destAlias.clone(),

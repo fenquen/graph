@@ -18,21 +18,20 @@ pub enum Link {
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct LinkTo {
     pub srcTableName: String,
-    pub srcTableFilterExpr: Option<Expr>,
+    pub srcTableFilter: Option<Expr>,
 
     pub destTableName: String,
-    pub destTableFilterExpr: Option<Expr>,
+    pub destTableFilter: Option<Expr>,
 
     pub relationName: String,
     pub relationColumnNames: Vec<String>,
     pub relationColumnExprs: Vec<Expr>,
+
     /// 给unlink用的
-    pub relationFilterExpr: Option<Expr>,
+    pub relationFilter: Option<Expr>,
 }
 
 impl Parser {
-    // link user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 12)
-    // todo 实现 ```link user(id=1 and 0=6) -usage(number = 9) -> car -own(number=1)-> tyre```
     pub(in crate::parser) fn parseLink(&mut self, regardRelPartAsFilter: bool) -> Result<Command> {
         // 简单粗暴的先检验elemnt里边有没有->
         let hasToArrow = {
@@ -52,13 +51,14 @@ impl Parser {
         };
 
         if hasToArrow {
-            self.parseLinkChainStyle()
+            self.parseLinkChain()
         } else {
-            self.parseLinkToStyle(regardRelPartAsFilter)
+            self.parseLinkTo(regardRelPartAsFilter)
         }
     }
 
-    fn parseLinkToStyle(&mut self, regardLastPartAsFilter: bool) -> Result<Command> {
+    ///  link user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 12)
+    fn parseLinkTo(&mut self, regardLastPartAsFilter: bool) -> Result<Command> {
         let mut linkToStyle = LinkTo::default();
 
         #[derive(Clone, Copy)]
@@ -81,7 +81,7 @@ impl Parser {
                 (ParseSrcDestState::ParseSrcTableCondition, global::圆括号_STR) => {
                     // 返回1个确保当前的element是"("
                     self.skipElement(-1)?;
-                    linkToStyle.srcTableFilterExpr = Some(self.parseExpr(false)?);
+                    linkToStyle.srcTableFilter = Some(self.parseExpr(false)?);
 
                     parseSrcDestState = ParseSrcDestState::ParseDestTableName;
                 }
@@ -96,7 +96,7 @@ impl Parser {
                 }
                 (ParseSrcDestState::ParseDestTableCondition, global::圆括号_STR) => {
                     self.skipElement(-1)?;
-                    linkToStyle.destTableFilterExpr = Some(self.parseExpr(false)?);
+                    linkToStyle.destTableFilter = Some(self.parseExpr(false)?);
                     break;
                 }
                 _ => self.throwSyntaxError()?,
@@ -122,7 +122,7 @@ impl Parser {
 
             nextElement.expectTextLiteralContent(global::圆括号_STR)?;
 
-            linkToStyle.relationFilterExpr = Some(self.parseExpr(false)?);
+            linkToStyle.relationFilter = Some(self.parseExpr(false)?);
         } else { // 应对的是建立关系的时候, 相当于是insert
             (linkToStyle.relationColumnNames, linkToStyle.relationColumnExprs) = self.parseRelInsertValues()?;
         }
@@ -130,11 +130,13 @@ impl Parser {
         Ok(Command::Link(Link::LinkTo(linkToStyle)))
     }
 
-    fn parseLinkChainStyle(&mut self) -> Result<Command> {
+    /// link user(id=1 and 0=6) -usage(number = 9) -> car -own(number=1)-> tyre
+    #[inline]
+    fn parseLinkChain(&mut self) -> Result<Command> {
         self.parseSelect(false)
     }
 
-    /// 应对 by usage (a=0, a=(1212+0))的后边的括号部分的
+    /// 应对 link to 体系中的 by usage (a=0, a=(1212+0)),它其实是对relation的insert values
     pub(super) fn parseRelInsertValues(&mut self) -> Result<(Vec<String>, Vec<Expr>)> {
         // 和parseInExprs使用相同的套路,当(数量和)数量相同的时候说明收敛结束了,因为会以")"收尾
         let mut relationColumnNames = Vec::new();

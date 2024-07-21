@@ -18,7 +18,7 @@ impl<'session> CommandExecutor<'session> {
         let table = dbObjectTable.asTable()?;
 
         for (rowDataBinary, rowData) in self.generateInsertValuesBinary(insert, table)? {
-            let rowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
+            let rowId: RowId = table.nextRowId();
             let dataKey: DataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, rowId);
 
             // 写 data本身的key和value

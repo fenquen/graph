@@ -165,7 +165,7 @@ impl<'session> CommandExecutor<'session> {
             let oldXmax = self.generateDeleteDataXmax(&mut keyBuffer, *oldDataKey)?;
 
             // 写新的data本身
-            let newRowId: RowId = table.rowIdCounter.fetch_add(1, Ordering::AcqRel);
+            let newRowId: RowId = table.nextRowId();
             let newDataKey = keyPrefixAddRowId!(meta::KEY_PREFIX_MVCC,newRowId);
             let newData: KV = (u64ToByteArrRef!(newDataKey).to_vec(), rowDataBuffer.to_vec());
 

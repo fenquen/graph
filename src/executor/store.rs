@@ -182,7 +182,7 @@ impl<'session> CommandExecutor<'session> {
         let mut mvccKeyBuffer = &mut self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
         let mut rawIterator: DBRawIterator = self.session.getDBRawIterator(&columnFamily)?;
 
-        let tableName_mutationsOnTable = self.session.tableName_mutations.read().unwrap();
+        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.read().unwrap();
         let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(&scanParams.table.name);
 
         let mut processDataKey =
@@ -273,7 +273,7 @@ impl<'session> CommandExecutor<'session> {
         // todo 使用table id 为 column family 标识
         let columnFamily = Session::getColFamily(&scanParams.table.name)?;
 
-        let tableName_mutationsOnTable = self.session.tableName_mutations.read().unwrap();
+        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.read().unwrap();
         let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(&scanParams.table.name);
 
         let mut mvccKeyBuffer = self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
@@ -419,7 +419,7 @@ impl<'session> CommandExecutor<'session> {
                                         // column不是sync的 只能到thread上建立的
                                         let columnFamily = Session::getColFamily(tableName.as_str())?;
 
-                                        let tableName_mutationsOnTable = commandExecutor.session.tableName_mutations.read().unwrap();
+                                        let tableName_mutationsOnTable = commandExecutor.session.tableName_mutationsOnTable.read().unwrap();
                                         let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(table.name.as_str());
 
                                         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
@@ -792,7 +792,7 @@ impl<'session> CommandExecutor<'session> {
         let snapshot = self.session.getSnapshot()?;
         let mut rawIterator = snapshot.raw_iterator_cf(&columnFamily) as DBRawIterator;
 
-        let tableName_mutationsOnTable = self.session.tableName_mutations.read().unwrap();
+        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.read().unwrap();
         let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(tableName);
 
         // 应对committed
