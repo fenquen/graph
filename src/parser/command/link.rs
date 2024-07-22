@@ -130,7 +130,7 @@ impl Parser {
         Ok(Command::Link(Link::LinkTo(linkToStyle)))
     }
 
-    /// link user(id=1 and 0=6) -usage(number = 9) -> car -own(number=1)-> tyre
+    /// link user(id=1) -usage(number = 9) -> car(id=1) -own(number=2)-> tyre(id=1)
     #[inline]
     fn parseLinkChain(&mut self) -> Result<Command> {
         self.parseSelect(false)

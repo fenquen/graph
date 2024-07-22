@@ -11,6 +11,7 @@ use crate::parser::op::{MathCalcOp, Op, SqlOp};
 use crate::parser::Parser;
 use crate::types::RelationDepth;
 use anyhow::Result;
+use crate::parser::command::link::Link;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Select {
@@ -471,7 +472,11 @@ impl Parser {
             testDuplicatedAlias(selectRel.destAlias.as_ref())?;
         }
 
-        Ok(Command::Select(Select::SelectRels(selectRelVec)))
+        if regardRelPartAsFilter {
+            Ok(Command::Select(Select::SelectRels(selectRelVec)))
+        } else {
+            Ok(Command::Link(Link::LinkChain(selectRelVec)))
+        }
     }
 
     /// ```select user(id >1 ) as user0 ,in usage (number = 7) ,as end in own(number =7)```

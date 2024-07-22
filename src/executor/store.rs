@@ -14,7 +14,7 @@ use crate::expr::Expr;
 use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey};
 use crate::{keyPrefixAddRowId, suffix_plus_plus, throw, u64ToByteArrRef, prefix_plus_plus, throwFormat};
 use crate::{global, meta, types, utils};
-use crate::codec::{BinaryCodec, MyBytes};
+use crate::codec::{BinaryCodec, MyBytes, SliceWrapper};
 use crate::graph_value::GraphValue;
 use crate::meta::{Column, DBObject, Table};
 use crate::parser::command::insert::Insert;
@@ -630,9 +630,9 @@ impl<'session> CommandExecutor<'session> {
         // todo 使用meta对象的引用来控制ddl
         let columnNames = scanParams.table.columns.iter().map(|column| column.name.clone()).collect::<Vec<String>>();
 
-        // todo 如何不去的copy
-        let mut myBytesRowData = MyBytes::from(Bytes::from(Vec::from(rowBinary)));
-        let columnValues = Vec::try_from(&mut myBytesRowData)?;
+        // todo 原来使用ByteMut的话rowBinary要先copy到vec,再以vec构建ByteMut,如何减少这其实不必要的copy 完成
+        let mut sliceWrapper = SliceWrapper::new(rowBinary);
+        let columnValues = Vec::<GraphValue>::decodeSlice(&mut sliceWrapper)?;
 
         if columnNames.len() != columnValues.len() {
             panic!("column names count does not match column values");

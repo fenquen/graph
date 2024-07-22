@@ -9,7 +9,7 @@ use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::ser::SerializeMap;
 use serde_json::Value;
-use crate::codec::{BinaryCodec, MyBytes};
+use crate::codec::{BinaryCodec, MyBytes, SliceWrapper};
 use crate::parser::element::Element;
 use crate::parser::op;
 use crate::parser::op::{LikePattern, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
@@ -67,6 +67,57 @@ impl BinaryCodec for GraphValue {
         }
     }
 
+    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
+        match self {
+            GraphValue::String(s) => {
+                destByteSlice.put_u8(GraphValue::STRING);
+                destByteSlice.put_u32(s.len() as u32);
+                destByteSlice.put_slice(s.as_bytes());
+            }
+            GraphValue::Boolean(s) => {
+                destByteSlice.put_u8(GraphValue::BOOLEAN);
+                destByteSlice.put_u8(if *s { 1 } else { 0 });
+            }
+            GraphValue::Integer(s) => {
+                destByteSlice.put_u8(GraphValue::INTEGER);
+                destByteSlice.put_i64(*s);
+            }
+            GraphValue::Decimal(s) => {
+                destByteSlice.put_u8(GraphValue::DECIMAL);
+                destByteSlice.put_f64(*s);
+            }
+            GraphValue::Null => destByteSlice.put_u8(GraphValue::NULL),
+            _ => panic!("impossible")
+        }
+
+        Ok(())
+    }
+
+    fn decodeSlice(srcSliceWrapper: &mut SliceWrapper) -> Result<Self::OutputType> {
+        // 读取type标识
+        let typeTag = srcSliceWrapper.get_u8();
+
+        match typeTag {
+            GraphValue::PENDING | GraphValue::STRING => {
+                let contentLen = srcSliceWrapper.get_u32() as usize;
+
+                let slice = &srcSliceWrapper.slice[srcSliceWrapper.position..srcSliceWrapper.position + contentLen];
+                srcSliceWrapper.advance(contentLen);
+
+                match typeTag {
+                    GraphValue::PENDING => Ok(GraphValue::Pending(String::from_utf8_lossy(slice).to_string())),
+                    GraphValue::STRING => Ok(GraphValue::String(String::from_utf8_lossy(slice).to_string())),
+                    _ => panic!("impossible")
+                }
+            }
+            GraphValue::BOOLEAN => Ok(GraphValue::Boolean(srcSliceWrapper.get_u8() == 0)),
+            GraphValue::INTEGER => Ok(GraphValue::Integer(srcSliceWrapper.get_i64())),
+            GraphValue::DECIMAL => Ok(GraphValue::Decimal(srcSliceWrapper.get_f64())),
+            GraphValue::NULL => Ok(GraphValue::Null),
+            _ => throwFormat!("unknown type tag:{}",typeTag)
+        }
+    }
+
     fn encode2Slice(&self, mut destByteSlice: &mut [Byte]) -> Result<usize> {
         match self {
             GraphValue::String(s) => {
@@ -75,7 +126,7 @@ impl BinaryCodec for GraphValue {
                 //destByteSlice = &mut destByteSlice[size_of::<Byte>()..];
 
                 destByteSlice.put_u32(s.len() as u32);
-               // destByteSlice = &mut destByteSlice[size_of::<u32>()..];
+                // destByteSlice = &mut destByteSlice[size_of::<u32>()..];
 
                 destByteSlice.put_slice(s.as_bytes());
             }
@@ -102,32 +153,6 @@ impl BinaryCodec for GraphValue {
         }
 
         Ok(self.size().unwrap())
-    }
-
-    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
-        match self {
-            GraphValue::String(s) => {
-                destByteSlice.put_u8(GraphValue::STRING);
-                destByteSlice.put_u32(s.len() as u32);
-                destByteSlice.put_slice(s.as_bytes());
-            }
-            GraphValue::Boolean(s) => {
-                destByteSlice.put_u8(GraphValue::BOOLEAN);
-                destByteSlice.put_u8(if *s { 1 } else { 0 });
-            }
-            GraphValue::Integer(s) => {
-                destByteSlice.put_u8(GraphValue::INTEGER);
-                destByteSlice.put_i64(*s);
-            }
-            GraphValue::Decimal(s) => {
-                destByteSlice.put_u8(GraphValue::DECIMAL);
-                destByteSlice.put_f64(*s);
-            }
-            GraphValue::Null => destByteSlice.put_u8(GraphValue::NULL),
-            _ => panic!("impossible")
-        }
-
-        Ok(())
     }
 }
 

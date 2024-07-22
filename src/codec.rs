@@ -11,10 +11,11 @@ pub trait BinaryCodec {
     /// 因为读取string的时候不想copy_to_slice()产生copy 想直接对srcByteSlice切片 <br>
     /// 然而Bytes不提供position 且它的len()函数相当的坑 其实是remaining()
     fn decode(srcByteSlice: &mut MyBytes) -> Result<Self::OutputType>;
-
-    fn encode2Slice(&self, destByteSlice: &mut [Byte]) -> Result<usize>;
-
     fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()>;
+
+    fn decodeSlice(srcSliceWrapper: &mut SliceWrapper) -> Result<Self::OutputType>;
+    /// 返回写入的byte数量
+    fn encode2Slice(&self, destByteSlice: &mut [Byte]) -> Result<usize>;
 }
 
 impl<T: BinaryCodec<OutputType=T>> BinaryCodec for Vec<T> {
@@ -34,6 +35,28 @@ impl<T: BinaryCodec<OutputType=T>> BinaryCodec for Vec<T> {
         Ok(vec)
     }
 
+    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
+        for t in self {
+            t.encode(destByteSlice)?;
+        }
+
+        Ok(())
+    }
+
+    fn decodeSlice(sliceWrapper: &mut SliceWrapper) -> Result<Self::OutputType> {
+        let mut vec = vec![];
+
+        loop {
+            if sliceWrapper.remaining() == 0 {
+                break;
+            }
+
+            vec.push(T::decodeSlice(sliceWrapper)?);
+        }
+
+        Ok(vec)
+    }
+
     fn encode2Slice(&self, destByteSlice: &mut [Byte]) -> Result<usize> {
         let mut totalWriteCount = 0usize;
 
@@ -45,14 +68,6 @@ impl<T: BinaryCodec<OutputType=T>> BinaryCodec for Vec<T> {
         assert_eq!(destByteSlice.len(), totalWriteCount);
 
         Ok(totalWriteCount)
-    }
-
-    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
-        for t in self {
-            t.encode(destByteSlice)?;
-        }
-
-        Ok(())
     }
 }
 
@@ -84,6 +99,36 @@ impl TryFrom<&mut MyBytes> for Vec<GraphValue> {
 
     fn try_from(myBytes: &mut MyBytes) -> Result<Self, Self::Error> {
         Ok(Vec::<GraphValue>::decode(myBytes)?)
+    }
+}
+
+pub struct SliceWrapper<'a> {
+    pub slice: &'a [Byte],
+    pub position: usize,
+    pub len: usize,
+}
+
+impl<'a> Buf for SliceWrapper<'a> {
+    fn remaining(&self) -> usize {
+        self.len - self.position
+    }
+
+    fn chunk(&self) -> &[u8] {
+        &self.slice[self.position..]
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        self.position += cnt;
+    }
+}
+
+impl<'a> SliceWrapper<'a> {
+    pub fn new(slice: &'a [Byte]) -> SliceWrapper<'a> {
+        SliceWrapper {
+            slice,
+            position: 0,
+            len: slice.len(),
+        }
     }
 }
 

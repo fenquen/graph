@@ -127,4 +127,41 @@ link user(id= 6) to user(id=7) by likes(level =0)
     "sql": "insert into user (name) values ('tom1'),('tom2');"
 }
 
+
+// -------------------------------------------------------------------------------------------------
+{
+    "requestType": "ExecuteSql",
+    "sql": "create table if not exist user (id integer,name string);insert into user values (1,'tom1')"
+}
+
+{
+    "requestType": "ExecuteSql",
+    "sql": "create relation if not exist usage (number integer);"
+}
+
+{
+    "requestType": "ExecuteSql",
+    "sql": "create table if not exist car (id integer,name string);insert into car values (1,'car1')"
+}
+
+{
+    "requestType": "ExecuteSql",
+    "sql": "create relation if not exist own (number integer);"
+}
+
+{
+    "requestType": "ExecuteSql",
+    "sql": "create table if not exist tyre (id integer,name string);insert into tyre values (1,'tyre1')"
+}
+
+{
+    "requestType": "ExecuteSql",
+    "sql": "link user(id=1) -usage(number = 9) -> car(id=1) -own(number=2)-> tyre(id=1)"
+}
+
+{
+    "requestType": "ExecuteSql",
+    "sql": "select user(id=1) -usage(number = 9) -> car(id=1) -own(number=2)-> tyre(id=1)"
+}
+
 应对 id = num + 1 and

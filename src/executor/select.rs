@@ -8,7 +8,7 @@ use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED,
             meta, suffix_plus_plus, byte_slice_to_u64, types, utils, throw, prefix_minus_minus};
 use crate::executor::mvcc::BytesMutExt;
 use crate::graph_value::{GraphValue};
-use crate::meta::Table;
+use crate::meta::{DBObject, Table};
 use crate::types::{Byte, ColumnFamily, DataKey, KeyTag, RowData, DBRawIterator, TableMutations, RelationDepth};
 use crate::global;
 use crate::parser::command::select::{EndPointType, RelDesc, Select, SelectRel, SelectTable, SelectTableUnderRels};
@@ -33,7 +33,13 @@ impl<'session> CommandExecutor<'session> {
     /// 普通的和rdbms相同的 select
     fn selectTable(&self, selectTable: &SelectTable) -> Result<CommandExecResult> {
         let table = Session::getDBObjectByName(selectTable.tableName.as_str())?;
-        let table = table.asTable()?;
+
+        let table = match table.value() {
+            DBObject::Table(t) => t,
+            DBObject::Relation(t) => t,
+            _ => panic!()
+        };
+        // let table = table.asTable()?;
 
         let rowDatas = {
             let scanParams = ScanParams {
@@ -132,7 +138,7 @@ impl<'session> CommandExecutor<'session> {
 
                 // 收罗该rel上的全部的dest的dataKey
                 let mut destRowDatas =
-                    if selectRel.relationDepth.is_some() {
+                    if selectRel.relationDepth.is_none() {
                         let destRowDatas =
                             gatherTargetDatas(meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, selectRel.destFilter.as_ref())?;
 

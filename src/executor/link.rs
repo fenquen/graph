@@ -50,7 +50,8 @@ impl<'session> CommandExecutor<'session> {
         a
     }
 
-    /// 返回的另外1个对象是 dest上的数据
+    ///  link user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 12)
+    /// 返回的是另外1个对象是 dest上的数据
     fn linkTo<'a>(&self,
                   linkTo: &'a LinkTo,
                   lastRoundDestSatisfiedDatas: Option<Vec<(DataKey, RowData)>>,
@@ -204,6 +205,7 @@ impl<'session> CommandExecutor<'session> {
         Ok((CommandExecResult::DmlResult, Some(destSatisfiedDatas)))
     }
 
+    /// link user(id=1 and 0=6) -usage(number = 9) -> car -own(number=1)-> tyre
     fn linkChain<'a>(&self,
                      linkTos: &'a [LinkTo],
                      mutationsDest: &mut SessionVec<(&'a String, Mutation)>) -> Result<CommandExecResult> {
