@@ -1,22 +1,24 @@
 use crate::executor::{CommandExecResult, CommandExecutor};
 use anyhow::Result;
 use bytes::BufMut;
-use crate::{extractDirectionKeyTagFromPointerKey, extractRowIdFromDataKey, extractRowIdFromKeySlice, extractTargetDataKeyFromPointerKey, extractTargetDBObjectIdFromPointerKey, keyPrefixAddRowId, meta, throw, throwFormat};
+use crate::{extractDirectionKeyTagFromPointerKey, extractRowIdFromDataKey, extractRowIdFromKeySlice};
+use crate::{extractTargetDataKeyFromPointerKey, extractTargetDBObjectIdFromPointerKey, keyPrefixAddRowId, throw, throwFormat};
 use crate::meta::{DBObject, Table};
+use crate::meta;
 use crate::session::Session;
 
 impl<'session> CommandExecutor<'session> {
     pub(super) fn dropTable(&self, tableName: &str) -> Result<CommandExecResult> {
-        let dbObject = Session::getDBObjectMutByName(tableName)?;
+        let mut dbObjectRefMut = Session::getDBObjectMutByName(tableName)?;
 
-        let table = match dbObject.value() {
+        let table = match dbObjectRefMut.value() {
             DBObject::Table(_) | DBObject::Relation(_) => {
                 let columnFamily = Session::getColFamily(tableName)?;
                 let mut dbRawIterator = self.session.getDBRawIterator(&columnFamily)?;
 
                 dbRawIterator.seek(&[meta::KEY_PREFIX_POINTER]);
 
-                match dbObject.value() {
+                match dbObjectRefMut.value_mut() {
                     DBObject::Table(table) => {
                         // 要是table上有关系关联 不能drop
                         if let Some(pointerKey) = dbRawIterator.key() {
@@ -96,21 +98,22 @@ impl<'session> CommandExecutor<'session> {
 
         // 清理相应的index
         for indexName in &table.indexNames {
-            self.dropIndex(indexName)?;
+            self.dropIndex(indexName, Some(table))?;
         }
 
         self.session.dropColFamily(tableName)?;
         self.session.deleteMeta(table.id)?;
 
-        drop(dbObject);
+        drop(dbObjectRefMut);
 
         Session::removeDBObjectByName(tableName)?;
 
         Ok(CommandExecResult::DdlResult)
     }
 
-    pub(super) fn dropIndex(&self, indexName: &str) -> Result<CommandExecResult> {
-        log::info!("drop index: {}",indexName);
+    // todo 还要带对应table修改
+    pub(super) fn dropIndex(&self, indexName: &str, table: Option<&mut Table>) -> Result<CommandExecResult> {
+        log::info!("drop index: {}", indexName);
 
         let dbObject = Session::getDBObjectMutByName(indexName)?;
         let index = dbObject.asIndex()?;

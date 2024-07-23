@@ -29,6 +29,7 @@ mod index;
 mod optimizer;
 mod drop;
 mod show;
+mod alter;
 
 #[macro_export]
 macro_rules! JSON_ENUM_UNTAGGED {
@@ -82,7 +83,7 @@ impl<'session> CommandExecutor<'session> {
                 }
                 Command::DropTable(tableName) => self.dropTable(tableName)?,
                 Command::DropRelation(relationName) => self.dropRelation(relationName)?,
-                Command::DropIndex(indexName) => self.dropIndex(indexName)?,
+                Command::DropIndex(indexName) => self.dropIndex(indexName, None)?,
                 Command::CreateIndex(index) => {
                     let index = Index {
                         id: DBObjectId::default(),
@@ -123,6 +124,7 @@ impl<'session> CommandExecutor<'session> {
                 Command::ShowIndice(dbObject) => self.showIndice(dbObject.as_ref())?,
                 Command::ShowRelations => self.showRelations()?,
                 Command::ShowTables => self.showTables()?,
+                Command::Alter(alter) => self.alter(alter)?,
                 _ => throwFormat!("unsupported command: {:?}", command)
             };
 

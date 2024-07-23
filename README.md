@@ -119,6 +119,8 @@ insert into tyre values(7,'stone');
 
 ### 使用关系连接表上的数据
 
+#### 两两连接
+
 ```sql
 --id是1的user 使用(usage)12辆 color是'red的car
 link user(id =1) to car(color='red') by usage(number = 12);
@@ -128,6 +130,12 @@ link car (id =34) to tyre(name ='stone') by own(number=1);
 
 --id是1的user 使用(usage)17辆 id是17的car
 link user(id =1) to car(id =43) by usage(number = 17);
+```
+
+#### 链式连接
+
+```text
+link user(id=1) -usage(number = 9) -> car(id=1) -own(number=2)-> tyre(id=1)
 ```
 
 ### 撤销关系
@@ -210,7 +218,7 @@ select user(id=1 and 0=0) -usage(number > 0) as usage0-> car
 ]
 ```
 
-##### 多关系查询
+##### 多关系查询(链式)
 
 搜索满足如下的脉络联系 <br>
 id是1的user && 对car的使用(usage)数量(number) >9 && 相应的car对tyre的拥有(own)数量(number)是1,user只显示id和name

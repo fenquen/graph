@@ -35,20 +35,10 @@ impl Parser {
                 global::圆括号_STR => { // 各column名
                     insertValues.useExplicitColumnNames = true;
 
-                    loop {
-                        let currentElement = self.getCurrentElementAdvance()?;
+                    self.skipElement(-1);
+                    insertValues.columnNames = self.parseInsertColumnNames()?;
 
-                        // columnName都要是TextLiteral 而不是StringContent
-                        let text = currentElement.expectTextLiteral(global::EMPTY_STR)?;
-                        match text.as_str() {
-                            global::逗号_STR => continue,
-                            // columnName读取结束了 下边应该是values
-                            global::圆括号1_STR => break,
-                            _ => insertValues.columnNames.push(text),
-                        }
-                    }
-
-                    if insertValues.columnNames.len() == 0 {
+                    if insertValues.columnNames.is_empty() {
                         self.throwSyntaxErrorDetail("you have not designate any column")?;
                     }
 
@@ -103,5 +93,25 @@ impl Parser {
         }
 
         Ok(Command::Insert(insertValues))
+    }
+
+    /// 读取 insert into test (column1) values ('a') 中 (column1) 部分
+    pub(super) fn parseInsertColumnNames(&mut self) -> Result<Vec<String>> {
+        self.getCurrentElementAdvance()?.expectTextLiteralContent(global::圆括号_STR)?;
+
+        let mut columnNames = Vec::new();
+
+        loop {
+            // columnName都要是TextLiteral 而不是StringContent
+            let text = self.getCurrentElementAdvance()?.expectTextLiteralSilent()?;
+            match text.as_str() {
+                global::逗号_STR => continue,
+                // columnName读取结束了 下边应该是values
+                global::圆括号1_STR => break,
+                _ => columnNames.push(text),
+            }
+        }
+
+        Ok(columnNames)
     }
 }

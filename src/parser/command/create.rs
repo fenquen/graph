@@ -9,7 +9,6 @@ use crate::graph_value::GraphValue;
 impl Parser {
     // todo 实现 default value 完成
     // todo 实现 if not exist 完成
-    // CREATE    TABLE    TEST   ( COLUMN1 string   ,  COLUMN2 DECIMAL)
     pub(in crate::parser) fn parseCreate(&mut self) -> Result<Command> {
         let dbObjectType = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase();
         match dbObjectType.as_str() {
@@ -19,6 +18,7 @@ impl Parser {
         }
     }
 
+    /// create table if not exist user (id integer not null default 0,name string) <br>
     /// 因为relation和table的结构是相同的 共用
     fn parseCreateTable(&mut self, dbObjectType: &str) -> Result<Command> {
         let mut table = Table::default();
@@ -42,6 +42,18 @@ impl Parser {
 
         // table名不能胡乱
         self.checkDbObjectName(&table.name)?;
+
+        table.columns = self.parseColumnDefinitions()?;
+
+        if dbObjectType == DBObject::TABLE {
+            Ok(Command::CreateTable(table))
+        } else {
+            Ok(Command::CreateRelation(table))
+        }
+    }
+
+    pub(super) fn parseColumnDefinitions(&mut self) -> Result<Vec<Column>> {
+        let mut columns = Vec::new();
 
         // 应该是"("
         self.getCurrentElementAdvance()?.expectTextLiteralContent(global::圆括号_STR)?;
@@ -96,8 +108,7 @@ impl Parser {
 
                                 if expectElementTypeVec.is_empty() == false {
                                     if expectElementTypeVec.iter().any(|elementType| elementType == &currentElement.getType()) == false {
-                                        self.throwSyntaxError()?;
-                                        panic!();
+                                        return self.throwSyntaxError()?;
                                     }
                                 }
 
@@ -141,13 +152,13 @@ impl Parser {
                                 global::逗号_STR => {
                                     readColumnState = ReadColumnState::ReadColumnName;
 
-                                    table.columns.push(column);
+                                    columns.push(column);
                                     column = Column::default();
 
                                     continue;
                                 }
                                 global::圆括号1_STR => {
-                                    table.columns.push(column);
+                                    columns.push(column);
                                     break;
                                 }
                                 _ => self.throwSyntaxError()?,
@@ -159,11 +170,7 @@ impl Parser {
             }
         }
 
-        if dbObjectType == DBObject::TABLE {
-            Ok(Command::CreateTable(table))
-        } else {
-            Ok(Command::CreateRelation(table))
-        }
+        Ok(columns)
     }
 
     /// ```create index aaa on user[id, name] ```

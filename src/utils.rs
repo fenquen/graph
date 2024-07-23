@@ -72,8 +72,12 @@ impl<T> TrickyContainer<T> {
 }
 
 /// 交集
-pub fn intersect<T: Clone + PartialEq>(a: &[T], b: &[T]) -> Vec<T> {
-    a.iter().filter(|&t| b.contains(t)).map(|destDataKey| destDataKey.clone()).collect()
+pub fn intersect<'a, T: PartialEq>(a: &'a [T], b: &'a [T]) -> Vec<&'a T> {
+    a.iter().filter(|&t| b.contains(t)).map(|destDataKey| destDataKey).collect()
+}
+
+pub fn hasIntersect<'a, T: PartialEq>(a: &'a [T], b: &'a [T]) -> bool {
+    0 < a.iter().filter(|&t| b.contains(t)).map(|destDataKey| destDataKey).collect::<Vec<&'a T>>().len()
 }
 
 impl<T> Deref for TrickyContainer<T> {

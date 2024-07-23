@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::meta::{DBObject, Index, Table};
+use crate::parser::command::alter::Alter;
 use crate::parser::command::delete::Delete;
 use crate::parser::command::insert::Insert;
 use crate::parser::command::link::Link;
@@ -18,6 +19,7 @@ pub mod select;
 pub mod manage;
 mod drop;
 mod show;
+pub mod alter;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Command { //  todo 实现 order by
@@ -40,6 +42,7 @@ pub enum Command { //  todo 实现 order by
     ShowRelations,
     /// Option<(DBObject)> 意思是要找的index是在那个table还是relaiton上边
     ShowIndice(Option<(DBObject)>),
+    Alter(Alter),
 }
 
 impl Command {

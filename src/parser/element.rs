@@ -67,6 +67,14 @@ impl Element {
         }
     }
 
+    pub(super) fn expectTextLiteralSilent(&self) -> Result<String> {
+        if let Some(text) = self.expectTextLiteralOpt() {
+            Ok(text.to_string())
+        } else {
+            throw!(&format!("expect Element::TextLiteral but get {:?}", self))
+        }
+    }
+
     pub(super) fn expectTextLiteralContent(&self, expectContent: &str) -> Result<()> {
         if self.expectTextLiteralContentBool(expectContent) {
             Ok(())
@@ -550,7 +558,7 @@ impl Parser {
         option
     }
 
-    /// 得到current element 然后 advance
+    /// getCurrentElementAdvance, 得到current element 然后 advance
     pub(super) fn getCurrentElementAdvance(&mut self) -> Result<&Element> {
         if let Some(element) = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex) {
             suffix_plus_plus!(self.currentElementIndex);

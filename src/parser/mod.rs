@@ -72,6 +72,7 @@ impl Parser {
                     "rollback" => self.parseRollback()?,
                     "set" => self.parseSet()?,
                     "show" => self.parseShow()?,
+                    "alter" => self.parseAlter()?,
                     _ => self.throwSyntaxError()?,
                 };
 
