@@ -1,4 +1,4 @@
-use crate::global;
+use crate::{global, throw, throwFormat, utils};
 use crate::meta::{Column, DBObject, Index, Table, TableType};
 use crate::parser::command::Command;
 use crate::parser::element::Element;
@@ -168,6 +168,12 @@ impl Parser {
                 }
                 _ => self.throwSyntaxErrorDetail("column name, column type can not be pure number")?,
             }
+        }
+
+        if utils::hasDup(&mut columns,
+                         |prev, next| prev.name.cmp(&next.name),
+                         |prev, next| prev.name == next.name) {
+            throw!("has duplicated column names");
         }
 
         Ok(columns)

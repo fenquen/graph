@@ -89,7 +89,7 @@ impl Session {
         let mut batch = WriteBatchWithTransaction::<false>::default();
 
         for (tableName, mutations) in self.tableName_mutationsOnTable.read().unwrap().iter() {
-            let colFamily = Session::getColFamily(tableName)?;
+            let colFamily = Session::getColumnFamily(tableName)?;
             for (key, value) in mutations {
                 batch.put_cf(&colFamily, key, value);
             }
@@ -99,7 +99,7 @@ impl Session {
         {
             let currentTxId = self.txId.unwrap();
             // cf需要现用现取 内部使用的是read 而create cf会用到write
-            let cf = Session::getColFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
+            let cf = Session::getColumnFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
 
             let txUndergoingMaxCount = CONFIG.txUndergoingMaxCount.load(Ordering::Acquire) as u64;
 
@@ -188,7 +188,7 @@ impl Session {
         }
     }
 
-    pub fn getColFamily(columnFamilyName: &str) -> Result<ColumnFamily> {
+    pub fn getColumnFamily(columnFamilyName: &str) -> Result<ColumnFamily> {
         match meta::STORE.dataStore.cf_handle(columnFamilyName) {
             Some(cf) => Ok(cf),
             None => throwFormat!("column family:{} not exist", columnFamilyName)

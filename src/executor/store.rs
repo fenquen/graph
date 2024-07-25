@@ -177,7 +177,7 @@ impl<'session> CommandExecutor<'session> {
 
         let mut rowDatas = Vec::with_capacity(dataKeys.len());
 
-        let columnFamily = Session::getColFamily(&scanParams.table.name)?;
+        let columnFamily = Session::getColumnFamily(&scanParams.table.name)?;
 
         let mut mvccKeyBuffer = &mut self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
         let mut rawIterator: DBRawIterator = self.session.getDBRawIterator(&columnFamily)?;
@@ -271,7 +271,7 @@ impl<'session> CommandExecutor<'session> {
     {
 
         // todo 使用table id 为 column family 标识
-        let columnFamily = Session::getColFamily(&scanParams.table.name)?;
+        let columnFamily = Session::getColumnFamily(&scanParams.table.name)?;
 
         let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.read().unwrap();
         let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(&scanParams.table.name);
@@ -417,7 +417,7 @@ impl<'session> CommandExecutor<'session> {
 
                                         let snapshot = commandExecutor.session.getSnapshot()?;
                                         // column不是sync的 只能到thread上建立的
-                                        let columnFamily = Session::getColFamily(tableName.as_str())?;
+                                        let columnFamily = Session::getColumnFamily(tableName.as_str())?;
 
                                         let tableName_mutationsOnTable = commandExecutor.session.tableName_mutationsOnTable.read().unwrap();
                                         let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(table.name.as_str());
@@ -632,7 +632,7 @@ impl<'session> CommandExecutor<'session> {
 
         // todo 原来使用ByteMut的话rowBinary要先copy到vec,再以vec构建ByteMut,如何减少这其实不必要的copy 完成
         let mut sliceWrapper = SliceWrapper::new(rowBinary);
-        let columnValues = Vec::<GraphValue>::decodeSlice(&mut sliceWrapper)?;
+        let columnValues = Vec::<GraphValue>::decodeFromSliceWrapper(&mut sliceWrapper, Some(self))?;
 
         if columnNames.len() != columnValues.len() {
             panic!("column names count does not match column values");
@@ -761,7 +761,7 @@ impl<'session> CommandExecutor<'session> {
                         throwFormat!("column:{}, type:{} is not compatible with value:{}", column.name, column.type0, columnValue);
                     }
 
-                    columnValue.encode(&mut destByteSlice)?;
+                    columnValue.encode2ByteMut(&mut destByteSlice)?;
 
                     rowData.insert(column.name.clone(), columnValue);
                 }
@@ -787,7 +787,7 @@ impl<'session> CommandExecutor<'session> {
 
         let mut pointerKeyBuffer = self.withCapacityIn(meta::POINTER_KEY_BYTE_LEN);
 
-        let columnFamily = Session::getColFamily(tableName)?;
+        let columnFamily = Session::getColumnFamily(tableName)?;
 
         let snapshot = self.session.getSnapshot()?;
         let mut rawIterator = snapshot.raw_iterator_cf(&columnFamily) as DBRawIterator;

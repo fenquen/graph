@@ -13,10 +13,10 @@ use crate::executor::{CommandExecutor, index, optimizer};
 use crate::expr::Expr;
 use crate::meta::{ColumnType, DBObject, Table};
 use crate::{byte_slice_to_u32, byte_slice_to_u64, global, meta, suffix_plus_plus, throwFormat, u64ToByteArrRef, utils};
-use crate::codec::{BinaryCodec, MyBytes};
+use crate::codec::{BinaryCodec, MyBytes, SliceWrapper};
 use crate::executor::store;
 use crate::session::Session;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, Pointer, RowData, SessionHashMap, SessionHashSet, TableMutations};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, Pointer, RowData, SessionHashMap, SessionHashSet, SessionVec, TableMutations};
 use anyhow::Result;
 use crate::executor::optimizer::merge;
 use crate::executor::optimizer::merge::AccumulateResult;
@@ -384,7 +384,7 @@ impl<'session> CommandExecutor<'session> {
 
         let index = indexSearch.dbObjectIndex.asIndex()?;
 
-        let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
+        let indexColumnFamily = Session::getColumnFamily(index.name.as_str())?;
         let mut indexDBRawIterator = self.session.getDBRawIterator(&indexColumnFamily)?;
 
         let mut rowDatas: SessionHashMap<DataKey, (DataKey, RowData)> = self.hashMapNewIn();
@@ -437,7 +437,7 @@ impl<'session> CommandExecutor<'session> {
 
                 let (op, value) = &opValueVec[0];
                 if let Op::MathCmpOp(MathCmpOp::Equal) = op {
-                    value.encode(&mut prefixBuffer)?;
+                    value.encode2ByteMut(&mut prefixBuffer)?;
                 } else {
                     break;
                 }
@@ -774,7 +774,7 @@ impl<'session> CommandExecutor<'session> {
                     assert!(value.isConstant());
 
                     lowerValueBuffer.clear();
-                    value.encode(&mut lowerValueBuffer)?;
+                    value.encode2ByteMut(&mut lowerValueBuffer)?;
 
                     match op {
                         Op::MathCmpOp(MathCmpOp::Equal) => {
@@ -853,7 +853,7 @@ impl<'session> CommandExecutor<'session> {
                                     let value = GraphValue::String(s);
 
                                     lowerValueBuffer.clear();
-                                    value.encode(&mut lowerValueBuffer)?;
+                                    value.encode2ByteMut(&mut lowerValueBuffer)?;
 
                                     let s = value.asString()?.as_bytes();
                                     indexDBRawIterator.seek(lowerValueBuffer.as_ref());
@@ -901,8 +901,8 @@ impl<'session> CommandExecutor<'session> {
 
         // 对index以表数据读取
         let indexRowData = extractIndexRowDataFromIndexKey!(indexKey);
-        let mut myBytesRowData = MyBytes::from(Bytes::from(Vec::from(indexRowData)));
-        let columnValues = Vec::try_from(&mut myBytesRowData)?;
+        let mut sliceWrapper = SliceWrapper::new(indexRowData);
+        let columnValues = SessionVec::<GraphValue>::decodeFromSliceWrapper(&mut sliceWrapper, Some(self))?;
 
         // 说明index本身上的对各个col的测试已经都测试通过了
         if indexSearch.opValueVecVecAcrossIndexFilteredCols.len() <= beginPosition {
@@ -974,7 +974,7 @@ impl<'session> CommandExecutor<'session> {
     // todo indexLocalSearch 要有hook 因为scan时候到这里就要就地解决了
     /// 调用该函数的时候已然是通过了 filter的测试 还需要通过mvcc visibility测试
     fn indexLocalSearch<A, B, C, D>(&self,
-                                    columnValues: Vec<GraphValue>, // index上的全部的column的data
+                                    columnValues: SessionVec<GraphValue>, // index上的全部的column的data
                                     datakey: DataKey,
                                     indexSearch: &IndexSearch) -> Result<Option<RowData>>
     where
@@ -1044,7 +1044,7 @@ impl<'session> CommandExecutor<'session> {
             // 遍历了index的各个column
             for indexColumnName in &index.columnNames {
                 let columnValue = rowData.get(indexColumnName).unwrap();
-                columnValue.encode(indexKeyBuffer)?;
+                columnValue.encode2ByteMut(indexKeyBuffer)?;
             }
 
             // indexKey的末尾写上dataKey,这样就算row上的data相同也能区分

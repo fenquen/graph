@@ -16,6 +16,7 @@ pub enum Alter {
 pub enum AlterTable {
     DropColumns {
         tableName: String,
+        cascade: bool,
         columnNames: Vec<String>,
     },
     AddColumns {
@@ -26,7 +27,6 @@ pub enum AlterTable {
 }
 
 impl Parser {
-    /// alter table car add columns (id integer not null default 0,name string)
     pub(in crate::parser) fn parseAlter(&mut self) -> Result<Command> {
         let alter =
             match self.getCurrentElementAdvance()?.expectTextLiteralSilent()?.to_lowercase().as_str() {
@@ -36,6 +36,7 @@ impl Parser {
                     match self.getCurrentElementAdvance()?.expectTextLiteralSilent()?.to_lowercase().as_str() {
                         "add" => {
                             match self.getCurrentElementAdvance()?.expectTextLiteralSilent()?.to_lowercase().as_str() {
+                                // alter table car add columns (id integer not null default 0,name string)
                                 "columns" => Alter::AlterTable(AlterTable::AddColumns {
                                     tableName,
                                     columns: self.parseColumnDefinitions()?,
@@ -45,8 +46,10 @@ impl Parser {
                         }
                         "drop" => {
                             match self.getCurrentElementAdvance()?.expectTextLiteralSilent()?.to_lowercase().as_str() {
+                                // alter table car drop columns (id ,name)
                                 "columns" => Alter::AlterTable(AlterTable::DropColumns {
                                     tableName,
+                                    cascade: self.getCurrentElement()?.expectTextLiteralContentIgnoreCaseBool("cascade"),
                                     columnNames: self.parseInsertColumnNames()?,
                                 }),
                                 _ => self.throwSyntaxErrorDetail("not support")?

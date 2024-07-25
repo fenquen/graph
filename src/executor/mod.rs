@@ -83,7 +83,7 @@ impl<'session> CommandExecutor<'session> {
                 }
                 Command::DropTable(tableName) => self.dropTable(tableName)?,
                 Command::DropRelation(relationName) => self.dropRelation(relationName)?,
-                Command::DropIndex(indexName) => self.dropIndex(indexName, None)?,
+                Command::DropIndex(indexName) => self.dropIndex(indexName, false)?,
                 Command::CreateIndex(index) => {
                     let index = Index {
                         id: DBObjectId::default(),
@@ -151,7 +151,7 @@ impl<'session> CommandExecutor<'session> {
     // ---------------------------------------------------------
 
     #[inline]
-    fn vecNewIn<T>(&self) -> SessionVec<T> {
+    pub fn vecNewIn<T>(&self) -> SessionVec<T> {
         self.vecWithCapacityIn(0)
     }
 

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::expr::Expr;
-use crate::global;
+use crate::{global, throw, utils};
 use crate::parser::command::Command;
 use crate::parser::Parser;
 use anyhow::Result;
@@ -110,6 +110,12 @@ impl Parser {
                 global::圆括号1_STR => break,
                 _ => columnNames.push(text),
             }
+        }
+
+        if utils::hasDup(&mut columnNames,
+                         |prev, next| prev.cmp(next),
+                         |prev, next| prev == next) {
+            throw!("has duplicated column names");
         }
 
         Ok(columnNames)

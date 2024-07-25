@@ -1,3 +1,5 @@
+use std::mem::forget;
+use std::ptr;
 use crate::executor::{CommandExecResult, CommandExecutor};
 use anyhow::Result;
 use bytes::BufMut;
@@ -13,7 +15,7 @@ impl<'session> CommandExecutor<'session> {
 
         let table = match dbObjectRefMut.value() {
             DBObject::Table(_) | DBObject::Relation(_) => {
-                let columnFamily = Session::getColFamily(tableName)?;
+                let columnFamily = Session::getColumnFamily(tableName)?;
                 let mut dbRawIterator = self.session.getDBRawIterator(&columnFamily)?;
 
                 dbRawIterator.seek(&[meta::KEY_PREFIX_POINTER]);
@@ -58,7 +60,7 @@ impl<'session> CommandExecutor<'session> {
                                         None => panic!("impossible")
                                     };
 
-                                    let targetTableColumnFamily = Session::getColFamily(targetTableName.as_str())?;
+                                    let targetTableColumnFamily = Session::getColumnFamily(targetTableName.as_str())?;
 
                                     let targetDataKey = extractTargetDataKeyFromPointerKey!(pointerKey);
                                     let rowId = extractRowIdFromDataKey!(targetDataKey);
@@ -98,7 +100,7 @@ impl<'session> CommandExecutor<'session> {
 
         // 清理相应的index
         for indexName in &table.indexNames {
-            self.dropIndex(indexName, Some(table))?;
+            self.dropIndex(indexName, true)?;
         }
 
         self.session.dropColFamily(tableName)?;
@@ -112,18 +114,27 @@ impl<'session> CommandExecutor<'session> {
     }
 
     // todo 还要带对应table修改
-    pub(super) fn dropIndex(&self, indexName: &str, table: Option<&mut Table>) -> Result<CommandExecResult> {
+    pub(super) fn dropIndex(&self, indexName: &str, underDropTable: bool) -> Result<CommandExecResult> {
         log::info!("drop index: {}", indexName);
 
-        let dbObject = Session::getDBObjectMutByName(indexName)?;
-        let index = dbObject.asIndex()?;
+        let dbObjectIndex = Session::getDBObjectMutByName(indexName)?;
+        let index = dbObjectIndex.asIndex()?;
 
         self.session.dropColFamily(indexName)?;
         // 莫忘了对应的trash
         self.session.dropColFamily(format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX).as_str())?;
-        self.session.deleteMeta(dbObject.getId())?;
+        self.session.deleteMeta(dbObjectIndex.getId())?;
 
-        drop(dbObject);
+        // 说明是单独drop这个的index,需要去修改对应的table信息
+        if underDropTable == false {
+            let mut dbObjectTable = Session::getDBObjectMutByName(&index.tableName)?;
+            let table = dbObjectTable.asTableMut()?;
+
+            table.indexNames.retain(|indexNameExist| indexNameExist != indexName);
+            self.session.putUpdateMeta(table.id, &DBObject::Table(table.clone()))?;
+        }
+
+        drop(dbObjectIndex);
 
         Session::removeDBObjectByName(indexName)?;
 

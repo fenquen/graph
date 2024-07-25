@@ -3,6 +3,7 @@ use std::ops::{Deref, DerefMut};
 use std::{alloc, mem, ptr};
 use std::alloc::{Allocator, Global, Layout, System};
 use std::borrow::Borrow;
+use std::cmp::Ordering;
 use std::hash::{BuildHasher, Hash, RandomState};
 use hashbrown::{HashMap, HashSet};
 use anyhow::format_err;
@@ -71,15 +72,6 @@ impl<T> TrickyContainer<T> {
     }
 }
 
-/// 交集
-pub fn intersect<'a, T: PartialEq>(a: &'a [T], b: &'a [T]) -> Vec<&'a T> {
-    a.iter().filter(|&t| b.contains(t)).map(|destDataKey| destDataKey).collect()
-}
-
-pub fn hasIntersect<'a, T: PartialEq>(a: &'a [T], b: &'a [T]) -> bool {
-    0 < a.iter().filter(|&t| b.contains(t)).map(|destDataKey| destDataKey).collect::<Vec<&'a T>>().len()
-}
-
 impl<T> Deref for TrickyContainer<T> {
     type Target = T;
 
@@ -97,6 +89,15 @@ impl<T> DerefMut for TrickyContainer<T> {
 unsafe impl<T> Send for TrickyContainer<T> {}
 
 unsafe impl<T> Sync for TrickyContainer<T> {}
+
+/// 交集
+pub fn intersect<'a, T: PartialEq>(a: &'a [T], b: &'a [T]) -> Vec<&'a T> {
+    a.iter().filter(|&t| b.contains(t)).map(|destDataKey| destDataKey).collect()
+}
+
+pub fn hasIntersect<'a, T: PartialEq>(a: &'a [T], b: &'a [T]) -> bool {
+    0 < a.iter().filter(|&t| b.contains(t)).map(|destDataKey| destDataKey).collect::<Vec<&'a T>>().len()
+}
 
 pub trait HashMapExt<K, V, S = RandomState> {
     fn getMutWithDefault<Q: ?Sized>(&mut self, k: &Q) -> &mut V
@@ -221,6 +222,21 @@ impl<T, S, A: Allocator> Lengthable for HashSet<T, S, A> {
     fn length(&self) -> usize {
         self.len()
     }
+}
+
+pub fn hasDup<T>(slice: &mut [T],
+                 sorter: impl FnMut(&T, &T) -> Ordering,
+                 isDup: fn(prev: &T, next: &T) -> bool) -> bool {
+
+    slice.sort_by(sorter);
+
+    for a in 0..slice.len() - 1 {
+        if isDup(&slice[a], &slice[a + 1]) {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]

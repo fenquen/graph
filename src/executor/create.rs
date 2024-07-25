@@ -103,10 +103,10 @@ impl<'session> CommandExecutor<'session> {
     /// 当创建index的时候,要是table上已经有数据了需要对这些数据创建索引 <br>
     /// 不使用tx snapshot等概念 直接对数据store本体上手
     fn generateIndexDataForExistingTableData(&self, table: &Table, index: &Index) -> Result<()> {
-        let mut dbRawIteratorTable: DBRawIterator = meta::STORE.dataStore.raw_iterator_cf(&Session::getColFamily(index.tableName.as_str())?);
+        let mut dbRawIteratorTable: DBRawIterator = meta::STORE.dataStore.raw_iterator_cf(&Session::getColumnFamily(index.tableName.as_str())?);
         dbRawIteratorTable.seek(meta::DATA_KEY_PATTERN);
 
-        let indexColumnFamily = Session::getColFamily(index.name.as_str())?;
+        let indexColumnFamily = Session::getColumnFamily(index.name.as_str())?;
 
         let mut indexKeyBuffer = self.newIn();
 
@@ -129,7 +129,7 @@ impl<'session> CommandExecutor<'session> {
 
             for indexColumnName in &index.columnNames {
                 let columnValue = rowData.get(indexColumnName).unwrap();
-                columnValue.encode(&mut indexKeyBuffer)?;
+                columnValue.encode2ByteMut(&mut indexKeyBuffer)?;
             }
 
             indexKeyBuffer.put_slice(dataKey);

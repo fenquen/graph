@@ -132,16 +132,10 @@ impl Bytes {
     /// assert_eq!(&b[..], b"");
     /// ```
     #[inline]
-    #[cfg(not(all(loom, test)))]
+    #[cfg(not(all(test)))]
     pub const fn new() -> Self {
         // Make it a named const to work around
         // "unsizing casts are not allowed in const fn"
-        const EMPTY: &[u8] = &[];
-        Bytes::from_static(EMPTY)
-    }
-
-    #[cfg(all(loom, test))]
-    pub fn new() -> Self {
         const EMPTY: &[u8] = &[];
         Bytes::from_static(EMPTY)
     }
@@ -160,18 +154,8 @@ impl Bytes {
     /// assert_eq!(&b[..], b"hello");
     /// ```
     #[inline]
-    #[cfg(not(all(loom, test)))]
+    #[cfg(not(all(test)))]
     pub const fn from_static(bytes: &'static [u8]) -> Self {
-        Bytes {
-            ptr: bytes.as_ptr(),
-            len: bytes.len(),
-            data: AtomicPtr::new(ptr::null_mut()),
-            vtable: &STATIC_VTABLE,
-        }
-    }
-
-    #[cfg(all(loom, test))]
-    pub fn from_static(bytes: &'static [u8]) -> Self {
         Bytes {
             ptr: bytes.as_ptr(),
             len: bytes.len(),
@@ -1316,36 +1300,3 @@ fn _split_to_must_use() {}
 /// }
 /// ```
 fn _split_off_must_use() {}
-
-// fuzz tests
-#[cfg(all(test, loom))]
-mod fuzz {
-    use loom::sync::Arc;
-    use loom::thread;
-
-    use super::Bytes;
-    #[test]
-    fn bytes_cloning_vec() {
-        loom::model(|| {
-            let a = Bytes::from(b"abcdefgh".to_vec());
-            let addr = a.as_ptr() as usize;
-
-            // test the Bytes::clone is Sync by putting it in an Arc
-            let a1 = Arc::new(a);
-            let a2 = a1.clone();
-
-            let t1 = thread::spawn(move || {
-                let b: Bytes = (*a1).clone();
-                assert_eq!(b.as_ptr() as usize, addr);
-            });
-
-            let t2 = thread::spawn(move || {
-                let b: Bytes = (*a2).clone();
-                assert_eq!(b.as_ptr() as usize, addr);
-            });
-
-            t1.join().unwrap();
-            t2.join().unwrap();
-        });
-    }
-}

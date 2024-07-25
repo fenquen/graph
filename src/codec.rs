@@ -1,57 +1,44 @@
+use std::alloc::{Allocator, Global};
 use bytes::{Buf, Bytes, BytesMut};
 use anyhow::Result;
+use bumpalo::Bump;
+use crate::executor::CommandExecutor;
 use crate::graph_error::GraphError;
 use crate::graph_value::GraphValue;
-use crate::types::Byte;
+use crate::types::{Byte, SessionVec};
 
-pub trait BinaryCodec {
+pub trait BinaryCodec<'vecAllocator> {
     type OutputType;
 
-    /// 额外传递srcByteSlice的长度 <br>
-    /// 因为读取string的时候不想copy_to_slice()产生copy 想直接对srcByteSlice切片 <br>
-    /// 然而Bytes不提供position 且它的len()函数相当的坑 其实是remaining()
-    fn decode(srcByteSlice: &mut MyBytes) -> Result<Self::OutputType>;
-    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()>;
+    fn encode2ByteMut(&self, destByteSlice: &mut BytesMut) -> Result<()>;
 
-    fn decodeSlice(srcSliceWrapper: &mut SliceWrapper) -> Result<Self::OutputType>;
+    fn decodeFromSliceWrapper<'commandExecutor: 'vecAllocator>(srcSliceWrapper: &mut SliceWrapper,
+                                                               executor: Option<&'commandExecutor CommandExecutor>) -> Result<Self::OutputType>;
     /// 返回写入的byte数量
     fn encode2Slice(&self, destByteSlice: &mut [Byte]) -> Result<usize>;
 }
 
-impl<T: BinaryCodec<OutputType=T>> BinaryCodec for Vec<T> {
+impl<'vecAllocator, T: BinaryCodec<'vecAllocator, OutputType=T>> BinaryCodec<'vecAllocator> for Vec<T> {
     type OutputType = Vec<T>;
 
-    fn decode(srcByteSlice: &mut MyBytes) -> Result<Self::OutputType> {
-        let mut vec = vec![];
-
-        loop {
-            if srcByteSlice.bytes.has_remaining() == false {
-                break;
-            }
-
-            vec.push(T::decode(srcByteSlice)?);
-        }
-
-        Ok(vec)
-    }
-
-    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
+    fn encode2ByteMut(&self, destByteSlice: &mut BytesMut) -> Result<()> {
         for t in self {
-            t.encode(destByteSlice)?;
+            t.encode2ByteMut(destByteSlice)?;
         }
 
         Ok(())
     }
 
-    fn decodeSlice(sliceWrapper: &mut SliceWrapper) -> Result<Self::OutputType> {
+    fn decodeFromSliceWrapper<'commandExecutor: 'vecAllocator>(srcSliceWrapper: &mut SliceWrapper,
+                                                               _: Option<&'commandExecutor CommandExecutor>) -> Result<Self::OutputType> {
         let mut vec = vec![];
 
         loop {
-            if sliceWrapper.remaining() == 0 {
+            if srcSliceWrapper.remaining() == 0 {
                 break;
             }
 
-            vec.push(T::decodeSlice(sliceWrapper)?);
+            vec.push(T::decodeFromSliceWrapper(srcSliceWrapper, None)?);
         }
 
         Ok(vec)
@@ -68,6 +55,38 @@ impl<T: BinaryCodec<OutputType=T>> BinaryCodec for Vec<T> {
         assert_eq!(destByteSlice.len(), totalWriteCount);
 
         Ok(totalWriteCount)
+    }
+}
+
+impl<'vecAllocator, T: BinaryCodec<'vecAllocator, OutputType=T>> BinaryCodec<'vecAllocator> for SessionVec<'vecAllocator, T> {
+    type OutputType = SessionVec<'vecAllocator, T>;
+
+    fn encode2ByteMut(&self, destByteSlice: &mut BytesMut) -> Result<()> {
+        for t in self {
+            t.encode2ByteMut(destByteSlice)?;
+        }
+
+        Ok(())
+    }
+
+    fn decodeFromSliceWrapper<'commandExecutor: 'vecAllocator>(srcSliceWrapper: &mut SliceWrapper,
+                                                               executor: Option<&'commandExecutor CommandExecutor>) -> Result<Self::OutputType> {
+        let executor = executor.unwrap();
+        let mut vec: SessionVec<'vecAllocator, T> = executor.vecNewIn();
+
+        loop {
+            if srcSliceWrapper.remaining() == 0 {
+                break;
+            }
+
+            vec.push(T::decodeFromSliceWrapper(srcSliceWrapper, None)?);
+        }
+
+        Ok(vec)
+    }
+
+    fn encode2Slice(&self, destByteSlice: &mut [Byte]) -> Result<usize> {
+        todo!()
     }
 }
 
@@ -90,15 +109,6 @@ impl From<Bytes> for MyBytes {
             len: bytes.remaining(),
             bytes,
         }
-    }
-}
-
-impl TryFrom<&mut MyBytes> for Vec<GraphValue> {
-    // 不能使用GraphError
-    type Error = anyhow::Error;
-
-    fn try_from(myBytes: &mut MyBytes) -> Result<Self, Self::Error> {
-        Ok(Vec::<GraphValue>::decode(myBytes)?)
     }
 }
 

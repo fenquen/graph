@@ -29,7 +29,7 @@ impl<'session> CommandExecutor<'session> {
         let srcTable = Session::getDBObjectByName(&unlinkLinkStyle.srcTableName)?;
         let srcTable = srcTable.asTable()?;
 
-        let relationColumnFamily = Session::getColFamily(unlinkLinkStyle.relationName.as_str())?;
+        let relationColumnFamily = Session::getColumnFamily(unlinkLinkStyle.relationName.as_str())?;
 
         // 得到rel 干掉指向src和dest的pointer key
         let relationRowDatas = {

@@ -191,7 +191,7 @@ impl<'session> CommandExecutor<'session> {
 
         for column in &table.columns {
             let columnValue = rowData.get(&column.name).unwrap();
-            columnValue.encode(dest)?;
+            columnValue.encode2ByteMut(dest)?;
         }
 
         Ok(())

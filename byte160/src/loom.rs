@@ -1,4 +1,4 @@
-#[cfg(not(all(test, loom)))]
+#[cfg(not(all(test)))]
 pub(crate) mod sync {
     pub(crate) mod atomic {
         pub(crate) use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -17,14 +17,5 @@ pub(crate) mod sync {
                 f(self.get_mut())
             }
         }
-    }
-}
-
-#[cfg(all(test, loom))]
-pub(crate) mod sync {
-    pub(crate) mod atomic {
-        pub(crate) use loom::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-
-        pub(crate) trait AtomicMut<T> {}
     }
 }

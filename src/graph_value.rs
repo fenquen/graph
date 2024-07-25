@@ -10,6 +10,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::ser::SerializeMap;
 use serde_json::Value;
 use crate::codec::{BinaryCodec, MyBytes, SliceWrapper};
+use crate::executor::CommandExecutor;
 use crate::parser::element::Element;
 use crate::parser::op;
 use crate::parser::op::{LikePattern, LogicalOp, MathCalcOp, MathCmpOp, Op, SqlOp};
@@ -37,37 +38,10 @@ pub enum GraphValue {
 }
 
 /// type标识(u8) + 内容长度(u32,对应的是变长的 Pending String PoinstDesc) + 内容
-impl BinaryCodec for GraphValue {
+impl<'a> BinaryCodec<'a> for GraphValue {
     type OutputType = GraphValue;
 
-    fn decode(srcByteSlice: &mut MyBytes) -> Result<GraphValue> {
-        // 读取type标识
-        let typeTag = srcByteSlice.bytes.get_u8();
-
-        match typeTag {
-            GraphValue::PENDING | GraphValue::STRING => {
-                let contentLen = srcByteSlice.bytes.get_u32() as usize;
-                // let currentPos = srcByteSlice.position();
-                // 不需要绝对的position 需要相对的 上边的绝对的currentPos用不到了
-                let slice = &*srcByteSlice.bytes.slice(..contentLen);
-                // 需要手动advence,因为上边的提供的是个的小视图
-                srcByteSlice.bytes.advance(contentLen);
-
-                match typeTag {
-                    GraphValue::PENDING => Ok(GraphValue::Pending(String::from_utf8_lossy(slice).to_string())),
-                    GraphValue::STRING => Ok(GraphValue::String(String::from_utf8_lossy(slice).to_string())),
-                    _ => panic!("impossible")
-                }
-            }
-            GraphValue::BOOLEAN => Ok(GraphValue::Boolean(srcByteSlice.bytes.get_u8() == 0)),
-            GraphValue::INTEGER => Ok(GraphValue::Integer(srcByteSlice.bytes.get_i64())),
-            GraphValue::DECIMAL => Ok(GraphValue::Decimal(srcByteSlice.bytes.get_f64())),
-            GraphValue::NULL => Ok(GraphValue::Null),
-            _ => throwFormat!("unknown type tag:{}",typeTag)
-        }
-    }
-
-    fn encode(&self, destByteSlice: &mut BytesMut) -> Result<()> {
+    fn encode2ByteMut(&self, destByteSlice: &mut BytesMut) -> Result<()> {
         match self {
             GraphValue::String(s) => {
                 destByteSlice.put_u8(GraphValue::STRING);
@@ -93,7 +67,7 @@ impl BinaryCodec for GraphValue {
         Ok(())
     }
 
-    fn decodeSlice(srcSliceWrapper: &mut SliceWrapper) -> Result<Self::OutputType> {
+    fn decodeFromSliceWrapper<'b: 'a>(srcSliceWrapper: &mut SliceWrapper, _: Option<&'b CommandExecutor>) -> Result<Self::OutputType> {
         // 读取type标识
         let typeTag = srcSliceWrapper.get_u8();
 
