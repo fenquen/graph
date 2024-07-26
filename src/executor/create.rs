@@ -12,7 +12,7 @@ use crate::utils::HashMapExt;
 
 impl<'session> CommandExecutor<'session> {
     pub(super) fn createTable(&self, mut table: Table, isTable: bool) -> Result<CommandExecResult> {
-        if meta::NAME_DB_OBJ.contains_key(table.name.as_str()) {
+        if Session::getDBObjectByName(table.name.as_str()).is_ok() {
             if table.createIfNotExist == false {
                 throwFormat!("table/relation: {} already exist", table.name);
             }
@@ -43,9 +43,11 @@ impl<'session> CommandExecutor<'session> {
         Ok(CommandExecResult::DdlResult)
     }
 
-    // todo 对非unique的index如何应对重复的value,后边添加dataKey 完成
+    // 对非unique的index如何应对重复的value,后边添加dataKey
     pub(super) fn createIndex(&self, mut index: Index) -> Result<CommandExecResult> {
-        if meta::NAME_DB_OBJ.contains_key(index.name.as_str()) {
+        log::info!("create index: {}" , index.name);
+
+        if Session::getDBObjectByName(index.name.as_str()).is_ok() {
             if index.createIfNotExist == false {
                 throwFormat!("index: {} already exist", index.name);
             }

@@ -96,6 +96,7 @@ impl<'session> CommandExecutor<'session> {
             self.scanSatisfiedRows(scanParams, true, scanHooks)?
         };
 
+        // 应对这样的情况: update user set (id = id +1) 牵扯到了当前的表的数据,不能直接计算得到成果
         enum A<'a> {
             DirectValue(GraphValue),
             NeedCalc(&'a Expr),

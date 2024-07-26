@@ -1,7 +1,8 @@
-use std::mem::forget;
+use std::mem::{forget, ManuallyDrop};
 use std::ptr;
 use crate::executor::{CommandExecResult, CommandExecutor};
 use anyhow::Result;
+use dashmap::mapref::one::RefMut;
 use bytes::BufMut;
 use crate::{extractDirectionKeyTagFromPointerKey, extractRowIdFromDataKey, extractRowIdFromKeySlice};
 use crate::{extractTargetDataKeyFromPointerKey, extractTargetDBObjectIdFromPointerKey, keyPrefixAddRowId, throw, throwFormat};
@@ -11,16 +12,16 @@ use crate::session::Session;
 
 impl<'session> CommandExecutor<'session> {
     pub(super) fn dropTable(&self, tableName: &str) -> Result<CommandExecResult> {
-        let mut dbObjectRefMut = Session::getDBObjectMutByName(tableName)?;
+        let mut dbObjectTableRefMut = Session::getDBObjectMutByName(tableName)?;
 
-        let table = match dbObjectRefMut.value() {
+        let table = match dbObjectTableRefMut.value() {
             DBObject::Table(_) | DBObject::Relation(_) => {
                 let columnFamily = Session::getColumnFamily(tableName)?;
-                let mut dbRawIterator = self.session.getDBRawIterator(&columnFamily)?;
+                let mut dbRawIterator = self.session.getDBRawIteratorWithoutSnapshot(&columnFamily)?;
 
                 dbRawIterator.seek(&[meta::KEY_PREFIX_POINTER]);
 
-                match dbObjectRefMut.value_mut() {
+                match dbObjectTableRefMut.value_mut() {
                     DBObject::Table(table) => {
                         // 要是table上有关系关联 不能drop
                         if let Some(pointerKey) = dbRawIterator.key() {
@@ -100,43 +101,55 @@ impl<'session> CommandExecutor<'session> {
 
         // 清理相应的index
         for indexName in &table.indexNames {
-            self.dropIndex(indexName, true)?;
+            self.dropIndex(indexName, true, None)?;
         }
 
         self.session.dropColFamily(tableName)?;
         self.session.deleteMeta(table.id)?;
 
-        drop(dbObjectRefMut);
-
-        Session::removeDBObjectByName(tableName)?;
+        dbObjectTableRefMut.invalidate();
 
         Ok(CommandExecResult::DdlResult)
     }
 
-    // todo 还要带对应table修改
-    pub(super) fn dropIndex(&self, indexName: &str, underDropTable: bool) -> Result<CommandExecResult> {
+    /// drop table, alter table drop columns 都会调用到该函数
+    pub(super) fn dropIndex<'a>(&self,
+                                indexName: &'a str,
+                                droppingTable: bool,
+                                dbObjectIndexRefMut: Option<&mut RefMut<'a, String, DBObject>>) -> Result<CommandExecResult> {
         log::info!("drop index: {}", indexName);
 
-        let dbObjectIndex = Session::getDBObjectMutByName(indexName)?;
-        let index = dbObjectIndex.asIndex()?;
+        let mut localIndexLock = None;
+
+        // 看似多余其实必要, 不然的话本地引用可能通过其逃逸到外部
+        let mut dbObjectIndexRefMut = dbObjectIndexRefMut;
+
+        // 因为dashMap的RefMut不想是java那样是可重入的,要是同1个线程上重复去lock会死锁的
+        if dbObjectIndexRefMut.is_none() {
+            // 因为生命周期标识是类型系统的1部分,如下的赋值调用需要函数签名用到显式的生命周期标识
+            localIndexLock = Some(Session::getDBObjectMutByName(indexName)?);
+            dbObjectIndexRefMut = localIndexLock.as_mut();
+        }
+
+        let mut dbObjectIndexRefMut = dbObjectIndexRefMut.as_mut().unwrap();
 
         self.session.dropColFamily(indexName)?;
         // 莫忘了对应的trash
         self.session.dropColFamily(format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX).as_str())?;
-        self.session.deleteMeta(dbObjectIndex.getId())?;
+        self.session.deleteMeta(dbObjectIndexRefMut.getId())?;
 
         // 说明是单独drop这个的index,需要去修改对应的table信息
-        if underDropTable == false {
-            let mut dbObjectTable = Session::getDBObjectMutByName(&index.tableName)?;
-            let table = dbObjectTable.asTableMut()?;
+        if droppingTable == false {
+            let index = dbObjectIndexRefMut.asIndex()?;
+
+            let mut dbObjectTableRefMut = Session::getDBObjectMutByName(&index.tableName)?;
+            let table = dbObjectTableRefMut.asTableMut()?;
 
             table.indexNames.retain(|indexNameExist| indexNameExist != indexName);
             self.session.putUpdateMeta(table.id, &DBObject::Table(table.clone()))?;
         }
 
-        drop(dbObjectIndex);
-
-        Session::removeDBObjectByName(indexName)?;
+        dbObjectIndexRefMut.invalidate();
 
         Ok(CommandExecResult::DdlResult)
     }

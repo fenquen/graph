@@ -14,8 +14,15 @@ impl<'session> CommandExecutor<'session> {
         match alter {
             Alter::AlterTable(alterTable) => {
                 match alterTable {
-                    AlterTable::DropColumns { tableName, cascade, columnNames } => {}
-                    AlterTable::AddColumns { tableName, columns } => self.addColumns(tableName, columns)?,
+                    AlterTable::DropColumns {
+                        tableName,
+                        cascade,
+                        columnNames2Drop
+                    } => self.dropColumns(tableName, *cascade, columnNames2Drop)?,
+                    AlterTable::AddColumns {
+                        tableName,
+                        columns
+                    } => self.addColumns(tableName, columns)?,
                     AlterTable::Rename(s) => {}
                 }
             }
@@ -50,59 +57,70 @@ impl<'session> CommandExecutor<'session> {
             }
         }
 
-        // todo 如果drop掉的column涉及到索引如何应对 如果未写cascade那么报错失败 要写的话级联干掉
+        // 如果drop掉的column涉及到索引如何应对 如果未写cascade那么报错失败 要写的话级联干掉
         for indexName in &table.indexNames {
-            let dbObjectIndexRef = Session::getDBObjectByName(indexName)?;
-            let index = dbObjectIndexRef.asIndex()?;
+            let mut dbObjectIndexRefMut = Session::getDBObjectMutByName(indexName)?;
+            let index = dbObjectIndexRefMut.asIndex()?;
 
             // 涉及到了现有的index, 要是cascade不存在的话报错失败
-            let intersect = utils::intersect(&index.columnNames, columnNames2Drop);
+            let intersect = utils::intersection(&index.columnNames, columnNames2Drop);
             if intersect.is_empty() == false {
-                throwFormat!("table:{tableName}, index:{indexName}, columns:{intersect} will be dropped");
+                if cascade == false {
+                    throwFormat!(" table:{tableName}, index:{indexName}, columns:{intersect:?} will be dropped, try to use cascade");
+                }
+                // 级联drop掉涉及到的index
+                self.dropIndex(indexName, false, Some(&mut dbObjectIndexRefMut))?;
             }
         }
 
-        let columnFamily = Session::getColumnFamily(tableName)?;
-        let mut dbRawIterator = self.session.getDBRawIterator(&columnFamily)?;
+        // 干掉column对应的数据部分的
+        {
+            let columnFamily = Session::getColumnFamily(tableName)?;
+            let mut dbRawIterator = self.session.getDBRawIteratorWithoutSnapshot(&columnFamily)?;
 
-        dbRawIterator.seek_to_first();
+            dbRawIterator.seek_to_first();
 
-        let mut valueBuffer = self.newIn();
+            let mut valueBuffer = self.newIn();
 
-        loop {
-            match (dbRawIterator.key(), dbRawIterator.value()) {
-                (Some(key), Some(value)) => {
-                    // 确保只修改dataKey部分
-                    if key.starts_with(&[meta::KEY_PREFIX_DATA]) == false {
-                        break;
-                    }
-
-                    let mut sliceWrapper = SliceWrapper::new(value);
-                    let columnValues = SessionVec::<GraphValue>::decodeFromSliceWrapper(&mut sliceWrapper, Some(self))?;
-
-                    assert_eq!(table.columns.len(), columnValues.len());
-
-                    let mut columnValuesNew = self.vecWithCapacityIn(columnValues.len());
-
-                    for (column, columnValue) in table.columns.iter().zip(columnValues.into_iter()) {
-                        if columnNames2Drop.contains(&column.name) {
-                            continue;
+            loop {
+                match (dbRawIterator.key(), dbRawIterator.value()) {
+                    (Some(key), Some(value)) => {
+                        // 确保只修改dataKey部分
+                        if key.starts_with(&[meta::KEY_PREFIX_DATA]) == false {
+                            break;
                         }
 
-                        columnValuesNew.push(columnValue);
+                        let mut sliceWrapper = SliceWrapper::new(value);
+                        let columnValues = SessionVec::<GraphValue>::decodeFromSliceWrapper(&mut sliceWrapper, Some(self))?;
+
+                        assert_eq!(table.columns.len(), columnValues.len());
+
+                        let mut columnValuesNew = self.vecWithCapacityIn(columnValues.len());
+
+                        for (column, columnValue) in table.columns.iter().zip(columnValues.into_iter()) {
+                            if columnNames2Drop.contains(&column.name) {
+                                continue;
+                            }
+
+                            columnValuesNew.push(columnValue);
+                        }
+
+                        valueBuffer.clear();
+                        columnValuesNew.encode2ByteMut(&mut valueBuffer)?;
+
+                        meta::STORE.dataStore.put_cf(&columnFamily, key, valueBuffer.as_ref())?;
                     }
-
-                    valueBuffer.clear();
-                    columnValuesNew.encode2ByteMut(&mut valueBuffer)?;
-
-                    meta::STORE.dataStore.put_cf(&columnFamily, key, valueBuffer.as_ref())?;
+                    (None, Some(_)) | (Some(_), None) => panic!("impossible"),
+                    (None, None) => break,
                 }
-                (None, Some(_)) | (Some(_), None) => panic!("impossible"),
-                (None, None) => break,
-            }
 
-            dbRawIterator.next();
+                dbRawIterator.next();
+            }
         }
+
+        //  变更对应的table的meta数据
+        table.columns.retain(|column| columnNames2Drop.contains(&column.name) == false);
+        self.session.putUpdateMeta(table.id, &DBObject::Table(table.clone()))?;
 
         Ok(())
     }
@@ -120,7 +138,7 @@ impl<'session> CommandExecutor<'session> {
         // 新增column的名字不能有重复
         let existColumnNames: Vec<&String> = table.columns.iter().map(|column| &column.name).collect();
         let addColumnNames: Vec<&String> = columns.iter().map(|column| &column.name).collect();
-        let intersect = utils::intersect(existColumnNames.as_slice(), addColumnNames.as_slice());
+        let intersect = utils::intersection(existColumnNames.as_slice(), addColumnNames.as_slice());
         if intersect.is_empty() == false {
             throwFormat!("column {intersect:?} has already exist");
         }
@@ -172,6 +190,12 @@ impl<'session> CommandExecutor<'session> {
 
             dbRawIterator.next();
         }
+
+        //  变更对应的table的meta数据
+        for column in columns {
+            table.columns.push(column.clone());
+        }
+        self.session.putUpdateMeta(table.id, &DBObject::Table(table.clone()))?;
 
         Ok(())
     }

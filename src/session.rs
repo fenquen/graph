@@ -208,6 +208,11 @@ impl Session {
     }
 
     #[inline]
+    pub fn getDBRawIteratorWithoutSnapshot(&self, columnFamily: &ColumnFamily) -> Result<DBRawIterator> {
+        Ok(self.dataStore.raw_iterator_cf(columnFamily))
+    }
+
+    #[inline]
     pub fn createColFamily(&self, name: &str) -> Result<()> {
         Ok(self.dataStore.create_cf(name, &Options::default())?)
     }
@@ -244,7 +249,13 @@ impl Session {
     pub fn getDBObjectByName(dbObjectName: &str) -> Result<Ref<String, DBObject>> {
         match meta::NAME_DB_OBJ.get(dbObjectName) {
             None => throwFormat!("db object:{} not exist", dbObjectName),
-            Some(dbObject) => Ok(dbObject)
+            Some(dbObject) => {
+                if dbObject.invalid() {
+                    throwFormat!("db object:{} not exist", dbObjectName);
+                }
+
+                Ok(dbObject)
+            }
         }
     }
 
@@ -252,16 +263,14 @@ impl Session {
     pub fn getDBObjectMutByName(dbObjectName: &str) -> Result<RefMut<String, DBObject>> {
         match meta::NAME_DB_OBJ.get_mut(dbObjectName) {
             None => throwFormat!("db object:{} not exist", dbObjectName),
-            Some(dbObject) => Ok(dbObject)
-        }
-    }
+            Some(dbObject) => {
+                if dbObject.invalid() {
+                    throwFormat!("db object:{} not exist", dbObjectName);
+                }
 
-    pub fn removeDBObjectByName(dbObjectName: &str) -> Result<()> {
-        if let None = meta::NAME_DB_OBJ.remove(dbObjectName) {
-            throwFormat!("db object:{} not exist", dbObjectName);
+                Ok(dbObject)
+            }
         }
-
-        Ok(())
     }
 
     pub fn writeAddDataMutation(&self,

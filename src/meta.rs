@@ -348,6 +348,23 @@ impl DBObject {
             DBObject::Relation(table) => &table.rowIdCounter,
         }
     }
+
+    /// 作废
+    pub fn invalidate(&mut self) {
+        match self {
+            DBObject::Table(table) => table.invalid = true,
+            DBObject::Relation(table) => table.invalid = true,
+            DBObject::Index(index) => index.invalid = true
+        }
+    }
+
+    pub fn invalid(&self) -> bool {
+        match self {
+            DBObject::Table(table) => table.invalid,
+            DBObject::Relation(table) => table.invalid,
+            DBObject::Index(index) => index.invalid
+        }
+    }
 }
 
 // todo alter table
@@ -365,6 +382,8 @@ pub struct Table {
     #[serde(skip_serializing, skip_deserializing)]
     pub createIfNotExist: bool,
     pub indexNames: Vec<String>,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub invalid: bool,
 }
 
 impl Table {
@@ -383,6 +402,7 @@ impl Clone for Table {
             rowIdCounter: AtomicU64::new(self.rowIdCounter.load(Ordering::Acquire)),
             createIfNotExist: self.createIfNotExist,
             indexNames: self.indexNames.clone(),
+            invalid: self.invalid,
         }
     }
 }
@@ -521,6 +541,8 @@ pub struct Index {
     pub createIfNotExist: bool,
     pub tableName: String,
     pub columnNames: Vec<String>,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub invalid: bool,
 }
 
 pub fn init() -> Result<()> {

@@ -49,10 +49,6 @@ impl Command {
     pub fn needTx(&self) -> bool {
         match self {
             Command::Select(_) => true,
-            Command::DropIndex(_) => false,
-            // DropTable DropRelation 需要tx的原因是 他们需要到snapshot基底的iterator来寻找pointer key
-            Command::DropTable(_) => true,
-            Command::DropRelation(_) => true,
             _ => self.isDml()
         }
     }

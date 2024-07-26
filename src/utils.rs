@@ -91,11 +91,16 @@ unsafe impl<T> Send for TrickyContainer<T> {}
 unsafe impl<T> Sync for TrickyContainer<T> {}
 
 /// 交集
-pub fn intersect<'a, T: PartialEq>(a: &'a [T], b: &'a [T]) -> Vec<&'a T> {
+pub fn intersection<'a, T: PartialEq>(a: &'a [T], b: &'a [T]) -> Vec<&'a T> {
     a.iter().filter(|&t| b.contains(t)).map(|destDataKey| destDataKey).collect()
 }
 
-pub fn hasIntersect<'a, T: PartialEq>(a: &'a [T], b: &'a [T]) -> bool {
+/// 差集
+pub fn collectionMinus<'a, T: Clone + PartialEq>(collectionA: &'a [T], collectionB: &'a [&'a T]) -> Vec<&'a T> {
+    collectionA.iter().filter(|u| !collectionB.contains(u)).collect::<Vec<&'a T>>()
+}
+
+pub fn hasIntersection<'a, T: PartialEq>(a: &'a [T], b: &'a [T]) -> bool {
     0 < a.iter().filter(|&t| b.contains(t)).map(|destDataKey| destDataKey).collect::<Vec<&'a T>>().len()
 }
 

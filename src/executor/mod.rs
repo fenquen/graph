@@ -77,13 +77,14 @@ impl<'session> CommandExecutor<'session> {
                         rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
                         createIfNotExist: table.createIfNotExist,
                         indexNames: table.indexNames.clone(),
+                        invalid: table.invalid,
                     };
 
                     self.createTable(table, true)?
                 }
                 Command::DropTable(tableName) => self.dropTable(tableName)?,
                 Command::DropRelation(relationName) => self.dropRelation(relationName)?,
-                Command::DropIndex(indexName) => self.dropIndex(indexName, false)?,
+                Command::DropIndex(indexName) => self.dropIndex(indexName, false, None)?,
                 Command::CreateIndex(index) => {
                     let index = Index {
                         id: DBObjectId::default(),
@@ -92,6 +93,7 @@ impl<'session> CommandExecutor<'session> {
                         columnNames: index.columnNames.clone(),
                         rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
                         createIfNotExist: index.createIfNotExist,
+                        invalid: index.invalid,
                     };
 
                     self.createIndex(index)?
@@ -104,6 +106,7 @@ impl<'session> CommandExecutor<'session> {
                         rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
                         createIfNotExist: table.createIfNotExist,
                         indexNames: table.indexNames.clone(),
+                        invalid: table.invalid,
                     };
 
                     self.createTable(table, false)?

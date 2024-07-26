@@ -17,7 +17,7 @@ pub enum AlterTable {
     DropColumns {
         tableName: String,
         cascade: bool,
-        columnNames: Vec<String>,
+        columnNames2Drop: Vec<String>,
     },
     AddColumns {
         tableName: String,
@@ -47,11 +47,19 @@ impl Parser {
                         "drop" => {
                             match self.getCurrentElementAdvance()?.expectTextLiteralSilent()?.to_lowercase().as_str() {
                                 // alter table car drop columns (id ,name)
-                                "columns" => Alter::AlterTable(AlterTable::DropColumns {
-                                    tableName,
-                                    cascade: self.getCurrentElement()?.expectTextLiteralContentIgnoreCaseBool("cascade"),
-                                    columnNames: self.parseInsertColumnNames()?,
-                                }),
+                                "columns" => {
+                                    let cascade =  self.getCurrentElement()?.expectTextLiteralContentIgnoreCaseBool("cascade");
+
+                                    if cascade {
+                                        self.skipElement(1)?;
+                                    }
+
+                                    Alter::AlterTable(AlterTable::DropColumns {
+                                        tableName,
+                                        cascade,
+                                        columnNames2Drop: self.parseInsertColumnNames()?,
+                                    })
+                                }
                                 _ => self.throwSyntaxErrorDetail("not support")?
                             }
                         }

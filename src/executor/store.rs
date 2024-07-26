@@ -711,11 +711,6 @@ impl<'session> CommandExecutor<'session> {
             throw!("column count does not match value count");
         }
 
-        /// 取差集
-        fn collectionMinus<'a, T: Clone + PartialEq>(collectionA: &'a [T], collectionB: &'a [&'a T]) -> Vec<&'a T> {
-            collectionA.iter().filter(|u| !collectionB.contains(u)).collect::<Vec<&'a T>>()
-        }
-
         fn collectionMinus0<'a, T, T0>(collectionT: &'a [T],
                                        collectionT0: &'a [T0],
                                        tEqT0: impl Fn(&T, &T0) -> bool) -> Vec<&'a T> where
