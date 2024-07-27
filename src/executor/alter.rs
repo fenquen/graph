@@ -18,12 +18,12 @@ impl<'session> CommandExecutor<'session> {
                         tableName,
                         cascade,
                         columnNames2Drop
-                    } => self.alterDropColumns(tableName, *cascade, columnNames2Drop)?,
+                    } => self.alterTableDropColumns(tableName, *cascade, columnNames2Drop)?,
                     AlterTable::AddColumns {
                         tableName,
                         columns2Add
-                    } => self.alterAddColumns(tableName, columns2Add)?,
-                    AlterTable::Rename(newTableName) => {}
+                    } => self.alterTableAddColumns(tableName, columns2Add)?,
+                    AlterTable::Rename { oldName, newName } => {}
                 }
             }
             Alter::AlterIndex { .. } => {}
@@ -33,7 +33,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(CommandExecResult::DdlResult)
     }
 
-    fn alterDropColumns(&self, tableName: &str, cascade: bool, columnNames2Drop: &[String]) -> Result<()> {
+    fn alterTableDropColumns(&self, tableName: &str, cascade: bool, columnNames2Drop: &[String]) -> Result<()> {
         let mut dbObjectTableRefMut = Session::getDBObjectMutByName(tableName)?;
 
         // 提取table对象
@@ -126,7 +126,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(())
     }
 
-    fn alterAddColumns(&self, tableName: &str, columns2Add: &[Column]) -> Result<()> {
+    fn alterTableAddColumns(&self, tableName: &str, columns2Add: &[Column]) -> Result<()> {
         let mut dbObjectTableRefMut = Session::getDBObjectMutByName(tableName)?;
 
         // 提取table对象
@@ -199,5 +199,11 @@ impl<'session> CommandExecutor<'session> {
         self.session.putUpdateMeta(table.id, &DBObject::Table(table.clone()))?;
 
         Ok(())
+    }
+
+    fn alterTableRename(&self, oldName: &str, newName: &str) -> Result<CommandExecResult> {
+        let dbObjectTableRefMut = Session::getDBObjectMutByName(oldName)?;
+
+        Ok(CommandExecResult::DdlResult)
     }
 }

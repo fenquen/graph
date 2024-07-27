@@ -566,6 +566,7 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 satisfiedRows
+
             } else { // 说明是link 且尚未写filter
                 let mut rawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
                 rawIterator.seek(meta::DATA_KEY_PATTERN);

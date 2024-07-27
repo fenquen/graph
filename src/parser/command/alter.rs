@@ -23,7 +23,10 @@ pub enum AlterTable {
         tableName: String,
         columns2Add: Vec<Column>,
     },
-    Rename(String),
+    Rename {
+        oldName: String,
+        newName: String,
+    },
 }
 
 impl Parser {
@@ -64,7 +67,11 @@ impl Parser {
                         }
                         "rename" => { // alter table a rename to b
                             self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCaseSilent("to")?;
-                            Alter::AlterTable(AlterTable::Rename(self.getCurrentElementAdvance()?.expectTextLiteralSilent()?))
+                            let newName = self.getCurrentElementAdvance()?.expectTextLiteralSilent()?;
+                            Alter::AlterTable(AlterTable::Rename {
+                                oldName: tableName,
+                                newName,
+                            })
                         }
                         _ => self.throwSyntaxErrorDetail("not support")?
                     }
