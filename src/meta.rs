@@ -301,6 +301,14 @@ impl DBObject {
         }
     }
 
+    pub fn asIndexMut(&mut self) -> Result<&mut Index> {
+        if let DBObject::Index(index) = self {
+            Ok(index)
+        } else {
+            throw!(&format!("{} is not a index", self.getName()))
+        }
+    }
+
     pub fn asIndexOption(&self) -> Option<&Index> {
         if let DBObject::Index(index) = self {
             Some(index)

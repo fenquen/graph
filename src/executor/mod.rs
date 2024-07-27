@@ -84,7 +84,7 @@ impl<'session> CommandExecutor<'session> {
                 }
                 Command::DropTable(tableName) => self.dropTable(tableName)?,
                 Command::DropRelation(relationName) => self.dropRelation(relationName)?,
-                Command::DropIndex(indexName) => self.dropIndex(indexName, false, None)?,
+                Command::DropIndex(indexName) => self.dropIndex(indexName, None, None)?,
                 Command::CreateIndex(index) => {
                     let index = Index {
                         id: DBObjectId::default(),

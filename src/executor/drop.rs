@@ -6,7 +6,7 @@ use dashmap::mapref::one::RefMut;
 use bytes::BufMut;
 use crate::{extractDirectionKeyTagFromPointerKey, extractRowIdFromDataKey, extractRowIdFromKeySlice};
 use crate::{extractTargetDataKeyFromPointerKey, extractTargetDBObjectIdFromPointerKey, keyPrefixAddRowId, throw, throwFormat};
-use crate::meta::{DBObject, Table};
+use crate::meta::{DBObject, Index, Table};
 use crate::meta;
 use crate::session::Session;
 
@@ -100,8 +100,8 @@ impl<'session> CommandExecutor<'session> {
         };
 
         // 清理相应的index
-        for indexName in &table.indexNames {
-            self.dropIndex(indexName, true, None)?;
+        for indexName in &table.indexNames.clone() {
+            self.dropIndex(indexName, Some(table), None)?;
         }
 
         self.session.dropColFamily(tableName)?;
@@ -113,47 +113,48 @@ impl<'session> CommandExecutor<'session> {
     }
 
     /// drop table, alter table drop columns 都会调用到该函数
-    pub(super) fn dropIndex<'a>(&self,
-                                indexName: &'a str,
-                                droppingTable: bool,
-                                dbObjectIndexRefMut: Option<&mut RefMut<'a, String, DBObject>>) -> Result<CommandExecResult> {
+    pub(super) fn dropIndex<>(&self,
+                              indexName: &str,
+                              table: Option<&mut Table>,
+                              index: Option<&mut Index>) -> Result<CommandExecResult> {
         log::info!("drop index: {}", indexName);
 
-        let mut localIndexLock = None;
-
-        // 看似多余其实必要, 不然的话本地引用可能通过其逃逸到外部
-        let mut dbObjectIndexRefMut = dbObjectIndexRefMut;
+        // 看似多余其实必要, 不然要是直接用函数参数会和外部引用的产生交互需要显式的生命周期标识
+        let mut index = index;
+        let mut indexLock = None;
 
         // 因为dashMap的RefMut不想是java那样是可重入的,要是同1个线程上重复去lock会死锁的
-        if dbObjectIndexRefMut.is_none() {
+        if index.is_none() {
             // 因为生命周期标识是类型系统的1部分,如下的赋值调用需要函数签名用到显式的生命周期标识
-            localIndexLock = Some(Session::getDBObjectMutByName(indexName)?);
-            dbObjectIndexRefMut = localIndexLock.as_mut();
+            indexLock = Some(Session::getDBObjectMutByName(indexName)?);
+            index = Some(indexLock.as_mut().unwrap().asIndexMut()?);
         }
 
-        let mut dbObjectIndexRefMut = dbObjectIndexRefMut.as_mut().unwrap();
-
+        let index = index.unwrap();
         self.session.dropColFamily(indexName)?;
         // 莫忘了对应的trash
         self.session.dropColFamily(format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX).as_str())?;
-        self.session.deleteMeta(dbObjectIndexRefMut.getId())?;
+        self.session.deleteMeta(index.id)?;
+        index.invalid = true;
 
-        // 说明是单独drop这个的index,需要去修改对应的table信息
-        if droppingTable == false {
-            let index = dbObjectIndexRefMut.asIndex()?;
+        //------------------------去掉table的meta信息上相应的index------------------
 
-            let mut dbObjectTableRefMut = Session::getDBObjectMutByName(&index.tableName)?;
-            let table = dbObjectTableRefMut.asTableMut()?;
+        let mut table = table;
+        let mut tableLock = None;
 
-            table.indexNames.retain(|indexNameExist| indexNameExist != indexName);
-            self.session.putUpdateMeta(table.id, &DBObject::Table(table.clone()))?;
+        if table.is_none() {
+            tableLock = Some(Session::getDBObjectMutByName(&index.tableName)?);
+            table = Some(tableLock.as_mut().unwrap().asTableMut()?);
         }
 
-        dbObjectIndexRefMut.invalidate();
+        let table = table.unwrap();
+        table.indexNames.retain(|indexNameExist| indexNameExist != indexName);
+        self.session.putUpdateMeta(table.id, &DBObject::Table(table.clone()))?;
 
         Ok(CommandExecResult::DdlResult)
     }
 
+    #[inline]
     pub(super) fn dropRelation(&self, relationName: &str) -> Result<CommandExecResult> {
         self.dropTable(relationName)
     }

@@ -18,7 +18,7 @@ pub enum Element {
     Op(Op),
     Boolean(bool),
     /// 对应"->"
-    To,
+    Arrow2Right,
     Null,
     Not,
     Default,
@@ -31,7 +31,7 @@ impl Element {
     pub const DECIMAL_LITERAL: ElementType = 3;
     pub const OP: ElementType = 4;
     pub const BOOLEAN: ElementType = 5;
-    pub const TO: ElementType = 6;
+    pub const ARROW_2_RIGHT: ElementType = 6;
     pub const NULL: ElementType = 7;
     pub const NOT: ElementType = 8;
     pub const DEFAULT: ElementType = 9;
@@ -44,7 +44,7 @@ impl Element {
             Element::DecimalLiteral(_) => Self::DECIMAL_LITERAL,
             Element::Op(_) => Self::OP,
             Element::Boolean(_) => Self::BOOLEAN,
-            Element::To => Self::TO,
+            Element::Arrow2Right => Self::ARROW_2_RIGHT,
             Element::Null => Self::NULL,
             Element::Not => Self::NOT,
             Element::Default => Self::DEFAULT,
@@ -110,6 +110,11 @@ impl Element {
         }
     }
 
+    #[inline]
+    pub(super) fn expectTextLiteralContentIgnoreCaseSilent(&self, expectContent: &str) -> Result<()> {
+        self.expectTextLiteralContentIgnoreCase(expectContent, global::EMPTY_STR)
+    }
+
     pub(super) fn expectIntegerLiteralOpt(&self) -> Option<i64> {
         if let Element::IntegerLiteral(number) = self {
             Some(*number)
@@ -136,7 +141,7 @@ impl Display for Element {
             Element::DecimalLiteral(s) => write!(f, "DecimalLiteral({})", s),
             Element::Boolean(bool) => write!(f, "Boolean({})", bool),
             Element::Op(op) => write!(f, "Op({})", op),
-            Element::To => write!(f, "To"),
+            Element::Arrow2Right => write!(f, "To"),
             Element::Null => write!(f, "Null"),
             Element::Not => write!(f, "Not"),
             Element::Default => write!(f, "Default")
@@ -273,7 +278,7 @@ impl Parser {
                         // 应对->
                         let element = if currentChar == global::减号_CHAR && Some(global::大于_CHAR) == self.peekNextChar() {
                             advanceCount = 2;
-                            Element::To
+                            Element::Arrow2Right
                         } else {
                             let mathCalcOp = MathCalcOp::fromChar(currentChar)?;
                             Element::Op(Op::MathCalcOp(mathCalcOp))

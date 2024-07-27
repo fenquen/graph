@@ -337,7 +337,7 @@ impl Parser {
                     force = true;
                 }
                 State::ReadDestName => {
-                    if let Element::To = currentElement {
+                    if let Element::Arrow2Right = currentElement {
                         selectRel.destTableName = self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?;
 
                         // 如果对relation使用recursive的话 起点和终点都要是相同的table

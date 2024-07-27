@@ -21,7 +21,7 @@ pub enum AlterTable {
     },
     AddColumns {
         tableName: String,
-        columns: Vec<Column>,
+        columns2Add: Vec<Column>,
     },
     Rename(String),
 }
@@ -39,16 +39,15 @@ impl Parser {
                                 // alter table car add columns (id integer not null default 0,name string)
                                 "columns" => Alter::AlterTable(AlterTable::AddColumns {
                                     tableName,
-                                    columns: self.parseColumnDefinitions()?,
+                                    columns2Add: self.parseColumnDefinitions()?,
                                 }),
                                 _ => self.throwSyntaxErrorDetail("not support")?
                             }
                         }
                         "drop" => {
                             match self.getCurrentElementAdvance()?.expectTextLiteralSilent()?.to_lowercase().as_str() {
-                                // alter table car drop columns (id ,name)
-                                "columns" => {
-                                    let cascade =  self.getCurrentElement()?.expectTextLiteralContentIgnoreCaseBool("cascade");
+                                "columns" => { // alter table car drop columns (id ,name)
+                                    let cascade = self.getCurrentElement()?.expectTextLiteralContentIgnoreCaseBool("cascade");
 
                                     if cascade {
                                         self.skipElement(1)?;
@@ -62,6 +61,10 @@ impl Parser {
                                 }
                                 _ => self.throwSyntaxErrorDetail("not support")?
                             }
+                        }
+                        "rename" => { // alter table a rename to b
+                            self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCaseSilent("to")?;
+                            Alter::AlterTable(AlterTable::Rename(self.getCurrentElementAdvance()?.expectTextLiteralSilent()?))
                         }
                         _ => self.throwSyntaxErrorDetail("not support")?
                     }

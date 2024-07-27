@@ -40,7 +40,7 @@ impl Parser {
             'outer:
             for elementVec in &self.elementVecVec {
                 for element in elementVec {
-                    if let Element::To = element {
+                    if let Element::Arrow2Right = element {
                         hasToArrow = true;
                         break 'outer;
                     }

@@ -18,12 +18,12 @@ impl<'session> CommandExecutor<'session> {
                         tableName,
                         cascade,
                         columnNames2Drop
-                    } => self.dropColumns(tableName, *cascade, columnNames2Drop)?,
+                    } => self.alterDropColumns(tableName, *cascade, columnNames2Drop)?,
                     AlterTable::AddColumns {
                         tableName,
-                        columns
-                    } => self.addColumns(tableName, columns)?,
-                    AlterTable::Rename(s) => {}
+                        columns2Add
+                    } => self.alterAddColumns(tableName, columns2Add)?,
+                    AlterTable::Rename(newTableName) => {}
                 }
             }
             Alter::AlterIndex { .. } => {}
@@ -33,7 +33,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(CommandExecResult::DdlResult)
     }
 
-    fn dropColumns(&self, tableName: &str, cascade: bool, columnNames2Drop: &[String]) -> Result<()> {
+    fn alterDropColumns(&self, tableName: &str, cascade: bool, columnNames2Drop: &[String]) -> Result<()> {
         let mut dbObjectTableRefMut = Session::getDBObjectMutByName(tableName)?;
 
         // 提取table对象
@@ -58,9 +58,9 @@ impl<'session> CommandExecutor<'session> {
         }
 
         // 如果drop掉的column涉及到索引如何应对 如果未写cascade那么报错失败 要写的话级联干掉
-        for indexName in &table.indexNames {
+        for indexName in &table.indexNames.clone() {
             let mut dbObjectIndexRefMut = Session::getDBObjectMutByName(indexName)?;
-            let index = dbObjectIndexRefMut.asIndex()?;
+            let index = dbObjectIndexRefMut.asIndexMut()?;
 
             // 涉及到了现有的index, 要是cascade不存在的话报错失败
             let intersect = utils::intersection(&index.columnNames, columnNames2Drop);
@@ -68,8 +68,9 @@ impl<'session> CommandExecutor<'session> {
                 if cascade == false {
                     throwFormat!(" table:{tableName}, index:{indexName}, columns:{intersect:?} will be dropped, try to use cascade");
                 }
+
                 // 级联drop掉涉及到的index
-                self.dropIndex(indexName, false, Some(&mut dbObjectIndexRefMut))?;
+                self.dropIndex(indexName, Some(table), Some(index))?;
             }
         }
 
@@ -125,7 +126,7 @@ impl<'session> CommandExecutor<'session> {
         Ok(())
     }
 
-    fn addColumns(&self, tableName: &str, columns: &[Column]) -> Result<()> {
+    fn alterAddColumns(&self, tableName: &str, columns2Add: &[Column]) -> Result<()> {
         let mut dbObjectTableRefMut = Session::getDBObjectMutByName(tableName)?;
 
         // 提取table对象
@@ -137,16 +138,16 @@ impl<'session> CommandExecutor<'session> {
 
         // 新增column的名字不能有重复
         let existColumnNames: Vec<&String> = table.columns.iter().map(|column| &column.name).collect();
-        let addColumnNames: Vec<&String> = columns.iter().map(|column| &column.name).collect();
+        let addColumnNames: Vec<&String> = columns2Add.iter().map(|column| &column.name).collect();
         let intersect = utils::intersection(existColumnNames.as_slice(), addColumnNames.as_slice());
         if intersect.is_empty() == false {
             throwFormat!("column {intersect:?} has already exist");
         }
 
         let bufferNewAddColumnValues = {
-            let mut newAddColumnValues = self.vecWithCapacityIn(columns.len());
+            let mut newAddColumnValues = self.vecWithCapacityIn(columns2Add.len());
 
-            for column in columns {
+            for column in columns2Add {
                 let defaultValue = match (column.nullable, &column.defaultValue) {
                     (_, Some(default)) => GraphValue::try_from(default)?,
                     (false, None) => throwFormat!("column: {} is not nullable and there is no default value", column.name),
@@ -163,7 +164,7 @@ impl<'session> CommandExecutor<'session> {
         };
 
         let columnFamily = Session::getColumnFamily(tableName)?;
-        let mut dbRawIterator = self.session.getDBRawIterator(&columnFamily)?;
+        let mut dbRawIterator = self.session.getDBRawIteratorWithoutSnapshot(&columnFamily)?;
 
         dbRawIterator.seek_to_first();
 
@@ -192,7 +193,7 @@ impl<'session> CommandExecutor<'session> {
         }
 
         //  变更对应的table的meta数据
-        for column in columns {
+        for column in columns2Add {
             table.columns.push(column.clone());
         }
         self.session.putUpdateMeta(table.id, &DBObject::Table(table.clone()))?;
