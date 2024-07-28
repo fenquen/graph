@@ -6,7 +6,7 @@ use crate::executor::store::{ScanHooks, ScanParams};
 use crate::meta::Table;
 use crate::parser::command::insert::Insert;
 use crate::parser::command::link::{Link, LinkTo};
-use crate::types::{DataKey, KeyTag, KV, RowId, CommittedPreProcessor, RowData, SessionVec};
+use crate::types::{DataKey, KeyTag, KV, RowId, CommittedPreProcessor, RowData, SessionVec, DBObjectId};
 use anyhow::Result;
 use crate::parser::command::select::SelectRel;
 use crate::session::{Mutation, Session};
@@ -52,10 +52,10 @@ impl<'session> CommandExecutor<'session> {
 
     ///  link user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 12)
     /// 返回的是另外1个对象是 dest上的数据
-    fn linkTo<'a>(&self,
-                  linkTo: &'a LinkTo,
-                  lastRoundDestSatisfiedDatas: Option<Vec<(DataKey, RowData)>>,
-                  mutationsDest: &mut SessionVec<(&'a String, Mutation)>) -> Result<(CommandExecResult, Option<Vec<(DataKey, RowData)>>)> {
+    fn linkTo(&self,
+              linkTo: &LinkTo,
+              lastRoundDestSatisfiedDatas: Option<Vec<(DataKey, RowData)>>,
+              mutationsDest: &mut SessionVec<(DBObjectId, Mutation)>) -> Result<(CommandExecResult, Option<Vec<(DataKey, RowData)>>)> {
         // 得到表的对象
         let dbObjectSrcTable = Session::getDBObjectByName(linkTo.srcTableName.as_str())?;
         let srcTable = dbObjectSrcTable.asTable()?;
@@ -129,19 +129,19 @@ impl<'session> CommandExecutor<'session> {
         let origin: KV = self.generateOrigin(relDataKey, meta::DATA_KEY_INVALID);
 
         // self.session.writeAddDataMutation(&relation.name, dataAdd, xminAdd, xmaxAdd, origin);
-        self.session.writeAddDataMutation2Dest(&linkTo.relationName, dataAdd, xminAdd, xmaxAdd, origin, mutationsDest);
+        self.session.writeAddDataMutation2Dest(relation.id, dataAdd, xminAdd, xmaxAdd, origin, mutationsDest);
 
         //--------------------------------------------------------------------
 
         let mut pointerKeyBuffer = self.withCapacityIn(meta::POINTER_KEY_BYTE_LEN);
 
         let mut process =
-            |tableName: &'a String, selfDataKey: DataKey,
+            |dbObjectId: DBObjectId, selfDataKey: DataKey,
              pointerKeyTag: KeyTag,
              targetTable: &Table, targetDataKey: DataKey| {
                 let (xmin, xmax) = self.generateAddPointerXminXmax(&mut pointerKeyBuffer, selfDataKey, pointerKeyTag, targetTable.id, targetDataKey)?;
                 //self.session.writeAddPointerMutation(&selfTable.name, xmin, xmax);
-                self.session.writeAddPointerMutation2Dest(tableName, xmin, xmax, mutationsDest);
+                self.session.writeAddPointerMutation2Dest(dbObjectId, xmin, xmax, mutationsDest);
 
                 Result::<()>::Ok(())
             };
@@ -153,11 +153,11 @@ impl<'session> CommandExecutor<'session> {
             // 尚未设置过滤条件 得到的是全部的
             if srcSatisfiedDatas[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for srcDataKey in srcSatisfiedDatas[1].0..=srcSatisfiedDatas[2].0 {
-                    process(&linkTo.srcTableName, srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation, relDataKey)?;
+                    process(srcTable.id, srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation, relDataKey)?;
                 }
             } else {
                 for (srcDataKey, _) in &srcSatisfiedDatas {
-                    process(&linkTo.srcTableName, *srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation, relDataKey)?;
+                    process(srcTable.id, *srcDataKey, meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation, relDataKey)?;
                 }
             }
         }
@@ -169,21 +169,21 @@ impl<'session> CommandExecutor<'session> {
             // 尚未设置过滤条件 得到的是全部的
             if srcSatisfiedDatas[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for srcDataKey in srcSatisfiedDatas[1].0..=srcSatisfiedDatas[2].0 {
-                    process(&linkTo.relationName, relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, srcDataKey)?;
+                    process(relation.id, relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, srcDataKey)?;
                 }
             } else {
                 for (srcDataKey, _) in &srcSatisfiedDatas {
-                    process(&linkTo.relationName, relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, *srcDataKey)?;
+                    process(relation.id, relDataKey, meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, *srcDataKey)?;
                 }
             }
 
             if destSatisfiedDatas[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for destDataKey in srcSatisfiedDatas[1].0..=srcSatisfiedDatas[2].0 {
-                    process(&linkTo.relationName, relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, destDataKey)?;
+                    process(relation.id, relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, destDataKey)?;
                 }
             } else {
                 for (destDataKey, _) in &destSatisfiedDatas {
-                    process(&linkTo.relationName, relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, *destDataKey)?;
+                    process(relation.id, relDataKey, meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, *destDataKey)?;
                 }
             }
         }
@@ -193,11 +193,11 @@ impl<'session> CommandExecutor<'session> {
         {
             if destSatisfiedDatas[0].0 == global::TOTAL_DATA_OF_TABLE {
                 for destDataKey in srcSatisfiedDatas[1].0..=srcSatisfiedDatas[2].0 {
-                    process(&linkTo.destTableName, destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation, relDataKey)?;
+                    process(destTable.id, destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation, relDataKey)?;
                 }
             } else {
                 for (destDataKey, _) in &destSatisfiedDatas {
-                    process(&linkTo.destTableName, *destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation, relDataKey)?;
+                    process(destTable.id, *destDataKey, meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation, relDataKey)?;
                 }
             }
         }
@@ -206,9 +206,9 @@ impl<'session> CommandExecutor<'session> {
     }
 
     /// link user(id=1 and 0=6) -usage(number = 9) -> car -own(number=1)-> tyre
-    fn linkChain<'a>(&self,
-                     linkTos: &'a [LinkTo],
-                     mutationsDest: &mut SessionVec<(&'a String, Mutation)>) -> Result<CommandExecResult> {
+    fn linkChain(&self,
+                 linkTos: &[LinkTo],
+                 mutationsDest: &mut SessionVec<(DBObjectId, Mutation)>) -> Result<CommandExecResult> {
         let mut lastRoundDestSatisfiedDatas = None;
 
         // 将 selectRel 转换成为 linkTo

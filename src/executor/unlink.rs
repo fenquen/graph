@@ -7,10 +7,11 @@ use crate::executor::store::{ScanHooks, ScanParams};
 use crate::parser::command::unlink::{Unlink, UnlinkLinkToStyle, UnlinkSelfStyle};
 use crate::session::Session;
 use crate::types::{ColumnFamily, DataKey, CommittedPreProcessor};
+use anyhow::Result;
 
 impl<'session> CommandExecutor<'session> {
     // todo pointer指向点和边的xmin xmax如何应对
-    pub(super) fn unlink(&self, unlink: &Unlink) -> anyhow::Result<CommandExecResult> {
+    pub(super) fn unlink(&self, unlink: &Unlink) -> Result<CommandExecResult> {
         match unlink {
             Unlink::LinkToStyle(unlinkLinkStyle) => self.unlinkLinkStyle(unlinkLinkStyle),
             Unlink::SelfStyle(unlinkSelfStyle) => self.unlinkSelfStyle(unlinkSelfStyle),
@@ -19,7 +20,7 @@ impl<'session> CommandExecutor<'session> {
 
     /// 应对 unlink user(id > 1 and (name in ('a') or code = null)) to car(color='red') by usage(number = 13) 和原来link基本相同
     /// 和原来的link套路相同是它反过来的
-    fn unlinkLinkStyle(&self, unlinkLinkStyle: &UnlinkLinkToStyle) -> anyhow::Result<CommandExecResult> {
+    fn unlinkLinkStyle(&self, unlinkLinkStyle: &UnlinkLinkToStyle) -> Result<CommandExecResult> {
         let relation = Session::getDBObjectByName(&unlinkLinkStyle.relationName)?;
         let relation = relation.asRelation()?;
 
@@ -29,7 +30,7 @@ impl<'session> CommandExecutor<'session> {
         let srcTable = Session::getDBObjectByName(&unlinkLinkStyle.srcTableName)?;
         let srcTable = srcTable.asTable()?;
 
-        let relationColumnFamily = Session::getColumnFamily(unlinkLinkStyle.relationName.as_str())?;
+        let relationColumnFamily = Session::getColumnFamily(relation.id)?;
 
         // 得到rel 干掉指向src和dest的pointer key
         let relationRowDatas = {
@@ -89,28 +90,28 @@ impl<'session> CommandExecutor<'session> {
                             self.generateDeletePointerXmax(&mut pointerKeyBuffer,
                                                            targetDataKey,
                                                            meta::POINTER_KEY_TAG_DOWNSTREAM_REL_ID, relation.id, statisfiedRelDataKey)?;
-                        self.session.writeDeletePointerMutation(&srcTable.name, oldXmax);
+                        self.session.writeDeletePointerMutation(srcTable.id, oldXmax);
 
                         // 干掉rel上对应该src的pointerKey
                         let oldXmax =
                             self.generateDeletePointerXmax(&mut pointerKeyBuffer,
                                                            statisfiedRelDataKey,
                                                            meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable.id, targetDataKey)?;
-                        self.session.writeDeletePointerMutation(&relation.name, oldXmax);
+                        self.session.writeDeletePointerMutation(relation.id, oldXmax);
                     } else {
                         // 干掉dest上的对应该rel的pointerKey
                         let oldXmax =
                             self.generateDeletePointerXmax(&mut pointerKeyBuffer,
                                                            targetDataKey,
                                                            meta::POINTER_KEY_TAG_UPSTREAM_REL_ID, relation.id, statisfiedRelDataKey)?;
-                        self.session.writeDeletePointerMutation(&destTable.name, oldXmax);
+                        self.session.writeDeletePointerMutation(destTable.id, oldXmax);
 
                         // 干掉rel上对应该dest的pointerKey
                         let oldXmax =
                             self.generateDeletePointerXmax(&mut pointerKeyBuffer,
                                                            statisfiedRelDataKey,
                                                            meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable.id, targetDataKey)?;
-                        self.session.writeDeletePointerMutation(&relation.name, oldXmax);
+                        self.session.writeDeletePointerMutation(relation.id, oldXmax);
                     }
                 }
 

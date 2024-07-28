@@ -421,7 +421,7 @@ impl<'session> CommandExecutor<'session> {
                 // 遍历这个node上的通过了测试的指向rel的pointerKey
                 // 通过调用getRowDatasByDataKeys得到pointerKey指向的relation数据
                 // 融合relationFliter确定relation数据是不是满足要求
-                self.searchPointerKeyByPrefix(table.name.as_str(), &pointerKeyPrefix, searchPointerKeyHooks)?;
+                self.searchPointerKeyByPrefix(table.id, &pointerKeyPrefix, searchPointerKeyHooks)?;
 
                 Result::<bool>::Ok(found)
             };

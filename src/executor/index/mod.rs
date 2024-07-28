@@ -384,7 +384,7 @@ impl<'session> CommandExecutor<'session> {
 
         let index = indexSearch.dbObjectIndex.asIndex()?;
 
-        let indexColumnFamily = Session::getColumnFamily(index.name.as_str())?;
+        let indexColumnFamily = Session::getColumnFamily(index.id)?;
         let mut indexDBRawIterator = self.session.getDBRawIterator(&indexColumnFamily)?;
 
         let mut rowDatas: SessionHashMap<DataKey, (DataKey, RowData)> = self.hashMapNewIn();
@@ -992,7 +992,7 @@ impl<'session> CommandExecutor<'session> {
         // mvcc visibility筛选
         if self.committedDataVisible(mvccKeyBuffer, dbRawIterator,
                                      datakey, indexSearch.columnFamily,
-                                     &indexSearch.scanParams.table.name,
+                                     indexSearch.scanParams.table,
                                      indexSearch.tableMutationsCurrentTx)? == false {
             return Ok(None);
         }
@@ -1051,10 +1051,10 @@ impl<'session> CommandExecutor<'session> {
             indexKeyBuffer.put_slice(dataKeyBinary);
 
             if delete {
-                self.session.writeAddIndexMutation(&format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX), (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
+                self.session.writeAddIndexMutation(index.trashId, (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
             } else {
                 log::info!("generate indexName:{indexName}");
-                self.session.writeAddIndexMutation(indexName, (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
+                self.session.writeAddIndexMutation(index.id, (indexKeyBuffer.to_vec(), global::EMPTY_BINARY));
             }
         }
 

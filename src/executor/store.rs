@@ -19,7 +19,7 @@ use crate::graph_value::GraphValue;
 use crate::meta::{Column, DBObject, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, KeyTag, RowId, Pointer, SessionVec};
+use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, KeyTag, RowId, Pointer, SessionVec, DBObjectId};
 use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 use anyhow::Result;
 use bumpalo::Bump;
@@ -177,13 +177,13 @@ impl<'session> CommandExecutor<'session> {
 
         let mut rowDatas = Vec::with_capacity(dataKeys.len());
 
-        let columnFamily = Session::getColumnFamily(&scanParams.table.name)?;
+        let columnFamily = Session::getColumnFamily(scanParams.table.id)?;
 
         let mut mvccKeyBuffer = &mut self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
         let mut rawIterator: DBRawIterator = self.session.getDBRawIterator(&columnFamily)?;
 
-        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.read().unwrap();
-        let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(&scanParams.table.name);
+        let dbObjectId_mutations = self.session.dbObjectId_mutations.read().unwrap();
+        let tableMutations: Option<&TableMutations> = dbObjectId_mutations.get(&scanParams.table.id);
 
         let mut processDataKey =
             |dataKey: DataKey, sender: Option<SyncSender<(DataKey, RowData)>>| -> Result<()> {
@@ -214,7 +214,7 @@ impl<'session> CommandExecutor<'session> {
                 // mvcc的visibility筛选
                 if self.committedDataVisible(&mut mvccKeyBuffer, &mut rawIterator,
                                              dataKey, &columnFamily,
-                                             &scanParams.table.name, tableMutations)? == false {
+                                             &scanParams.table, tableMutations)? == false {
                     return Ok(());
                 }
 
@@ -271,10 +271,10 @@ impl<'session> CommandExecutor<'session> {
     {
 
         // todo 使用table id 为 column family 标识
-        let columnFamily = Session::getColumnFamily(&scanParams.table.name)?;
+        let columnFamily = Session::getColumnFamily(scanParams.table.id)?;
 
-        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.read().unwrap();
-        let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(&scanParams.table.name);
+        let dbObjectId_mutations = self.session.dbObjectId_mutations.read().unwrap();
+        let tableMutationsCurrentTx: Option<&TableMutations> = dbObjectId_mutations.get(&scanParams.table.id);
 
         let mut mvccKeyBuffer = self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
 
@@ -417,10 +417,10 @@ impl<'session> CommandExecutor<'session> {
 
                                         let snapshot = commandExecutor.session.getSnapshot()?;
                                         // column不是sync的 只能到thread上建立的
-                                        let columnFamily = Session::getColumnFamily(tableName.as_str())?;
+                                        let columnFamily = Session::getColumnFamily(scanParams.table.id)?;
 
-                                        let tableName_mutationsOnTable = commandExecutor.session.tableName_mutationsOnTable.read().unwrap();
-                                        let tableMutationsCurrentTx: Option<&TableMutations> = tableName_mutationsOnTable.get(table.name.as_str());
+                                        let dbObjectId_mutations = commandExecutor.session.dbObjectId_mutations.read().unwrap();
+                                        let tableMutationsCurrentTx: Option<&TableMutations> = dbObjectId_mutations.get(&table.id);
 
                                         let mut mvccKeyBuffer = BytesMut::with_capacity(meta::MVCC_KEY_BYTE_LEN);
                                         let mut rawIterator: DBRawIterator = snapshot.raw_iterator_cf(&columnFamily);
@@ -439,7 +439,7 @@ impl<'session> CommandExecutor<'session> {
                                             // visibility
                                             if commandExecutor.committedDataVisible(&mut mvccKeyBuffer, &mut rawIterator,
                                                                                     dataKey, &columnFamily,
-                                                                                    &table.name, tableMutationsCurrentTx)? == false {
+                                                                                    &table, tableMutationsCurrentTx)? == false {
                                                 continue;
                                             }
 
@@ -528,7 +528,7 @@ impl<'session> CommandExecutor<'session> {
                         // mvcc visibility筛选
                         if self.committedDataVisible(&mut mvccKeyBuffer, &mut rawIterator,
                                                      dataKey, &columnFamily,
-                                                     &scanParams.table.name, tableMutationsCurrentTx)? == false {
+                                                     &scanParams.table, tableMutationsCurrentTx)? == false {
                             continue;
                         }
 
@@ -773,7 +773,7 @@ impl<'session> CommandExecutor<'session> {
 
     /// 当前对relation本身的数据的筛选是通过注入闭包实现的
     // todo 如何去应对重复的pointerKey
-    pub(super) fn searchPointerKeyByPrefix<A, B>(&self, tableName: &str, prefix: &[Byte],
+    pub(super) fn searchPointerKeyByPrefix<A, B>(&self, dbObjectId: DBObjectId, prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
     where
         A: CommittedPointerKeyProcessor,
@@ -783,13 +783,13 @@ impl<'session> CommandExecutor<'session> {
 
         let mut pointerKeyBuffer = self.withCapacityIn(meta::POINTER_KEY_BYTE_LEN);
 
-        let columnFamily = Session::getColumnFamily(tableName)?;
+        let columnFamily = Session::getColumnFamily(dbObjectId)?;
 
         let snapshot = self.session.getSnapshot()?;
         let mut rawIterator = snapshot.raw_iterator_cf(&columnFamily) as DBRawIterator;
 
-        let tableName_mutationsOnTable = self.session.tableName_mutationsOnTable.read().unwrap();
-        let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(tableName);
+        let tableName_mutationsOnTable = self.session.dbObjectId_mutations.read().unwrap();
+        let tableMutations: Option<&TableMutations> = tableName_mutationsOnTable.get(&dbObjectId);
 
         // 应对committed
         for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(prefix, Direction::Forward)) {
@@ -800,9 +800,9 @@ impl<'session> CommandExecutor<'session> {
                 break;
             }
 
-            if self.checkCommittedPointerVisiWithoutTxMutations(&mut pointerKeyBuffer,
-                                                                &mut rawIterator,
-                                                                committedPointerKey.as_ref())? == false {
+            if self.committedPointerVisiWithoutTxMutations(&mut pointerKeyBuffer,
+                                                           &mut rawIterator,
+                                                           committedPointerKey.as_ref())? == false {
                 continue;
             }
 
@@ -890,7 +890,7 @@ impl<'session> CommandExecutor<'session> {
             ),
         };
 
-        self.searchPointerKeyByPrefix(src.name.as_str(), pointerKeyBuffer.as_ref(), searchPointerKeyHooks)?;
+        self.searchPointerKeyByPrefix(src.id, pointerKeyBuffer.as_ref(), searchPointerKeyHooks)?;
 
         let mut scanParams = ScanParams::default();
         scanParams.table = dest;

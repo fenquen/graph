@@ -31,7 +31,7 @@ impl<'session> CommandExecutor<'session> {
             self.generateIndexData(table, &mut buffer, targetDataKey, &targetRowData, true)?;
 
             let oldXmax = self.generateDeleteDataXmax(&mut buffer, targetDataKey)?;
-            self.session.writeDeleteDataMutation(&delete.tableName, oldXmax);
+            self.session.writeDeleteDataMutation(table.id, oldXmax);
         }
 
         Ok(CommandExecResult::DmlResult)

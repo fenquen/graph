@@ -142,10 +142,8 @@ pub const DATA_KEY_INVALID: DataKey = crate::keyPrefixAddRowId!(KEY_PREFIX_DATA,
 
 // ------------------------------------------------------------------------------------------
 
-/// 用来保存txId的colFamily的name
-pub const COLUMN_FAMILY_NAME_TX_ID: &str = "tx_id";
-
-pub const INDEX_TRASH_SUFFIX: &str = "_trash";
+/// 用来保存txId的colFamily
+pub const COLUMN_FAMILY_NAME_TX_ID: &str = "0";
 
 pub fn isVisible(currentTxId: TxId, xmin: TxId, xmax: TxId) -> bool {
     // invisible
@@ -257,6 +255,13 @@ macro_rules! extractDirectionKeyTagFromPointerKey {
     };
 }
 
+pub trait DBObjectTrait {
+    /// 作废
+    fn invalidate(&mut self);
+
+    fn invalid(&self) -> bool;
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum DBObject {
     Table(Table),
@@ -349,6 +354,11 @@ impl DBObject {
         }
     }
 
+    #[inline]
+    pub fn getColumnFamilyName(&self) -> String {
+        self.getId().to_string()
+    }
+
     pub fn getRowIdCounter(&self) -> Result<&AtomicU64> {
         match self {
             DBObject::Table(table) => Ok(&table.rowIdCounter),
@@ -356,21 +366,22 @@ impl DBObject {
             DBObject::Relation(table) => Ok(&table.rowIdCounter),
         }
     }
+}
 
-    /// 作废
-    pub fn invalidate(&mut self) {
+impl DBObjectTrait for DBObject {
+    fn invalidate(&mut self) {
         match self {
-            DBObject::Table(table) => table.invalid = true,
-            DBObject::Relation(table) => table.invalid = true,
-            DBObject::Index(index) => index.invalid = true
+            DBObject::Table(table) => table.invalidate(),
+            DBObject::Relation(table) => table.invalidate(),
+            DBObject::Index(index) => index.invalidate(),
         }
     }
 
-    pub fn invalid(&self) -> bool {
+    fn invalid(&self) -> bool {
         match self {
-            DBObject::Table(table) => table.invalid,
-            DBObject::Relation(table) => table.invalid,
-            DBObject::Index(index) => index.invalid
+            DBObject::Table(table) => table.invalid(),
+            DBObject::Relation(table) => table.invalid(),
+            DBObject::Index(index) => index.invalid()
         }
     }
 }
@@ -392,6 +403,16 @@ pub struct Table {
     pub indexNames: Vec<String>,
     #[serde(skip_serializing, skip_deserializing)]
     pub invalid: bool,
+}
+
+impl DBObjectTrait for Table {
+    fn invalidate(&mut self) {
+        self.invalid = true;
+    }
+
+    fn invalid(&self) -> bool {
+        self.invalid
+    }
 }
 
 impl Table {
@@ -542,6 +563,7 @@ impl Display for ColumnType {
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct Index {
     pub id: DBObjectId,
+    pub trashId: DBObjectId,
     pub name: String,
     #[serde(skip_serializing, skip_deserializing)]
     pub createIfNotExist: bool,
@@ -549,6 +571,16 @@ pub struct Index {
     pub columnNames: Vec<String>,
     #[serde(skip_serializing, skip_deserializing)]
     pub invalid: bool,
+}
+
+impl DBObjectTrait for Index {
+    fn invalidate(&mut self) {
+        self.invalid = true;
+    }
+
+    fn invalid(&self) -> bool {
+        self.invalid
+    }
 }
 
 pub fn init() -> Result<()> {
@@ -567,7 +599,7 @@ pub fn init() -> Result<()> {
         let metaStore = DB::open(&metaStoreOption, CONFIG.metaDir.as_str())?;
 
         // todo tableId的计数不对 要以当前max的table id不能以表的数量  完成
-        let mut latestTableId = 0u64;
+        let mut latestDBObjectId = DBObjectId::default();
 
         for iterResult in metaStore.iterator(IteratorMode::Start) {
             let (key, value) = iterResult?;
@@ -582,10 +614,10 @@ pub fn init() -> Result<()> {
             dbObjectVec.push(dbObject);
 
             // key是以binary由大到小排序的 也便是table id由大到小排序
-            latestTableId = dbObjectId;
+            latestDBObjectId = dbObjectId;
         }
 
-        DB_OBJECT_ID_COUNTER.store(latestTableId + 1, Ordering::Release);
+        DB_OBJECT_ID_COUNTER.store(latestDBObjectId + 1, Ordering::Release);
 
         metaStore
     };
@@ -594,11 +626,11 @@ pub fn init() -> Result<()> {
         let mut columnFamilyDescVec: Vec<ColumnFamilyDescriptor> = Vec::new();
 
         for dbObject in &dbObjectVec {
-            columnFamilyDescVec.push(ColumnFamilyDescriptor::new(dbObject.getName(), Options::default()));
+            columnFamilyDescVec.push(ColumnFamilyDescriptor::new(dbObject.getColumnFamilyName(), Options::default()));
 
             // 如果是index的话不要忘了对应的trash的columnFamily
             if let DBObject::Index(index) = dbObject {
-                columnFamilyDescVec.push(ColumnFamilyDescriptor::new(format!("{}{}", index.name, INDEX_TRASH_SUFFIX), Options::default()));
+                columnFamilyDescVec.push(ColumnFamilyDescriptor::new(index.trashId.to_string(), Options::default()));
             }
         }
 
@@ -624,16 +656,16 @@ pub fn init() -> Result<()> {
             continue;
         }
 
-        let dbObjectName = dbObject.getName();
+        let columnFamilyName = dbObject.getColumnFamilyName();
 
-        let columnFamily = dataStore.cf_handle(dbObjectName).unwrap();
+        let columnFamily = dataStore.cf_handle(&columnFamilyName).unwrap();
         let mut rawIterator: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
 
         // 到last条目而不是末尾 不用去调用prev()
         rawIterator.seek_to_last();
 
         // todo latest的txId需要还原 完成
-        match (rawIterator.key(), dbObjectName.as_str()) {
+        match (rawIterator.key(), columnFamilyName.as_str()) {
             (Some(key), COLUMN_FAMILY_NAME_TX_ID) => {
                 let lastTxId = byte_slice_to_u64!(key);
 

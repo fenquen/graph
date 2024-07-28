@@ -32,7 +32,7 @@ impl<'session> CommandExecutor<'session> {
 
             let origin = self.generateOrigin(dataKey, meta::DATA_KEY_INVALID);
 
-            self.session.writeAddDataMutation(&table.name, dataAdd, xminAdd, xmaxAdd, origin);
+            self.session.writeAddDataMutation(table.id, dataAdd, xminAdd, xmaxAdd, origin);
 
             // 处理相应的index
             // index的key应该是什么样的 columnData + dataKey

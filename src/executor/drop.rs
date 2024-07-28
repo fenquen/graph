@@ -6,7 +6,7 @@ use dashmap::mapref::one::RefMut;
 use bytes::BufMut;
 use crate::{extractDirectionKeyTagFromPointerKey, extractRowIdFromDataKey, extractRowIdFromKeySlice};
 use crate::{extractTargetDataKeyFromPointerKey, extractTargetDBObjectIdFromPointerKey, keyPrefixAddRowId, throw, throwFormat};
-use crate::meta::{DBObject, Index, Table};
+use crate::meta::{DBObject, DBObjectTrait, Index, Table};
 use crate::meta;
 use crate::session::Session;
 
@@ -16,7 +16,7 @@ impl<'session> CommandExecutor<'session> {
 
         let table = match dbObjectTableRefMut.value() {
             DBObject::Table(_) | DBObject::Relation(_) => {
-                let columnFamily = Session::getColumnFamily(tableName)?;
+                let columnFamily = Session::getColumnFamily(dbObjectTableRefMut.getId())?;
                 let mut dbRawIterator = self.session.getDBRawIteratorWithoutSnapshot(&columnFamily)?;
 
                 dbRawIterator.seek(&[meta::KEY_PREFIX_POINTER]);
@@ -53,15 +53,12 @@ impl<'session> CommandExecutor<'session> {
                                     let targetTableId = extractTargetDBObjectIdFromPointerKey!(pointerKey);
 
                                     // 需要通过targetTableId得到对应名字,目前效率的话只能去metastore
-                                    let targetTableName = match meta::STORE.metaStore.get(targetTableId.to_be_bytes())? {
-                                        Some(tableJsonSlice) => {
-                                            let table = serde_json::from_slice::<Table>(tableJsonSlice.as_slice())?;
-                                            table.name
-                                        }
+                                    let targetTable = match meta::STORE.metaStore.get(targetTableId.to_be_bytes())? {
+                                        Some(tableJsonSlice) => serde_json::from_slice::<Table>(tableJsonSlice.as_slice())?,
                                         None => panic!("impossible")
                                     };
 
-                                    let targetTableColumnFamily = Session::getColumnFamily(targetTableName.as_str())?;
+                                    let targetTableColumnFamily = Session::getColumnFamily(targetTable.id)?;
 
                                     let targetDataKey = extractTargetDataKeyFromPointerKey!(pointerKey);
                                     let rowId = extractRowIdFromDataKey!(targetDataKey);
@@ -85,7 +82,7 @@ impl<'session> CommandExecutor<'session> {
                                     bufferTo.put_u64(relation.id + 1);
 
                                     // 因为其实用不到真正的tx需求,直接使用datastore
-                                    self.session.deleteRangeUnderCf(&targetTableColumnFamily, bufferFrom.as_ref(), bufferTo.as_ref())?;
+                                    self.session.deleteRangeWithoutSnapshot(&targetTableColumnFamily, bufferFrom.as_ref(), bufferTo.as_ref())?;
                                 }
                                 None => break
                             }
@@ -104,7 +101,7 @@ impl<'session> CommandExecutor<'session> {
             self.dropIndex(indexName, Some(table), None)?;
         }
 
-        self.session.dropColFamily(tableName)?;
+        self.session.dropColFamily(table.id)?;
         self.session.deleteMeta(table.id)?;
 
         dbObjectTableRefMut.invalidate();
@@ -131,11 +128,11 @@ impl<'session> CommandExecutor<'session> {
         }
 
         let index = index.unwrap();
-        self.session.dropColFamily(indexName)?;
+        self.session.dropColFamily(index.id)?;
         // 莫忘了对应的trash
-        self.session.dropColFamily(format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX).as_str())?;
+        self.session.dropColFamily(index.trashId)?;
         self.session.deleteMeta(index.id)?;
-        index.invalid = true;
+        index.invalidate();
 
         //------------------------去掉table的meta信息上相应的index------------------
 

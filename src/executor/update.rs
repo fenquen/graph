@@ -66,7 +66,7 @@ impl<'session> CommandExecutor<'session> {
                         ),
                     };
 
-                    self.searchPointerKeyByPrefix(table.name.as_str(), pointerKeyPrefix, searchPointerKeyHooks)?;
+                    self.searchPointerKeyByPrefix(table.id, pointerKeyPrefix, searchPointerKeyHooks)?;
 
                     Result::<bool>::Ok(true)
                 };
@@ -176,7 +176,7 @@ impl<'session> CommandExecutor<'session> {
             // originDataKey
             let origin = self.generateOrigin(newDataKey, *oldDataKey);
 
-            self.session.writeUpdateDataMutation(&table.name, oldXmax, newData, newXmin, newXmax, origin);
+            self.session.writeUpdateDataMutation(table.id, oldXmax, newData, newXmin, newXmax, origin);
 
             // 新的data的相应的index
             self.generateIndexData(table, &mut keyBuffer, newDataKey, &rowData, false)?;

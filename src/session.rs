@@ -25,7 +25,7 @@ use tokio::io::AsyncWriteExt;
 use graph_independent::AllocatorExt;
 use crate::config::{Config, CONFIG};
 use crate::executor::CommandExecutor;
-use crate::meta::DBObject;
+use crate::meta::{DBObject, DBObjectTrait};
 use crate::parser::command::Command;
 use crate::types::{Byte, ColumnFamily, DBObjectId, DBRawIterator, KV, SelectResultToFront, SessionHashMap, SessionHashSet, SessionVec, Snapshot, TableMutations, TxId};
 use crate::utils::HashMapExt;
@@ -35,7 +35,7 @@ pub struct Session {
     txId: Option<TxId>,
     dataStore: &'static DB,
     metaStore: &'static DB,
-    pub tableName_mutationsOnTable: RwLock<HashMap<String, TableMutations>>,
+    pub dbObjectId_mutations: RwLock<HashMap<DBObjectId, TableMutations>>,
     snapshot: Option<Snapshot<'static>>,
     pub scanConcurrency: usize,
     pub bump: Bump,
@@ -88,8 +88,8 @@ impl Session {
 
         let mut batch = WriteBatchWithTransaction::<false>::default();
 
-        for (tableName, mutations) in self.tableName_mutationsOnTable.read().unwrap().iter() {
-            let colFamily = Session::getColumnFamily(tableName)?;
+        for (dbObjectId, mutations) in self.dbObjectId_mutations.read().unwrap().iter() {
+            let colFamily = Session::getColumnFamily(*dbObjectId)?;
             for (key, value) in mutations {
                 batch.put_cf(&colFamily, key, value);
             }
@@ -98,8 +98,9 @@ impl Session {
         // todo lastest的txId要持久化 完成
         {
             let currentTxId = self.txId.unwrap();
+
             // cf需要现用现取 内部使用的是read 而create cf会用到write
-            let cf = Session::getColumnFamily(meta::COLUMN_FAMILY_NAME_TX_ID)?;
+            let cf = Session::getColumnFamily(meta::COLUMN_FAMILY_NAME_TX_ID.parse::<DBObjectId>()?)?;
 
             let txUndergoingMaxCount = CONFIG.txUndergoingMaxCount.load(Ordering::Acquire) as u64;
 
@@ -115,7 +116,7 @@ impl Session {
             }
 
             // 以当前的txId为key落地到单独的columnFamil "tx_id"
-            batch.put_cf(&cf, u64ToByteArrRef!(self.txId.unwrap()), global::EMPTY_BINARY);
+            batch.put_cf(&cf, u64ToByteArrRef!(currentTxId), global::EMPTY_BINARY);
         }
 
         self.dataStore.write(batch)?;
@@ -137,7 +138,7 @@ impl Session {
     fn clean(&mut self) {
         self.txId = None;
         self.snapshot = None;
-        self.tableName_mutationsOnTable.write().unwrap().clear();
+        self.dbObjectId_mutations.write().unwrap().clear();
         self.bump.reset();
     }
 
@@ -156,7 +157,7 @@ impl Session {
         }
         self.txId = Some(meta::TX_ID_COUNTER.fetch_add(1, Ordering::AcqRel));
         self.snapshot = Some(self.dataStore.snapshot());
-        self.tableName_mutationsOnTable.write().unwrap().clear();
+        self.dbObjectId_mutations.write().unwrap().clear();
 
         Ok(())
     }
@@ -188,11 +189,19 @@ impl Session {
         }
     }
 
-    pub fn getColumnFamily(columnFamilyName: &str) -> Result<ColumnFamily> {
-        match meta::STORE.dataStore.cf_handle(columnFamilyName) {
+    // todo columnFamily的名字要使用id对应的string
+    pub fn getColumnFamily(dbobjectId: DBObjectId) -> Result<ColumnFamily<'static>> {
+        let columnFamilyName = dbobjectId.to_string();
+        println!("{}",columnFamilyName);
+        match meta::STORE.dataStore.cf_handle(columnFamilyName.as_str()) {
             Some(cf) => Ok(cf),
             None => throwFormat!("column family:{} not exist", columnFamilyName)
         }
+    }
+
+    #[inline]
+    pub fn createColFamily(&self, dbObjectId: DBObjectId) -> Result<()> {
+        Ok(self.dataStore.create_cf(dbObjectId.to_string(), &Options::default())?)
     }
 
     pub fn getSnapshot(&self) -> Result<&Snapshot> {
@@ -213,19 +222,14 @@ impl Session {
     }
 
     #[inline]
-    pub fn createColFamily(&self, name: &str) -> Result<()> {
-        Ok(self.dataStore.create_cf(name, &Options::default())?)
-    }
-
-    #[inline]
     pub fn putUpdateMeta(&self, dbObjectId: DBObjectId, dbObject: &DBObject) -> Result<()> {
         let key = &dbObjectId.to_be_bytes()[..];
         Ok(self.metaStore.put(key, serde_json::to_string(dbObject)?.as_bytes())?)
     }
 
     #[inline]
-    pub fn dropColFamily(&self, name: &str) -> Result<()> {
-        Ok(self.dataStore.drop_cf(name)?)
+    pub fn dropColFamily(&self, dbObjectId: DBObjectId) -> Result<()> {
+        Ok(self.dataStore.drop_cf(dbObjectId.to_string().as_str())?)
     }
 
     #[inline]
@@ -236,12 +240,12 @@ impl Session {
 
     /// 直接上手datastore
     #[inline]
-    pub fn deleteUnderCf(&self, key: &[Byte], columnFamily: &ColumnFamily) -> Result<()> {
+    pub fn deleteWithoutSnapshot(&self, key: &[Byte], columnFamily: &ColumnFamily) -> Result<()> {
         Ok(self.dataStore.delete_cf(columnFamily, key)?)
     }
 
     #[inline]
-    pub fn deleteRangeUnderCf(&self, columnFamily: &ColumnFamily, from: &[Byte], to: &[Byte]) -> Result<()> {
+    pub fn deleteRangeWithoutSnapshot(&self, columnFamily: &ColumnFamily, from: &[Byte], to: &[Byte]) -> Result<()> {
         Ok(self.dataStore.delete_range_cf(columnFamily, from, to)?)
     }
 
@@ -274,7 +278,7 @@ impl Session {
     }
 
     pub fn writeAddDataMutation(&self,
-                                tableName: &String,
+                                dbObjectId: DBObjectId,
                                 data: KV,
                                 xmin: KV, xmax: KV,
                                 origin: KV) {
@@ -286,14 +290,14 @@ impl Session {
                 origin,
             };
 
-        self.writeMutation(tableName, addMutation);
+        self.writeMutation(dbObjectId, addMutation);
     }
 
     pub fn writeAddDataMutation2Dest<'a>(&self,
-                                         tableName: &'a String,
+                                         dbObjectId: DBObjectId,
                                          data: KV,
                                          xmin: KV, xmax: KV,
-                                         origin: KV, dest: &mut SessionVec<(&'a String, Mutation)>) {
+                                         origin: KV, dest: &mut SessionVec<(DBObjectId, Mutation)>) {
         let addData =
             Mutation::AddData {
                 data,
@@ -302,31 +306,31 @@ impl Session {
                 origin,
             };
 
-        dest.push((tableName, addData))
+        dest.push((dbObjectId, addData))
     }
 
     pub fn writeAddPointerMutation(&self,
-                                   tableName: &String,
+                                   dbObjectId: DBObjectId,
                                    xmin: KV, xmax: KV) {
         let addPointer = Mutation::AddPointer { xmin, xmax };
-        self.writeMutation(tableName, addPointer);
+        self.writeMutation(dbObjectId, addPointer);
     }
 
-    pub fn writeAddPointerMutation2Dest<'a>(&self,
-                                            tableName: &'a String,
-                                            xmin: KV, xmax: KV,
-                                            dest: &mut SessionVec<(&'a String, Mutation)>) {
+    pub fn writeAddPointerMutation2Dest(&self,
+                                        dbObjectId: DBObjectId,
+                                        xmin: KV, xmax: KV,
+                                        dest: &mut SessionVec<(DBObjectId, Mutation)>) {
         let addPointer =
             Mutation::AddPointer {
                 xmin,
                 xmax,
             };
 
-        dest.push((tableName, addPointer))
+        dest.push((dbObjectId, addPointer))
     }
 
     pub fn writeUpdateDataMutation(&self,
-                                   tableName: &String,
+                                   dbObjectId: DBObjectId,
                                    oldXmax: KV,
                                    newData: KV,
                                    newXmin: KV, newXmax: KV,
@@ -340,54 +344,54 @@ impl Session {
                 origin,
             };
 
-        self.writeMutation(tableName, updateMutation);
+        self.writeMutation(dbObjectId, updateMutation);
     }
 
     #[inline]
-    pub fn writeDeleteDataMutation(&self, tableName: &String, oldXmax: KV) {
-        self.writeMutation(tableName, Mutation::DeleteData { oldXmax })
+    pub fn writeDeleteDataMutation(&self, dbObjectId: DBObjectId, oldXmax: KV) {
+        self.writeMutation(dbObjectId, Mutation::DeleteData { oldXmax })
     }
 
     #[inline]
-    pub fn writeDeletePointerMutation(&self, tableName: &String, oldXmax: KV) {
-        self.writeMutation(tableName, Mutation::DeletePointer { oldXmax })
+    pub fn writeDeletePointerMutation(&self, dbObjectId: DBObjectId, oldXmax: KV) {
+        self.writeMutation(dbObjectId, Mutation::DeletePointer { oldXmax })
     }
 
     #[inline]
-    pub fn writeAddIndexMutation(&self, indexName: &String, data: KV) {
-        self.writeMutation(indexName, Mutation::AddIndex { data })
+    pub fn writeAddIndexMutation(&self, dbObjectId: DBObjectId, data: KV) {
+        self.writeMutation(dbObjectId, Mutation::AddIndex { data })
     }
 
-    pub fn writeMutation(&self, dbObjectName: &String, mutation: Mutation) {
-        let mut tableName_mutationsOnTable = self.tableName_mutationsOnTable.write().unwrap();
-        let mutationsOnTable = tableName_mutationsOnTable.getMutWithDefault(dbObjectName);
+    pub fn writeMutation(&self, dbObjectId: DBObjectId, mutation: Mutation) {
+        let mut dbObjectId_mutations = self.dbObjectId_mutations.write().unwrap();
+        let tableMutations = dbObjectId_mutations.getMutWithDefault(&dbObjectId);
 
         match mutation {
             Mutation::AddData { data, xmin, xmax, origin } => {
-                mutationsOnTable.insert(data.0, data.1);
-                mutationsOnTable.insert(xmin.0, xmin.1);
-                mutationsOnTable.insert(xmax.0, xmax.1);
-                mutationsOnTable.insert(origin.0, origin.1);
+                tableMutations.insert(data.0, data.1);
+                tableMutations.insert(xmin.0, xmin.1);
+                tableMutations.insert(xmax.0, xmax.1);
+                tableMutations.insert(origin.0, origin.1);
             }
             Mutation::UpdateData { oldXmax, newData, newXmin, newXmax, origin } => {
-                mutationsOnTable.insert(oldXmax.0, oldXmax.1);
-                mutationsOnTable.insert(newData.0, newData.1);
-                mutationsOnTable.insert(newXmin.0, newXmin.1);
-                mutationsOnTable.insert(newXmax.0, newXmax.1);
-                mutationsOnTable.insert(origin.0, origin.1);
+                tableMutations.insert(oldXmax.0, oldXmax.1);
+                tableMutations.insert(newData.0, newData.1);
+                tableMutations.insert(newXmin.0, newXmin.1);
+                tableMutations.insert(newXmax.0, newXmax.1);
+                tableMutations.insert(origin.0, origin.1);
             }
             Mutation::DeleteData { oldXmax } => {
-                mutationsOnTable.insert(oldXmax.0, oldXmax.1);
+                tableMutations.insert(oldXmax.0, oldXmax.1);
             }
             Mutation::AddPointer { xmin, xmax } => {
-                mutationsOnTable.insert(xmin.0, xmin.1);
-                mutationsOnTable.insert(xmax.0, xmax.1);
+                tableMutations.insert(xmin.0, xmin.1);
+                tableMutations.insert(xmax.0, xmax.1);
             }
             Mutation::DeletePointer { oldXmax } => {
-                mutationsOnTable.insert(oldXmax.0, oldXmax.1);
+                tableMutations.insert(oldXmax.0, oldXmax.1);
             }
             Mutation::AddIndex { data } => {
-                mutationsOnTable.insert(data.0, data.1);
+                tableMutations.insert(data.0, data.1);
             }
         };
     }
@@ -420,7 +424,7 @@ impl Default for Session {
             dataStore: &meta::STORE.dataStore,
             metaStore: &meta::STORE.metaStore,
             txId: None,
-            tableName_mutationsOnTable: Default::default(),
+            dbObjectId_mutations: Default::default(),
             snapshot: None,
             scanConcurrency: 1,
             bump: Bump::with_capacity(config::CONFIG.sessionMemotySize),

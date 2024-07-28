@@ -7,6 +7,7 @@ use crate::{global, meta};
 use crate::executor::CommandExecutor;
 use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, KeyTag, KV, RowId, DBObjectId, TableMutations, TxId};
 use anyhow::Result;
+use crate::meta::Table;
 
 impl<'session> CommandExecutor<'session> {
     pub(super) fn committedDataVisible(&self,
@@ -14,9 +15,9 @@ impl<'session> CommandExecutor<'session> {
                                        dbRawIterator: &mut DBRawIterator,
                                        dataKey: DataKey,
                                        columnFamily: &ColumnFamily,
-                                       tableName: &String,
+                                       table: &Table,
                                        tableMutations: Option<&TableMutations>) -> Result<bool> {
-        if self.committedDataVisibleWithoutTxMutations(mvccKeyBuffer, dbRawIterator, dataKey, columnFamily, tableName)? == false {
+        if self.committedDataVisibleWithoutTxMutations(mvccKeyBuffer, dbRawIterator, dataKey, columnFamily, table)? == false {
             return Ok(false);
         }
 
@@ -31,7 +32,7 @@ impl<'session> CommandExecutor<'session> {
                                               dbRawIterator: &mut DBRawIterator,
                                               dataKey: DataKey,
                                               columnFamily: &ColumnFamily,
-                                              tableName: &String) -> Result<bool> {
+                                              table: &Table) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // xmin
@@ -68,7 +69,7 @@ impl<'session> CommandExecutor<'session> {
             if xmin != originDataXmax {
                 // todo 还需要把这条因为update产生的多的new data 干掉 完成
                 let xmax = self.generateDeleteDataXmax(mvccKeyBuffer, dataKey)?;
-                self.session.writeDeleteDataMutation(tableName, xmax);
+                self.session.writeDeleteDataMutation(table.id, xmax);
                 return Ok(false);
             }
         }
@@ -110,10 +111,10 @@ impl<'session> CommandExecutor<'session> {
 
     // todo  pointerKey如何应对mvcc 完成
     /// 因为mvcc信息直接是在pointerKey上的 去看它的末尾的xmax
-    pub(super) fn checkCommittedPointerVisiWithoutTxMutations(&self,
-                                                              pointerKeyBuffer: &mut BytesMut,
-                                                              rawIterator: &mut DBRawIterator,
-                                                              committedPointerKey: &[Byte]) -> anyhow::Result<bool> {
+    pub(super) fn committedPointerVisiWithoutTxMutations(&self,
+                                                         pointerKeyBuffer: &mut BytesMut,
+                                                         rawIterator: &mut DBRawIterator,
+                                                         committedPointerKey: &[Byte]) -> Result<bool> {
         let currentTxId = self.session.getTxId()?;
 
         // const RANGE: Range<usize> = meta::POINTER_KEY_MVCC_KEY_TAG_OFFSET..meta::POINTER_KEY_BYTE_LEN;

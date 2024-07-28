@@ -18,16 +18,16 @@ impl<'session> CommandExecutor<'session> {
 
         let dataStore = &meta::STORE.dataStore;
 
-        for nameDBObject in nameDBObjectVec {
-            let dbObject = nameDBObject.value();
+        for dbObject in nameDBObjectVec {
+            let dbObject = dbObject.value();
 
-            let dbObjectName = dbObject.getName();
+            let dbObjectColumnFamilyName = dbObject.getColumnFamilyName();
 
-            if dbObjectName == meta::COLUMN_FAMILY_NAME_TX_ID {
+            if dbObjectColumnFamilyName == meta::COLUMN_FAMILY_NAME_TX_ID {
                 continue;
             }
 
-            let columnFamily: Option<ColumnFamily> = dataStore.cf_handle(dbObjectName.as_str());
+            let columnFamily: Option<ColumnFamily> = dataStore.cf_handle(dbObjectColumnFamilyName.as_str());
             if let None = columnFamily {
                 continue;
             }
@@ -129,10 +129,8 @@ impl<'session> CommandExecutor<'session> {
                         dbRawIteratorMvccKey.next();
                     }
                 }
-                DBObject::Index(_) => {
-                    let indexTrashColumnFamilyName = format!("{}{}", dbObjectName, meta::INDEX_TRASH_SUFFIX);
-
-                    let indexTrashColumnFamily: Option<ColumnFamily> = dataStore.cf_handle(indexTrashColumnFamilyName.as_str());
+                DBObject::Index(index) => {
+                    let indexTrashColumnFamily: Option<ColumnFamily> = dataStore.cf_handle(index.trashId.to_string().as_str());
                     assert!(indexTrashColumnFamily.is_some());
 
                     let indexTrashColumnFamily = indexTrashColumnFamily.unwrap();
@@ -150,7 +148,7 @@ impl<'session> CommandExecutor<'session> {
                         // 到index本体上干掉相应的key
                         dataStore.delete_cf(&columnFamily, indexKey)?;
 
-                        println!("thresholdTxIdInclude: {thresholdTxIdInclude}, tx:{}",byte_slice_to_u64!(&trashKey[..meta::TX_ID_BYTE_LEN]));
+                        println!("thresholdTxIdInclude: {thresholdTxIdInclude}, tx:{}", byte_slice_to_u64!(&trashKey[..meta::TX_ID_BYTE_LEN]));
 
                         dbRawIteratorIndexTrash.prev();
                     }

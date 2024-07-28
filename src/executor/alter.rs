@@ -2,7 +2,7 @@ use crate::executor::{CommandExecResult, CommandExecutor};
 use anyhow::Result;
 use bytes::BufMut;
 use rocksdb::DB;
-use crate::meta::{Column, DBObject};
+use crate::meta::{Column, DBObject, DBObjectTrait};
 use crate::parser::command::alter::{Alter, AlterTable};
 use crate::session::Session;
 use crate::{meta, throw, throwFormat, utils};
@@ -13,6 +13,7 @@ use crate::types::SessionVec;
 impl<'session> CommandExecutor<'session> {
     pub(super) fn alter(&self, alter: &Alter) -> Result<CommandExecResult> {
         match alter {
+            Alter::AlterIndex { .. } => {}
             Alter::AlterTable(alterTable) => {
                 match alterTable {
                     AlterTable::DropColumns {
@@ -24,10 +25,9 @@ impl<'session> CommandExecutor<'session> {
                         tableName,
                         columns2Add
                     } => self.alterTableAddColumns(tableName, columns2Add)?,
-                    AlterTable::Rename { oldName, newName } => {}
+                    AlterTable::Rename { oldName, newName } => self.alterTableRename(oldName, newName)?
                 }
             }
-            Alter::AlterIndex { .. } => {}
             Alter::AlterRelation { .. } => {}
         }
 
@@ -77,7 +77,7 @@ impl<'session> CommandExecutor<'session> {
 
         // 干掉column对应的数据部分的
         {
-            let columnFamily = Session::getColumnFamily(tableName)?;
+            let columnFamily = Session::getColumnFamily(table.id)?;
             let mut dbRawIterator = self.session.getDBRawIteratorWithoutSnapshot(&columnFamily)?;
 
             dbRawIterator.seek_to_first();
@@ -164,7 +164,7 @@ impl<'session> CommandExecutor<'session> {
             bufferNewAddColumnValues
         };
 
-        let columnFamily = Session::getColumnFamily(tableName)?;
+        let columnFamily = Session::getColumnFamily(table.id)?;
         let mut dbRawIterator = self.session.getDBRawIteratorWithoutSnapshot(&columnFamily)?;
 
         dbRawIterator.seek_to_first();
@@ -202,21 +202,29 @@ impl<'session> CommandExecutor<'session> {
         Ok(())
     }
 
-    fn alterTableRename(&self, oldName: &str, newName: &str) -> Result<CommandExecResult> {
+    /// alter table a rename to b
+    fn alterTableRename(&self, oldName: &str, newName: &str) -> Result<()> {
         let mut dbObjectTableRefMut = Session::getDBObjectMutByName(oldName)?;
 
         let table = dbObjectTableRefMut.asTableMut()?;
-        table.name = newName.to_string();
 
+        // table上的各index也要相应的更改
         for indexName in &table.indexNames {
             let mut dbObjectIndexRefMut = Session::getDBObjectMutByName(indexName)?;
 
             let index = dbObjectIndexRefMut.asIndexMut()?;
             index.tableName = newName.to_string();
 
-            self.session.putUpdateMeta(index.id,&DBObject::Index(index.clone())).unwrap()
+            self.session.putUpdateMeta(index.id, &DBObject::Index(index.clone()))?;
         }
 
-        Ok(CommandExecResult::DdlResult)
+        let mut newTable = table.clone();
+        newTable.name = newName.to_string();
+        self.session.putUpdateMeta(table.id, &DBObject::Table(newTable.clone()))?;
+        meta::NAME_DB_OBJ.insert(newName.to_string(), DBObject::Table(newTable));
+
+        table.invalidate();
+
+        Ok(())
     }
 }

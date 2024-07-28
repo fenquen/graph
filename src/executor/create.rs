@@ -23,7 +23,7 @@ impl<'session> CommandExecutor<'session> {
         table.id = meta::DB_OBJECT_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
 
         // 生成column family
-        self.session.createColFamily(table.name.as_str())?;
+        self.session.createColFamily(table.id)?;
 
         // todo 使用 u64的tableId 为key 完成
         let tableId = table.id;
@@ -74,14 +74,15 @@ impl<'session> CommandExecutor<'session> {
 
         // 分配id
         index.id = meta::DB_OBJECT_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
+        index.trashId = meta::DB_OBJECT_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
 
         let indexName = index.name.clone();
 
         // 生成index对应的column family
-        self.session.createColFamily(index.name.as_str())?;
+        self.session.createColFamily(index.id)?;
 
         // index对应的垃圾桶的column family,它只是个附庸在index上的纯rocks概念体系里的东西,不是db的概念
-        self.session.createColFamily(format!("{}{}", indexName, meta::INDEX_TRASH_SUFFIX).as_str())?;
+        self.session.createColFamily(index.trashId)?;
 
         // todo 新建index的时候要是表上已经有数据需要当场生成index数据 完成
         self.generateIndexDataForExistingTableData(targetTable, &index)?;
@@ -102,13 +103,14 @@ impl<'session> CommandExecutor<'session> {
         Ok(CommandExecResult::DdlResult)
     }
 
+    // todo 要是create table,insert,create index连在1起的话 该该函数不生效因为读取的是已经提交的 而这时insert的尚未提交
     /// 当创建index的时候,要是table上已经有数据了需要对这些数据创建索引 <br>
-    /// 不使用tx snapshot等概念 直接对数据store本体上手
+    /// 直接对数据store本体上手
     fn generateIndexDataForExistingTableData(&self, table: &Table, index: &Index) -> Result<()> {
-        let mut dbRawIteratorTable: DBRawIterator = meta::STORE.dataStore.raw_iterator_cf(&Session::getColumnFamily(index.tableName.as_str())?);
+        let mut dbRawIteratorTable: DBRawIterator = meta::STORE.dataStore.raw_iterator_cf(&Session::getColumnFamily(table.id)?);
         dbRawIteratorTable.seek(meta::DATA_KEY_PATTERN);
 
-        let indexColumnFamily = Session::getColumnFamily(index.name.as_str())?;
+        let indexColumnFamily = Session::getColumnFamily(index.id)?;
 
         let mut indexKeyBuffer = self.newIn();
 

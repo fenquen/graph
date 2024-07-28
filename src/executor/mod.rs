@@ -88,6 +88,7 @@ impl<'session> CommandExecutor<'session> {
                 Command::CreateIndex(index) => {
                     let index = Index {
                         id: DBObjectId::default(),
+                        trashId: DBObjectId::default(),
                         name: index.name.clone(),
                         tableName: index.tableName.clone(),
                         columnNames: index.columnNames.clone(),
