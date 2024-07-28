@@ -30,7 +30,6 @@ impl<'session> CommandExecutor<'session> {
             // _ => throw!(&format!("{:?} not supported", set))
         }
 
-        //self.session.setAutoCommit()
         Ok(CommandExecResult::None)
     }
 }

@@ -285,12 +285,16 @@ impl<'session> CommandExecutor<'session> {
                 let mut scanSearch = true;
 
                 if scanParams.tableFilter.is_some() {
-                    match filter::processTableFilter(scanParams.tableFilter.as_ref().unwrap())? {
+                    let tableFilter = scanParams.tableFilter.as_ref().unwrap();
+
+                    match filter::processTableFilter(tableFilter)? {
                         TableFilterProcResult::IndexableTableFilterColHasNonesenseWhenIsPureOr => {
                             // 没有 tableFilter
                         }
                         // 纯and 而且能够index的表达式的成果都是nonsense 用不了index
-                        TableFilterProcResult::AllIndexableTableFilterColsAreNonsenseWhenIsPureAnd { hasExprAbandonedByIndex } => {
+                        TableFilterProcResult::AllIndexableTableFilterColsAreNonsenseWhenIsPureAnd {
+                            hasExprAbandonedByIndex
+                        } => {
                             // 要是没有非其它以外的话 也是可以能当场计算的
                             if hasExprAbandonedByIndex == false {
                                 let mut rowData = HashMap::new();
@@ -299,7 +303,7 @@ impl<'session> CommandExecutor<'session> {
                                     rowData.insert(column.name.clone(), GraphValue::IgnoreColumnActualValue);
                                 }
 
-                                let value = scanParams.tableFilter.as_ref().unwrap().calc(Some(&rowData))?;
+                                let value = tableFilter.calc(Some(&rowData))?;
 
                                 if value.asBoolean()? == false {
                                     return Ok(vec![]);
@@ -309,9 +313,7 @@ impl<'session> CommandExecutor<'session> {
                         TableFilterProcResult::IndexableTableFilterColHasConflictWhenIsPureAnd => return Ok(vec![]),
                         // 过滤条件没有写columnName,可以当场计算的
                         TableFilterProcResult::NoColumnNameInTableFilter => {
-                            let value = scanParams.tableFilter.as_ref().unwrap().calc(None)?;
-
-                            if value.asBoolean()? == false {
+                            if tableFilter.calc(None)?.asBoolean()? == false {
                                 return Ok(vec![]);
                             }
                         }
@@ -566,7 +568,6 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 satisfiedRows
-
             } else { // 说明是link 且尚未写filter
                 let mut rawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
                 rawIterator.seek(meta::DATA_KEY_PATTERN);
@@ -628,7 +629,6 @@ impl<'session> CommandExecutor<'session> {
     }
 
     pub(super) fn readRowDataBinary(&self, rowBinary: &[Byte], scanParams: &ScanParams) -> Result<Option<RowData>> {
-        // todo 使用meta对象的引用来控制ddl
         let columnNames = scanParams.table.columns.iter().map(|column| column.name.clone()).collect::<Vec<String>>();
 
         // todo 原来使用ByteMut的话rowBinary要先copy到vec,再以vec构建ByteMut,如何减少这其实不必要的copy 完成
@@ -661,6 +661,7 @@ impl<'session> CommandExecutor<'session> {
         }
     }
 
+    // todo insert时候value的排布要和创建表的时候column的顺序对应 完成
     pub(super) fn generateInsertValuesBinary(&self, insert: &mut Insert, table: &Table) -> Result<SessionVec<(BytesMut, RowData)>> {
         // 要是未显式说明column的话还需要读取table的column
         if insert.useExplicitColumnNames == false {

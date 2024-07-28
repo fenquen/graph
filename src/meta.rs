@@ -386,8 +386,6 @@ impl DBObjectTrait for DBObject {
     }
 }
 
-// todo alter table
-// todo drop table
 // todo 可以的话是不是记录下table的record的实际数量
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Table {

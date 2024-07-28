@@ -223,6 +223,7 @@ impl<'session> CommandExecutor<'session> {
         self.session.putUpdateMeta(table.id, &DBObject::Table(newTable.clone()))?;
         meta::NAME_DB_OBJ.insert(newName.to_string(), DBObject::Table(newTable));
 
+        // 原来的table对象失效
         table.invalidate();
 
         Ok(())

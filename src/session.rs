@@ -95,7 +95,6 @@ impl Session {
             }
         }
 
-        // todo lastest的txId要持久化 完成
         {
             let currentTxId = self.txId.unwrap();
 
@@ -115,6 +114,7 @@ impl Session {
                 self.dataStore.delete_range_cf(&cf, u64ToByteArrRef!(meta::TX_ID_INVALID), u64ToByteArrRef!(currentTxId))?;
             }
 
+            // todo lastest的txId要持久化 完成
             // 以当前的txId为key落地到单独的columnFamil "tx_id"
             batch.put_cf(&cf, u64ToByteArrRef!(currentTxId), global::EMPTY_BINARY);
         }
@@ -249,7 +249,6 @@ impl Session {
         Ok(self.dataStore.delete_range_cf(columnFamily, from, to)?)
     }
 
-    // todo getDBObjectByName用不到self迁移到session 完成
     pub fn getDBObjectByName(dbObjectName: &str) -> Result<Ref<String, DBObject>> {
         match meta::NAME_DB_OBJ.get(dbObjectName) {
             None => throwFormat!("db object:{} not exist", dbObjectName),

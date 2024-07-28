@@ -125,7 +125,7 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
                     opValueVec.iter().map(|(op, value)| {
                         (*op, (*value).clone())
                     }).collect::<Vec<(Op, GraphValue)>>()
-                }).collect::<>();
+                }).collect();
 
             // 尝试or压缩 (a and b) or (c and d), 应对 (a and b)和(c and d) 之间重复的部分
             // 如果是纯粹通用考虑的话是不太容易的, 不过以目前的话事实上是可以知道的, 如果
@@ -207,7 +207,7 @@ struct AndDesc<'a> {
     value: Option<&'a GraphValue>,
 }
 
-// 生成向上溯源的树 因为它只有parent
+/// 生成向上溯源的树 因为它只有parent
 fn and<'a>(opValuesVec: &'a [(Op, Vec<GraphValue>)],
            parent: Rc<AndDesc<'a>>,
            leafVec: &mut Vec<AndDesc<'a>>) {
@@ -254,10 +254,12 @@ fn and<'a>(opValuesVec: &'a [(Op, Vec<GraphValue>)],
 }
 
 pub(in crate::executor) enum TableFilterProcResult {
+    /// 目前只有 like '%' and like '%'
     AllIndexableTableFilterColsAreNonsenseWhenIsPureAnd {
         hasExprAbandonedByIndex: bool
     },
     IndexableTableFilterColHasConflictWhenIsPureAnd,
+    /// a<=1 or a>1
     IndexableTableFilterColHasNonesenseWhenIsPureOr,
     NoColumnNameInTableFilter,
     MaybeCanUseIndex {

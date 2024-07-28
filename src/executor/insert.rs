@@ -10,7 +10,6 @@ use crate::codec::BinaryCodec;
 use crate::session::Session;
 
 impl<'session> CommandExecutor<'session> {
-    // todo insert时候value的排布要和创建表的时候column的顺序对应 完成
     pub(super) fn insert(&self, insert: &mut Insert) -> Result<CommandExecResult> {
         // 对应的表是不是exist
         let tableName = insert.tableName.clone();

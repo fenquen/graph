@@ -107,6 +107,7 @@ impl MathCalcOp {
 pub enum LikePattern {
     /// 对应 like 'a',会在calc0的时候被消化掉变为MathCmpOp::Equal<br>, like null 也会这样
     Equal(String),
+    /// 对应like'%'和like'%%'
     Nonsense,
     StartWith(String),
     EndWith(String),

@@ -84,7 +84,7 @@ impl<'session> CommandExecutor<'session> {
         // index对应的垃圾桶的column family,它只是个附庸在index上的纯rocks概念体系里的东西,不是db的概念
         self.session.createColFamily(index.trashId)?;
 
-        // todo 新建index的时候要是表上已经有数据需要当场生成index数据 完成
+        // 新建index的时候要是表上已经有数据需要当场生成index数据
         self.generateIndexDataForExistingTableData(targetTable, &index)?;
 
         let indexId = index.id;
@@ -95,7 +95,6 @@ impl<'session> CommandExecutor<'session> {
         // map 更新
         meta::NAME_DB_OBJ.insert(dbObjectIndex.getName().to_string(), dbObjectIndex);
 
-        // todo 如何知道表涉及到的index有哪些,要有table和相应的index的联系 完成
         // 回写更新后的表的信息落地
         targetTable.indexNames.push(indexName);
         self.session.putUpdateMeta(targetTable.id, &DBObject::Table(targetTable.clone()))?;

@@ -16,9 +16,8 @@ pub struct Insert {
 }
 
 impl Parser {
-    // insert   INTO TEST VALUES ( '0'  , ')')
-    // insert into test (column1) values ('a')
-    // todo 实现 insert into values(),() 完成
+    /// insert   INTO TEST VALUES ( '0'  , ')') <br>
+    /// todo 实现 into test (column1) values ('a'),('r') 完成
     pub(in crate::parser) fn parseInsert(&mut self) -> Result<Command> {
         let currentElement = self.getCurrentElementAdvance()?;
         if currentElement.expectTextLiteralContentIgnoreCaseBool("into") == false {

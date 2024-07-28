@@ -117,7 +117,6 @@ impl<'session> CommandExecutor<'session> {
             Result::<(), GraphError>::Ok(())
         };
 
-        // todo logical优化
         // column expr能直接计算的先计算 不要到后边的遍历里边重复计算了
         for (columnName, columnExpr) in &update.columnName_expr {
             if columnExpr.needAcutalRowData() {

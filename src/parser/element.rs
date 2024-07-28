@@ -320,7 +320,7 @@ impl Parser {
                         self.pendingChars.push(currentChar);
                     }
                 }
-                'l' | 'L' => {  // todo 实现对like的parse 完成
+                'l' | 'L' => {
                     if self.whetherIn单引号() {
                         self.pendingChars.push(currentChar);
                         continue;

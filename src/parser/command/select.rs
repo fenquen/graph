@@ -93,7 +93,7 @@ impl FromStr for EndPointType {
 }
 
 impl Parser {
-    // todo 实现 select user(id >1 ) as user0 ,in usage (number = 7) ,end in own(number =7)
+    // todo 实现 select user(id >1 ) as user0 ,in usage (number = 7) ,end in own(number =7) 完成
     /// ```select user[id,name](id=1 and 0=6) as user0 -usage(number > 9) recursive (1..] as usage0-> car -own(number=1)-> tyre```
     pub(in crate::parser) fn parseSelect(&mut self, regardRelPartAsFilter: bool) -> Result<Command> {
         // https://doc.rust-lang.org/reference/items/enumerations.html
