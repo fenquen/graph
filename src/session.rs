@@ -95,6 +95,7 @@ impl Session {
             }
         }
 
+        // 记录了tx id的column family
         {
             let currentTxId = self.txId.unwrap();
 
