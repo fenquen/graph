@@ -1,6 +1,7 @@
 use crate::executor::{CommandExecResult, CommandExecutor};
 use anyhow::Result;
 use bytes::BufMut;
+use rocksdb::DB;
 use crate::meta::{Column, DBObject};
 use crate::parser::command::alter::{Alter, AlterTable};
 use crate::session::Session;
@@ -202,7 +203,19 @@ impl<'session> CommandExecutor<'session> {
     }
 
     fn alterTableRename(&self, oldName: &str, newName: &str) -> Result<CommandExecResult> {
-        let dbObjectTableRefMut = Session::getDBObjectMutByName(oldName)?;
+        let mut dbObjectTableRefMut = Session::getDBObjectMutByName(oldName)?;
+
+        let table = dbObjectTableRefMut.asTableMut()?;
+        table.name = newName.to_string();
+
+        for indexName in &table.indexNames {
+            let mut dbObjectIndexRefMut = Session::getDBObjectMutByName(indexName)?;
+
+            let index = dbObjectIndexRefMut.asIndexMut()?;
+            index.tableName = newName.to_string();
+
+            self.session.putUpdateMeta(index.id,&DBObject::Index(index.clone())).unwrap()
+        }
 
         Ok(CommandExecResult::DdlResult)
     }

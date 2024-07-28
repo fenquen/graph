@@ -91,7 +91,6 @@ impl<'session> CommandExecutor<'session> {
                         name: index.name.clone(),
                         tableName: index.tableName.clone(),
                         columnNames: index.columnNames.clone(),
-                        rowIdCounter: AtomicU64::new(meta::ROW_ID_MIN),
                         createIfNotExist: index.createIfNotExist,
                         invalid: index.invalid,
                     };

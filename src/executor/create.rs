@@ -38,7 +38,7 @@ impl<'session> CommandExecutor<'session> {
         self.session.putUpdateMeta(tableId, &dbObject)?;
 
         // map
-        meta::NAME_DB_OBJ.insert(dbObject.getName(), dbObject);
+        meta::NAME_DB_OBJ.insert(dbObject.getName().to_string(), dbObject);
 
         Ok(CommandExecResult::DdlResult)
     }
@@ -92,7 +92,7 @@ impl<'session> CommandExecutor<'session> {
         // 落地 index
         self.session.putUpdateMeta(indexId, &dbObjectIndex)?;
         // map 更新
-        meta::NAME_DB_OBJ.insert(dbObjectIndex.getName(), dbObjectIndex);
+        meta::NAME_DB_OBJ.insert(dbObjectIndex.getName().to_string(), dbObjectIndex);
 
         // todo 如何知道表涉及到的index有哪些,要有table和相应的index的联系 完成
         // 回写更新后的表的信息落地

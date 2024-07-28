@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
-use rocksdb::{BoundColumnFamily, ColumnFamilyDescriptor, DB, DBCommon,
-              DBRawIteratorWithThreadMode, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options};
+use rocksdb::{BoundColumnFamily, ColumnFamilyDescriptor, DB, DBCommon};
+use rocksdb::{DBRawIteratorWithThreadMode, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options};
 use std::sync::RwLock;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use crate::config::CONFIG;
@@ -341,19 +341,19 @@ impl DBObject {
         }
     }
 
-    pub fn getName(&self) -> String {
+    pub fn getName(&self) -> &String {
         match self {
-            DBObject::Table(table) => table.name.clone(),
-            DBObject::Index(index) => index.name.clone(),
-            DBObject::Relation(table) => table.name.clone(),
+            DBObject::Table(table) => &table.name,
+            DBObject::Index(index) => &index.name,
+            DBObject::Relation(table) => &table.name,
         }
     }
 
-    pub fn getRowIdCounter(&self) -> &AtomicU64 {
+    pub fn getRowIdCounter(&self) -> Result<&AtomicU64> {
         match self {
-            DBObject::Table(table) => &table.rowIdCounter,
-            DBObject::Index(index) => &index.rowIdCounter,
-            DBObject::Relation(table) => &table.rowIdCounter,
+            DBObject::Table(table) => Ok(&table.rowIdCounter),
+            DBObject::Index(index) => throw!("index does not use row id counter"),
+            DBObject::Relation(table) => Ok(&table.rowIdCounter),
         }
     }
 
@@ -539,12 +539,10 @@ impl Display for ColumnType {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct Index {
     pub id: DBObjectId,
     pub name: String,
-    /// start from 1
-    pub rowIdCounter: AtomicU64,
     #[serde(skip_serializing, skip_deserializing)]
     pub createIfNotExist: bool,
     pub tableName: String,
@@ -554,11 +552,7 @@ pub struct Index {
 }
 
 pub fn init() -> Result<()> {
-    // 用来后边dataStore时候对应各个的columnFamily
-    let mut columnFamilyNames = Vec::new();
-
-    // tx id 对应的column family
-    columnFamilyNames.push(COLUMN_FAMILY_NAME_TX_ID.to_string());
+    let mut dbObjectVec = Vec::new();
 
     // 生成用来保存表文件和元数据的目录
     // meta的保存格式是 tableId->json
@@ -575,26 +569,17 @@ pub fn init() -> Result<()> {
         // todo tableId的计数不对 要以当前max的table id不能以表的数量  完成
         let mut latestTableId = 0u64;
 
-        let iterator: DBIterator = metaStore.iterator(IteratorMode::Start);
-        for iterResult in iterator {
+        for iterResult in metaStore.iterator(IteratorMode::Start) {
             let (key, value) = iterResult?;
 
             let dbObjectId = byte_slice_to_u64!(&*key);
-            //println!("{}", String::from_utf8(Vec::from(&*value)).unwrap());
             let dbObject: DBObject = serde_json::from_slice(&*value)?;
 
             if dbObjectId != dbObject.getId() {
                 throw!("table记录的key和table中的tableId不同");
             }
 
-            columnFamilyNames.push(dbObject.getName());
-
-            // 如果是index的话不要忘了对应的trash的columnFamily
-            if let DBObject::Index(ref index) = dbObject {
-                columnFamilyNames.push(format!("{}{}", index.name, INDEX_TRASH_SUFFIX));
-            }
-
-            NAME_DB_OBJ.insert(dbObject.getName(), dbObject);
+            dbObjectVec.push(dbObject);
 
             // key是以binary由大到小排序的 也便是table id由大到小排序
             latestTableId = dbObjectId;
@@ -606,12 +591,19 @@ pub fn init() -> Result<()> {
     };
 
     let dataStore: DB = {
-        let columnFamilyDescVec: Vec<ColumnFamilyDescriptor> =
-            columnFamilyNames.iter().map(|columnFamilyName| {
-                let mut columnFamilyOption = Options::default();
-                columnFamilyOption.set_max_write_buffer_number(2);
-                ColumnFamilyDescriptor::new(columnFamilyName, columnFamilyOption)
-            }).collect::<Vec<ColumnFamilyDescriptor>>();
+        let mut columnFamilyDescVec: Vec<ColumnFamilyDescriptor> = Vec::new();
+
+        for dbObject in &dbObjectVec {
+            columnFamilyDescVec.push(ColumnFamilyDescriptor::new(dbObject.getName(), Options::default()));
+
+            // 如果是index的话不要忘了对应的trash的columnFamily
+            if let DBObject::Index(index) = dbObject {
+                columnFamilyDescVec.push(ColumnFamilyDescriptor::new(format!("{}{}", index.name, INDEX_TRASH_SUFFIX), Options::default()));
+            }
+        }
+
+        // tx id 对应的column family
+        columnFamilyDescVec.push(ColumnFamilyDescriptor::new(COLUMN_FAMILY_NAME_TX_ID, Options::default()));
 
         std::fs::create_dir_all(CONFIG.dataDir.as_str())?;
 
@@ -625,20 +617,23 @@ pub fn init() -> Result<()> {
         DB::open_cf_descriptors(&dataStoreOption, CONFIG.dataDir.as_str(), columnFamilyDescVec)?
     };
 
-    // 遍历各个cf读取last的key 读取lastest的rowId
-    for ref columnFamilyName in columnFamilyNames {
-        if columnFamilyName.ends_with(INDEX_TRASH_SUFFIX) {
+    // 遍历各个cf读取last的key 读取还原各table的lastest的rowId,db的之前的最新的tx
+    for dbObject in &dbObjectVec {
+        // index用不到rowId
+        if let DBObject::Index(_) = dbObject {
             continue;
         }
 
-        let columnFamily = dataStore.cf_handle(columnFamilyName.as_str()).unwrap();
+        let dbObjectName = dbObject.getName();
+
+        let columnFamily = dataStore.cf_handle(dbObjectName).unwrap();
         let mut rawIterator: DBRawIterator = dataStore.raw_iterator_cf(&columnFamily);
 
         // 到last条目而不是末尾 不用去调用prev()
         rawIterator.seek_to_last();
 
         // todo latest的txId需要还原 完成
-        match (rawIterator.key(), columnFamilyName.as_str()) {
+        match (rawIterator.key(), dbObjectName.as_str()) {
             (Some(key), COLUMN_FAMILY_NAME_TX_ID) => {
                 let lastTxId = byte_slice_to_u64!(key);
 
@@ -651,15 +646,16 @@ pub fn init() -> Result<()> {
             }
             (Some(key), _) => {
                 let lastRowId = extractRowIdFromKeySlice!(key);
-
-                let dbObject = NAME_DB_OBJ.get(columnFamilyName.as_str()).unwrap();
-                dbObject.getRowIdCounter().store(lastRowId + 1, Ordering::Release);
+                dbObject.getRowIdCounter()?.store(lastRowId + 1, Ordering::Release);
             }
             (None, _) => {
-                let dbObject = NAME_DB_OBJ.get(columnFamilyName.as_str()).unwrap();
-                dbObject.getRowIdCounter().store(ROW_ID_MIN, Ordering::Release);
+                dbObject.getRowIdCounter()?.store(ROW_ID_MIN, Ordering::Release);
             }
         }
+    }
+
+    for dbObject in dbObjectVec {
+        NAME_DB_OBJ.insert(dbObject.getName().to_string(), dbObject);
     }
 
     STORE.set(Store {
