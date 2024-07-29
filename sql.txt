@@ -175,7 +175,7 @@ link user(id= 6) to user(id=7) by likes(level =0)
     "sql": "alter table user drop columns cascade (name)"
 }
 
-// -------------------------------------------------------------
+// -------------------------------test dml and ddl------------------------------
 {
     "requestType": "ExecuteSql",
     "sql": "create table if not exist user (id integer,name string);insert into user values (1,'tom1');create index user_id_index on user[id];create index user_id_name_index on user[id, name]"
