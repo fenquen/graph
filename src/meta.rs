@@ -41,6 +41,11 @@ lazy_static! {
     //pub static ref TABLE_NAME_INDEX_NAMES: RwLock<HashMap<String, Vec<String>>> = Default::default();
 }
 
+#[inline]
+pub fn nextDBObjectId() -> DBObjectId {
+    DB_OBJECT_ID_COUNTER.fetch_add(1, Ordering::AcqRel)
+}
+
 /// metaStore 使用 dbObejctId 为相应的key <br>
 /// dataStore 使用 dbObejctId对应的string当作columnFamily名字
 pub struct Store {
@@ -67,7 +72,7 @@ pub const ROW_ID_MIN: RowId = 1;
 // ----------------------------------------------------------------------
 
 /// key的前缀 对普通的数据(key的前缀是KEY_PREFIX_DATA)来说是 prefix 4bit + rowId 60bit
-pub const DATA_KEY_BYTE_LEN: usize = mem::size_of::<DataKey>();
+pub const DATA_KEY_BYTE_LEN: usize = size_of::<DataKey>();
 
 // ----------------------------------------------------------------------
 
