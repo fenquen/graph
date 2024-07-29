@@ -54,7 +54,7 @@ impl Session {
             return Ok(Vec::new());
         }
 
-        // todo set autocommit 是不需要tx的 如果sql只包含set如何应对
+       /* // todo set autocommit 是不需要tx的 如果sql只包含set如何应对
         let mut needTx = false;
         for command in &commands {
             if command.needTx() {
@@ -66,13 +66,13 @@ impl Session {
         // 不要求是不是auto commit的 要不在tx那么生成1个tx
         if self.notInTx() && needTx {
             self.generateTx()?;
-        }
+        }*/
 
         // todo 要是执行的过程有报错 是不是应该rollback
         let selectResultToFront = CommandExecutor::new(self).execute(&mut commands)?;
 
         // todo sql中执行了commit rollback使得当前tx提交后,当前不是inTx了,要是后边还有不是set的sql需要再重起1个tx
-        if self.autoCommit && needTx {
+        if self.autoCommit {
             self.commit()?;
         }
 
@@ -129,7 +129,7 @@ impl Session {
 
     // todo rollback()不要求inTx 完成
     pub fn rollback(&mut self) -> Result<()> {
-        if self.notInTx() == false {
+        if self.inTx() {
             self.clean();
         }
 
@@ -163,13 +163,19 @@ impl Session {
         Ok(())
     }
 
-    fn notInTx(&self) -> bool {
+    #[inline]
+    pub fn inTx(&self) -> bool {
+        !self.notInTx()
+    }
+
+    #[inline]
+    pub fn notInTx(&self) -> bool {
         self.txId.is_none() || self.snapshot.is_none()
     }
 
     /// 如果当前是 false  && in tx 那么会提交当前tx ,jdbc也是这样的
     pub fn setAutoCommit(&mut self, autoCommit: bool) -> Result<()> {
-        if self.autoCommit == false && self.notInTx() == false {
+        if self.inTx() && self.autoCommit == false {
             self.commit()?;
         }
 
@@ -193,7 +199,6 @@ impl Session {
     // todo columnFamily的名字要使用id对应的string
     pub fn getColumnFamily(dbobjectId: DBObjectId) -> Result<ColumnFamily<'static>> {
         let columnFamilyName = dbobjectId.to_string();
-        println!("{}",columnFamilyName);
         match meta::STORE.dataStore.cf_handle(columnFamilyName.as_str()) {
             Some(cf) => Ok(cf),
             None => throwFormat!("column family:{} not exist", columnFamilyName)

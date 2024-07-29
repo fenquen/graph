@@ -67,6 +67,18 @@ impl<'session> CommandExecutor<'session> {
         let mut valueVecVec = Vec::with_capacity(commands.len());
 
         for command in commands {
+            // https://blog.csdn.net/qq_33823794/article/details/136557778
+            // 要是dml和ddl在1起,那么当碰到ddl的时候先commit
+            if command.isDdl() {
+                if self.session.inTx() {
+                    self.session.commit()?;
+                }
+            }
+
+            if command.needTx() && self.session.notInTx() {
+                self.session.generateTx()?;
+            }
+
             let executionResult = match command {
                 Command::CreateTable(table) => {
                     let table = Table {

@@ -149,7 +149,7 @@ impl<'session> CommandExecutor<'session> {
             let mut indexFilteredColNames = Vec::with_capacity(index.columnNames.len());
 
             // select 要是指明 colName 的话能用到index上的多少字段
-            let mut indexSelectedColCount = 0usize;
+            let mut indexSelectedColumnCount = usize::default();
 
             // index的各个用到的column上的表达式的集合,它的length便是index上用到的column数量
             let mut opValueVecVecAcrossIndexFilteredCols = Vec::with_capacity(index.columnNames.len());
@@ -160,12 +160,6 @@ impl<'session> CommandExecutor<'session> {
                     break;
                 }
 
-                if let Some(selectedColNames) = scanParams.selectedColumnNames {
-                    if selectedColNames.contains(indexColumnName) {
-                        suffix_plus_plus!(indexSelectedColCount);
-                    }
-                }
-
                 // and 体系 单个字段上的过滤条件之间是and 字段和字段之间是and
                 let opValueVecVec = tableFilterColName_opValueVecVec.get(indexColumnName).unwrap().clone();
 
@@ -173,6 +167,22 @@ impl<'session> CommandExecutor<'session> {
 
                 opValueVecVecAcrossIndexFilteredCols.push(opValueVecVec);
                 indexFilteredColNames.push(indexColumnName.clone());
+            }
+
+            // index本身拥有的字段能涵盖多少要select字段
+            if let Some(selectedColumnNames) = scanParams.selectedColumnNames {
+                for indexColumnName in &index.columnNames {
+                    if selectedColumnNames.contains(indexColumnName) {
+                        suffix_plus_plus!(indexSelectedColumnCount);
+                    }
+                }
+            } else {
+                let selectedColumnNames: Vec<&String> = scanParams.table.columns.iter().map(|column| &column.name).collect();
+                for indexColumnName in &index.columnNames {
+                    if selectedColumnNames.contains(&indexColumnName) {
+                        suffix_plus_plus!(indexSelectedColumnCount);
+                    }
+                }
             }
 
             // filter没有用到这个index的任何字段
@@ -229,7 +239,7 @@ impl<'session> CommandExecutor<'session> {
 
 
             // 不能直接放index 因为它是来源dbObject的 而for 循环结束后dbObject销毁了
-            candiateInices.push((dbObjectIndex, indexSelectedColCount, indexFilteredColNames, opValueVecVecAcrossIndexFilteredCols));
+            candiateInices.push((dbObjectIndex, indexSelectedColumnCount, indexFilteredColNames, opValueVecVecAcrossIndexFilteredCols));
         }
 
         if candiateInices.is_empty() {
@@ -336,14 +346,19 @@ impl<'session> CommandExecutor<'session> {
         let indexLocalSearch = {
             let mut indexLocalSearch = false;
 
-            if let Some(selectedColNames) = scanParams.selectedColumnNames {
-                // 覆盖全部的select 字段
-                if indexSelectedColCount == selectedColNames.len() {
-                    // 覆盖全部的过滤字段
-                    if indexFilteredColNames.len() == tableFilterColNames.len() {
-                        indexLocalSearch = true;
-                    }
-                }
+            let coverAllSelectedColumns =
+                if let Some(selectedColNames) = scanParams.selectedColumnNames {
+                    // 覆盖全部的select 字段
+                    indexSelectedColCount == selectedColNames.len()
+                } else {
+                    indexSelectedColCount == scanParams.table.columns.len()
+                };
+
+            // 覆盖全部的过滤字段
+            let coverAllFilterColumns = indexFilteredColNames.len() == tableFilterColNames.len();
+
+            if coverAllSelectedColumns && coverAllFilterColumns {
+                indexLocalSearch = true;
             }
 
             indexLocalSearch
@@ -450,15 +465,18 @@ impl<'session> CommandExecutor<'session> {
 
         log::info!("beginPosition:{}", beginPosition);
 
+        /*indexDBRawIterator.seek_to_first();
+        while let Some(a) = indexDBRawIterator.key() {
+            println!("aaaaaaaaaaa");
+            indexDBRawIterator.next()
+        }
+*/
         // 说明了tableFilter上全都是 "="
         if beginPosition >= indexSearch.opValueVecVecAcrossIndexFilteredCols.len() {
             indexDBRawIterator.seek(prefixBuffer.as_ref());
 
-            let indexKey = indexDBRawIterator.key();
-            if indexKey.is_some() {
-                let indexKey = indexKey.unwrap();
-
-                if prefixBuffer.as_ref() == extractIndexRowDataFromIndexKey!(indexKey) {
+            if let Some(indexKey) = indexDBRawIterator.key() {
+                if extractIndexRowDataFromIndexKey!(indexKey).starts_with(prefixBuffer.as_ref()) {
                     processWhenPrefixFollowing1stColSatisfied(indexKey, beginPosition)?;
                 }
             }

@@ -106,7 +106,7 @@ impl<'session> CommandExecutor<'session> {
     /// 当创建index的时候,要是table上已经有数据了需要对这些数据创建索引 <br>
     /// 直接对数据store本体上手
     fn generateIndexDataForExistingTableData(&self, table: &Table, index: &Index) -> Result<()> {
-        let mut dbRawIteratorTable: DBRawIterator = meta::STORE.dataStore.raw_iterator_cf(&Session::getColumnFamily(table.id)?);
+        let mut dbRawIteratorTable: DBRawIterator = self.session.getDBRawIteratorWithoutSnapshot(&Session::getColumnFamily(table.id)?)?;
         dbRawIteratorTable.seek(meta::DATA_KEY_PATTERN);
 
         let indexColumnFamily = Session::getColumnFamily(index.id)?;

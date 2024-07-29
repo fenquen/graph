@@ -232,7 +232,6 @@ impl<T, S, A: Allocator> Lengthable for HashSet<T, S, A> {
 pub fn hasDup<T>(slice: &mut [T],
                  sorter: impl FnMut(&T, &T) -> Ordering,
                  isDup: fn(prev: &T, next: &T) -> bool) -> bool {
-
     slice.sort_by(sorter);
 
     for a in 0..slice.len() - 1 {

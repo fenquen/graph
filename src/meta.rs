@@ -40,6 +40,9 @@ lazy_static! {
 
     //pub static ref TABLE_NAME_INDEX_NAMES: RwLock<HashMap<String, Vec<String>>> = Default::default();
 }
+
+/// metaStore 使用 dbObejctId 为相应的key <br>
+/// dataStore 使用 dbObejctId对应的string当作columnFamily名字
 pub struct Store {
     pub metaStore: DB,
     pub dataStore: DB,
