@@ -20,7 +20,7 @@ impl<'session> CommandExecutor<'session> {
             return Ok(CommandExecResult::DdlResult);
         }
 
-        table.id = meta::DB_OBJECT_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
+        table.id = meta::nextDBObjectId();
 
         // 生成column family
         self.session.createColFamily(table.id)?;
@@ -73,8 +73,8 @@ impl<'session> CommandExecutor<'session> {
         }
 
         // 分配id
-        index.id = meta::DB_OBJECT_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
-        index.trashId = meta::DB_OBJECT_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
+        index.id = meta::nextDBObjectId();
+        index.trashId = meta::nextDBObjectId();
 
         let indexName = index.name.clone();
 
