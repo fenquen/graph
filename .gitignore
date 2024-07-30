@@ -14,8 +14,8 @@ Cargo.lock
 *.pdb
 
 .idea
-data
-meta
+graph_data
+graph_meta
 
 .DS_Store
 *.log

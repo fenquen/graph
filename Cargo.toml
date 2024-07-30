@@ -18,7 +18,7 @@ dashmap = "6.0.1"
 strum = "0.26"
 strum_macros = "0.26"
 tokio = { version = "1", features = ["full"] }
-bytes = { path = "byte160" }
+bytes = { path = "lib/byte160" }
 rocksdb = { version = "0.22.0", features = ["multi-threaded-cf"] }
 futures = { version = "0.3.30", features = ["default"] }
 tokio-tungstenite = "0.23.1"
@@ -26,7 +26,7 @@ futures-channel = "0.3.30"
 futures-util = "0.3.30"
 rayon = "1.10.0"
 bumpalo = { version = "3.16.0", features = ["allocator_api","allocator-api2"] }
-graph_independent = { path = "graph_independent" }
+graph_independent = { path = "lib/graph_independent" }
 hashbrown = { version = "0.14.5", features = ["nightly", "serde"] }
 #enum-ordinalize = "4.3.0"
 

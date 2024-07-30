@@ -34,9 +34,9 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             log4RsYamlPath: "log4rs.yaml".to_string(),
-            metaDir: "meta".to_string(),
+            metaDir: "graph_meta".to_string(),
             wsAddr: "127.0.0.1:9673".to_string(),
-            dataDir: "data".to_string(),
+            dataDir: "graph_data".to_string(),
             sessionMemotySize: Config::DEFAULT_SESSION_MEMORY_SIZE,
             txUndergoingMaxCount: AtomicUsize::new(Config::DEFAULT_TX_UNDERGOING_MAX_COUNT),
         }

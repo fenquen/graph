@@ -61,7 +61,7 @@ impl Expr {
         }
     }
 
-    /// 收集tableFilter上涉及到columnName的expr 把成果收集到dest对应的map
+    /// 收集tableFilter上涉及到columnName的expr 把成果收集到dest对应的map <br>
     /// 例如 ((a=1 or a=2) and (b>3 or b=1)) 会收集成为 “a”-> []
     pub fn collectIndexableColNameOpValue(&self,
                                           columnName_opValuesVec: &mut HashMap<String, Vec<(Op, Vec<GraphValue>)>>,
