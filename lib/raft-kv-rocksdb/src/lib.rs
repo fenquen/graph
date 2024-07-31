@@ -1,126 +1,129 @@
-#![allow(clippy::uninlined_format_args)]
-#![deny(unused_qualifications)]
+#![allow(clippy::uninlined_format_args, non_snake_case)]
+#![allow(unused_imports)]
 
 use std::fmt::Display;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
-use openraft::Config;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::task;
+use tokio::sync::RwLock;
+use std::collections::BTreeMap;
+use impls::network::RaftNetworkFactoryImpl;
+use impls::network::RpcEndpoint;
+use types::{NodeId, TideHttpServer};
+use crate::types::OpenRaftConfig;
 
-use crate::app::App;
-use crate::network::http;
-use crate::network::Network;
-use crate::store::new_storage;
-use crate::store::Request;
-use crate::store::Response;
+pub mod http_client;
+pub mod types;
+mod utils;
+mod impls;
+pub mod http_server;
 
-pub mod app;
-pub mod client;
-pub mod network;
-pub mod store;
+/// represent an application state.
+pub struct Application {
+    pub nodeId: NodeId,
+    pub httpAddr: String,
+    pub rpcAddr: String,
+    pub raft: openraft::Raft<RaftTypeConfigImpl>,
+    pub key_value: Arc<RwLock<BTreeMap<String, String>>>,
+    pub raftConfig: Arc<OpenRaftConfig>,
+}
 
-pub type NodeId = u64;
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum Request {
+    /// used to write data (key and value) to the raft database
+    Set {
+        key: String,
+        value: String,
+    },
+}
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+/**
+ * Here you will defined what type of answer you expect from reading the data of a node.
+ * In this example it will return a optional value from a given key in
+ * the `ExampleRequest.Set`.
+ *
+ * TODO: Should we explain how to create multiple `AppDataResponse`?
+ */
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Response {
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Node {
-    pub rpc_addr: String,
-    pub api_addr: String,
+    pub rpcAddr: String,
+    pub httpAddr: String,
 }
 
 impl Display for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Node {{ rpc_addr: {}, api_addr: {} }}", self.rpc_addr, self.api_addr)
+        write!(f, "Node {{ rpc_addr: {}, api_addr: {} }}", self.rpcAddr, self.httpAddr)
     }
 }
 
-pub type SnapshotData = Cursor<Vec<u8>>;
-
 openraft::declare_raft_types!(
-    pub TypeConfig:
+    pub RaftTypeConfigImpl:
         D = Request,
         R = Response,
         Node = Node,
 );
 
-pub mod types {
-    use openraft::error::Infallible;
-
-    use crate::Node;
-    use crate::NodeId;
-    use crate::TypeConfig;
-
-    pub type Entry = openraft::Entry<TypeConfig>;
-
-    pub type RaftError<E = Infallible> = openraft::error::RaftError<NodeId, E>;
-    pub type RPCError<E = Infallible> = openraft::error::RPCError<NodeId, Node, RaftError<E>>;
-
-    pub type ClientWriteError = openraft::error::ClientWriteError<NodeId, Node>;
-    pub type CheckIsLeaderError = openraft::error::CheckIsLeaderError<NodeId, Node>;
-    pub type ForwardToLeader = openraft::error::ForwardToLeader<NodeId, Node>;
-    pub type InitializeError = openraft::error::InitializeError<NodeId, Node>;
-
-    pub type ClientWriteResponse = openraft::raft::ClientWriteResponse<TypeConfig>;
-}
-
-
-type Server = tide::Server<Arc<App>>;
-
-pub async fn start_example_raft_node<P>(node_id: NodeId,
-                                        dir: P,
-                                        http_addr: String,
-                                        rpc_addr: String) -> std::io::Result<()>
-where
-    P: AsRef<Path>,
-{
-    // Create a configuration for the raft instance.
-    let config = Config {
+pub async fn startRaftNode(nodeId: NodeId,
+                           dirPath: impl AsRef<Path>,
+                           httpAddr: &str,
+                           rpcAddr: &str) -> std::io::Result<()> {
+    let openRaftConfig = OpenRaftConfig {
         heartbeat_interval: 250,
         election_timeout_min: 299,
         ..Default::default()
     };
 
-    let config = Arc::new(config.validate().unwrap());
+    let openRaftConfig = Arc::new(openRaftConfig.validate().unwrap());
 
-    let (log_store, state_machine_store) = new_storage(&dir).await;
+    let (raftStorage, raftStateMachine) = impls::newStorageAndStateMachine(&dirPath).await;
 
-    let kvs = state_machine_store.data.kvs.clone();
+    let kv = raftStateMachine.kv.clone();
 
     // Create the network layer that will connect and communicate the raft instances and
     // will be used in conjunction with the store created above.
-    let network = Network {};
+    let network = RaftNetworkFactoryImpl;
 
     // Create a local raft instance.
-    let raft = openraft::Raft::new(node_id, config.clone(), network, log_store, state_machine_store).await.unwrap();
+    let raft =
+        openraft::Raft::new(nodeId,
+                            openRaftConfig.clone(),
+                            network,
+                            raftStorage,
+                            raftStateMachine).await.unwrap();
 
-    let app = Arc::new(App {
-        id: node_id,
-        api_addr: http_addr.clone(),
-        rpc_addr: rpc_addr.clone(),
-        raft,
-        key_values: kvs,
-        config,
-    });
+    let app = Arc::new(
+        Application {
+            nodeId,
+            httpAddr: httpAddr.to_string(),
+            rpcAddr: rpcAddr.to_string(),
+            raft,
+            key_value: kv,
+            raftConfig: openRaftConfig,
+        });
 
-    let echo_service = Arc::new(network::raft::Raft::new(app.clone()));
-
-    let server = toy_rpc::Server::builder().register(echo_service).build();
-
-    let listener = TcpListener::bind(rpc_addr).await.unwrap();
+    // rpc use in communication among raft node
+    let rpcServer = toy_rpc::Server::builder().register(Arc::new(RpcEndpoint::new(app.clone()))).build();
+    let listener = TcpListener::bind(rpcAddr).await.unwrap();
     let handle = task::spawn(async move {
-        server.accept_websocket(listener).await.unwrap();
+        rpcServer.accept_websocket(listener).await.unwrap();
     });
 
-    // Create an application that will store all the instances created above, this will
-    // be later used on the actix-web services.
-    let mut app: Server = Server::with_state(app);
+    // http
+    let mut tideServer: TideHttpServer<Arc<Application>> = TideHttpServer::with_state(app);
+    http_server::rest(&mut tideServer);
+    tideServer.listen(httpAddr).await?;
 
-    http::rest(&mut app);
-
-    app.listen(http_addr.clone()).await?;
-    tracing::info!("App Server listening on: {}", http_addr);
+    tracing::info!("App Server listening on: {}", httpAddr);
     _ = handle.await;
+
     Ok(())
 }
