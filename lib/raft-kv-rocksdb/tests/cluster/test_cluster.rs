@@ -16,14 +16,14 @@ use tokio::runtime::Handle;
 use tracing_subscriber::EnvFilter;
 use raft_kv_rocksdb::types::NodeId;
 
-fn logPanic(panic: &PanicHookInfo) {
+fn logPanic(panicHookInfo: &PanicHookInfo) {
     let backtrace = { format!("{:?}", Backtrace::force_capture()) };
 
-    eprintln!("{}", panic);
+    eprintln!("{}", panicHookInfo);
 
-    if let Some(location) = panic.location() {
+    if let Some(location) = panicHookInfo.location() {
         tracing::error!(
-            message = %panic,
+            message = %panicHookInfo,
             backtrace = %backtrace,
             panic.file = location.file(),
             panic.line = location.line(),
@@ -31,7 +31,7 @@ fn logPanic(panic: &PanicHookInfo) {
         );
         eprintln!("{}:{}:{}", location.file(), location.line(), location.column());
     } else {
-        tracing::error!(message = %panic, backtrace = %backtrace);
+        tracing::error!(message = %panicHookInfo, backtrace = %backtrace);
     }
 
     eprintln!("{}", backtrace);
