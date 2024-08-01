@@ -109,7 +109,7 @@ impl RaftLogReaderStorageImpl {
         self.db.cf_handle("store").unwrap()
     }
 
-    fn getLogsCF(&self) -> ColumnFamily{
+    fn getLogsCF(&self) -> ColumnFamily {
         self.db.cf_handle("logs").unwrap()
     }
 
@@ -197,6 +197,7 @@ impl RaftLogStorage<RaftTypeConfigImpl> for RaftLogReaderStorageImpl {
     {
         for entry in entries {
             let id = utils::id2ByteVec(entry.log_id.index);
+            println!("json: {}", serde_json::to_string(&entry).unwrap());
             self.db.put_cf(&self.getLogsCF(), id, serde_json::to_vec(&entry)
                 .map_err(|e| StorageIOError::write_logs(&e))?)
                 .map_err(|e| StorageIOError::write_logs(&e))?;

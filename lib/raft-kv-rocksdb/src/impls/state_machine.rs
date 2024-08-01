@@ -35,7 +35,7 @@ pub struct RaftStateMachineImpl {
     /// In practice, using a timestamp in micro-second would be good enough.
     snapshotIndex: u64,
 
-    ///  stores snapshot in db.
+    /// stores snapshot in db.
     db: Arc<DB>,
 }
 
@@ -155,7 +155,6 @@ impl RaftStateMachine<RaftTypeConfigImpl> for RaftStateMachineImpl {
                 EntryPayload::Normal(request) => match request {
                     Request::Set { key, value } => {
                         resp_value = Some(value.clone());
-
                         self.kv.write().await.insert(key, value);
                     }
                 },

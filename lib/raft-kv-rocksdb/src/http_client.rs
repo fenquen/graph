@@ -155,10 +155,10 @@ impl HttpClient {
 
         let resp =
             if let Some(r) = req {
-                println!(">>> client send request to {}: {}", leaderHttpUrl, serde_json::to_string_pretty(&r).unwrap());
+                println!("client send request to {}: {}", leaderHttpUrl, serde_json::to_string_pretty(&r).unwrap());
                 self.httpClient.post(leaderHttpUrl.clone()).json(r)
             } else {
-                println!(">>> client send request to {}", leaderHttpUrl, );
+                println!("client send request to {}", leaderHttpUrl, );
                 self.httpClient.get(leaderHttpUrl.clone())
             }.send().await.map_err(|e| {
                 if e.is_connect() {
@@ -170,7 +170,7 @@ impl HttpClient {
             })?;
 
         let res: Result<Resp, Err> = resp.json().await.map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
-        println!("<<< client recv reply from {}: {}", leaderHttpUrl, serde_json::to_string_pretty(&res).unwrap());
+        println!("client recv reply from {}: {}", leaderHttpUrl, serde_json::to_string_pretty(&res).unwrap());
 
         res.map_err(|e| RPCError::RemoteError(RemoteError::new(leaderNodeId, e)))
     }

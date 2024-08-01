@@ -27,9 +27,9 @@ pub fn rest(tideHttpServer: &mut TideHttpServer<Arc<Application>>) {
     cluster.at("/metrics").get(metrics);
 }
 
-async fn write(mut request: TideHttpRequest<Arc<Application>>) -> tide::Result {
-    let body = request.body_json().await?;
-    let res = request.state().raft.client_write(body).await;
+async fn write(mut httpRequest: TideHttpRequest<Arc<Application>>) -> tide::Result {
+    let request = httpRequest.body_json().await?;
+    let res = httpRequest.state().raft.client_write(request).await;
     Ok(Response::builder(StatusCode::Ok).body(Body::from_json(&res)?).build())
 }
 

@@ -19,3 +19,5 @@ graph_meta
 
 .DS_Store
 *.log
+
+lib/raft-kv-rocksdb/node*
