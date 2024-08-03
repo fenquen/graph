@@ -60,5 +60,3 @@ pub type SessionHashMap<'a, K, V> = HashMap<K, V, DefaultHashBuilder, &'a Bump>;
 pub type SessionHashSet<'a, T> = HashSet<T, DefaultHashBuilder, &'a Bump>;
 
 pub type ElementType = u8;
-
-pub type RaftNodeId = u64;
