@@ -56,6 +56,12 @@ impl RaftStateMachineImpl {
         Ok(raftStateMachineImpl)
     }
 
+    fn readSnapshot(&self) -> StorageResult<Option<StoredSnapshot>> {
+        Ok(self.db.get_cf(&self.getStoreCF(), b"snapshot")
+            .map_err(|e| StorageError::IO { source: StorageIOError::read(&e) })?
+            .and_then(|v| serde_json::from_slice(&v).ok()))
+    }
+
     fn saveSnapshot(&self, storedSnapshot: StoredSnapshot) -> StorageResult<()> {
         self.db.put_cf(&self.getStoreCF(), b"snapshot", serde_json::to_vec(&storedSnapshot).unwrap().as_slice())
             .map_err(|e| StorageError::IO { source: StorageIOError::write_snapshot(Some(storedSnapshot.snapshotMeta.signature()), &e) })?;
@@ -77,12 +83,6 @@ impl RaftStateMachineImpl {
         *x = kv;
 
         Ok(())
-    }
-
-    fn readSnapshot(&self) -> StorageResult<Option<StoredSnapshot>> {
-        Ok(self.db.get_cf(&self.getStoreCF(), b"snapshot")
-            .map_err(|e| StorageError::IO { source: StorageIOError::read(&e) })?
-            .and_then(|v| serde_json::from_slice(&v).ok()))
     }
 
     fn getStoreCF(&self) -> ColumnFamily {

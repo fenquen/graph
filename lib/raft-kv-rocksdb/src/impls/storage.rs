@@ -123,9 +123,9 @@ impl RaftLogReader<RaftTypeConfigImpl> for RaftLogReaderStorageImpl {
     /// 和columnFamily logs交互,读取相应区间的
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + OptionalSend>(&mut self, range: RB) -> StorageResult<Vec<Entry<RaftTypeConfigImpl>>> {
         let start = match range.start_bound() {
-            std::ops::Bound::Included(x) => utils::id2ByteVec(*x),
-            std::ops::Bound::Excluded(x) => utils::id2ByteVec(*x + 1),
-            std::ops::Bound::Unbounded => utils::id2ByteVec(0),
+            std::ops::Bound::Included(x) => id2ByteVec(*x),
+            std::ops::Bound::Excluded(x) => id2ByteVec(*x + 1),
+            std::ops::Bound::Unbounded => id2ByteVec(0),
         };
 
         self.db.iterator_cf(&self.getLogsCF(), IteratorMode::From(&start, Direction::Forward)).map(
@@ -134,7 +134,7 @@ impl RaftLogReader<RaftTypeConfigImpl> for RaftLogReaderStorageImpl {
 
                 let entry: StorageResult<Entry<_>> =
                     serde_json::from_slice(&val).map_err(|e| StorageError::IO { source: StorageIOError::read_logs(&e) });
-                let id = utils::byteSlice2Id(&id);
+                let id = byteSlice2Id(&id);
 
                 assert_eq!(Ok(id), entry.as_ref().map(|e| e.log_id.index));
 
@@ -196,7 +196,7 @@ impl RaftLogStorage<RaftTypeConfigImpl> for RaftLogReaderStorageImpl {
         I::IntoIter: Send,
     {
         for entry in entries {
-            let id = utils::id2ByteVec(entry.log_id.index);
+            let id = id2ByteVec(entry.log_id.index);
             println!("json: {}", serde_json::to_string(&entry).unwrap());
             self.db.put_cf(&self.getLogsCF(), id, serde_json::to_vec(&entry)
                 .map_err(|e| StorageIOError::write_logs(&e))?)
@@ -213,8 +213,8 @@ impl RaftLogStorage<RaftTypeConfigImpl> for RaftLogReaderStorageImpl {
     async fn truncate(&mut self, logIdFromInclusive: LogId<NodeId>) -> StorageResult<()> {
         tracing::debug!("delete_log: [{:?}, +oo)", logIdFromInclusive);
 
-        let from = utils::id2ByteVec(logIdFromInclusive.index);
-        let to = utils::id2ByteVec(0xff_ff_ff_ff_ff_ff_ff_ff);
+        let from = id2ByteVec(logIdFromInclusive.index);
+        let to = id2ByteVec(0xff_ff_ff_ff_ff_ff_ff_ff);
         self.db.delete_range_cf(&self.getLogsCF(), &from, &to).map_err(|e| StorageIOError::write_logs(&e).into())
     }
 
@@ -225,9 +225,17 @@ impl RaftLogStorage<RaftTypeConfigImpl> for RaftLogReaderStorageImpl {
 
         self.saveLastPurgedLogId(lastPurgedLogId)?;
 
-        let from = utils::id2ByteVec(0);
-        let to = utils::id2ByteVec(lastPurgedLogId.index + 1);
+        let from = id2ByteVec(0);
+        let to = id2ByteVec(lastPurgedLogId.index + 1);
         self.db.delete_range_cf(&self.getLogsCF(), &from, &to).map_err(|e| StorageIOError::write_logs(&e).into())
     }
 }
 
+pub fn id2ByteVec(id: u64) -> Vec<u8> {
+    id.to_be_bytes().to_vec()
+}
+
+pub fn byteSlice2Id(byteSlice: &[u8]) -> u64 {
+    let (slice, _) = byteSlice.split_at(size_of::<u64>());
+    u64::from_be_bytes(slice.try_into().unwrap())
+}

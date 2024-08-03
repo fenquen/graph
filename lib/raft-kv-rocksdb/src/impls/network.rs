@@ -100,25 +100,6 @@ impl Display for ErrWrap {
 
 impl std::error::Error for ErrWrap {}
 
-fn to_error<E: std::error::Error + 'static + Clone>(e: toy_rpc::Error, target: NodeId) -> RPCError<NodeId, Node, E> {
-    match e {
-        toy_rpc::Error::IoError(e) => RPCError::Network(NetworkError::new(&e)),
-        toy_rpc::Error::ParseError(e) => RPCError::Network(NetworkError::new(&ErrWrap(e))),
-        toy_rpc::Error::Internal(e) => {
-            let any: &dyn Any = &e;
-            let error: &E = any.downcast_ref().unwrap();
-            RPCError::RemoteError(RemoteError::new(target, error.clone()))
-        }
-        e @ (toy_rpc::Error::InvalidArgument
-        | toy_rpc::Error::ServiceNotFound
-        | toy_rpc::Error::MethodNotFound
-        | toy_rpc::Error::ExecutionError(_)
-        | toy_rpc::Error::Canceled(_)
-        | toy_rpc::Error::Timeout(_)
-        | toy_rpc::Error::MaxRetriesReached(_)) => RPCError::Network(NetworkError::new(&e)),
-    }
-}
-
 #[allow(clippy::blocks_in_conditions)]
 impl RaftNetwork<RaftTypeConfigImpl> for RaftNetworkImpl {
     #[tracing::instrument(level = "debug", skip_all, err(Debug))]
@@ -143,5 +124,24 @@ impl RaftNetwork<RaftTypeConfigImpl> for RaftNetworkImpl {
                   _option: RPCOption) -> Result<VoteResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
         tracing::debug!(req = debug(&voteReuest), "vote");
         self.getRpcClient().await?.rpc_endpoint().vote(voteReuest).await.map_err(|e| to_error(e, self.targetNodeId))
+    }
+}
+
+fn to_error<E: std::error::Error + 'static + Clone>(e: toy_rpc::Error, target: NodeId) -> RPCError<NodeId, Node, E> {
+    match e {
+        toy_rpc::Error::IoError(e) => RPCError::Network(NetworkError::new(&e)),
+        toy_rpc::Error::ParseError(e) => RPCError::Network(NetworkError::new(&ErrWrap(e))),
+        toy_rpc::Error::Internal(e) => {
+            let any: &dyn Any = &e;
+            let error: &E = any.downcast_ref().unwrap();
+            RPCError::RemoteError(RemoteError::new(target, error.clone()))
+        }
+        e @ (toy_rpc::Error::InvalidArgument
+        | toy_rpc::Error::ServiceNotFound
+        | toy_rpc::Error::MethodNotFound
+        | toy_rpc::Error::ExecutionError(_)
+        | toy_rpc::Error::Canceled(_)
+        | toy_rpc::Error::Timeout(_)
+        | toy_rpc::Error::MaxRetriesReached(_)) => RPCError::Network(NetworkError::new(&e)),
     }
 }

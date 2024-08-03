@@ -18,7 +18,6 @@ use crate::types::OpenRaftConfig;
 
 pub mod http_client;
 pub mod types;
-mod utils;
 mod impls;
 pub mod http_server;
 
@@ -43,8 +42,7 @@ pub enum Request {
 
 /**
  * Here you will defined what type of answer you expect from reading the data of a node.
- * In this example it will return a optional value from a given key in
- * the `ExampleRequest.Set`.
+ * In this example it will return a optional value from a given key in the `ExampleRequest.Set`
  *
  * TODO: Should we explain how to create multiple `AppDataResponse`?
  */

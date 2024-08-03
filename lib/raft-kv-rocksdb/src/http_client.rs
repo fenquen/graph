@@ -116,7 +116,6 @@ impl HttpClient {
                 if let Some(ForwardToLeader {
                                 leader_id: Some(leaderNodeId),
                                 leader_node: Some(leaderNode),
-                                ..
                             }) = raft_err.forward_to_leader() {
 
                     // 更新最新的leader信息
@@ -150,7 +149,7 @@ impl HttpClient {
     {
         let (leaderNodeId, leaderHttpUrl) = {
             let leader = self.leader.lock().unwrap();
-            (leader.0, format!("http://{}/{}",  &leader.1, serveletPath))
+            (leader.0, format!("http://{}/{}", &leader.1, serveletPath))
         };
 
         let resp =
@@ -172,6 +171,6 @@ impl HttpClient {
         let res: Result<Resp, Err> = resp.json().await.map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         println!("client recv reply from {}: {}", leaderHttpUrl, serde_json::to_string_pretty(&res).unwrap());
 
-        res.map_err(|e| RPCError::RemoteError(RemoteError::new(leaderNodeId, e)))
+        res
     }
 }
