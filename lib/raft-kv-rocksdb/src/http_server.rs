@@ -27,6 +27,7 @@ pub fn rest(tideHttpServer: &mut TideHttpServer<Arc<Application>>) {
     cluster.at("/metrics").get(metrics);
 }
 
+/// 需要是leader
 async fn write(mut httpRequest: TideHttpRequest<Arc<Application>>) -> tide::Result {
     let request = httpRequest.body_json().await?;
     let res = httpRequest.state().raft.client_write(request).await;
@@ -57,11 +58,9 @@ async fn consistent_read(mut request: TideHttpRequest<Arc<Application>>) -> tide
     }
 }
 
-/// Add a node as **Learner**.
-///
-/// A Learner receives log replication from the leader but does not vote.
-/// This should be done before adding a node as a member into the cluster
-/// (by calling `change-membership`)
+// --------------------------------------------------------------------
+
+/// 需要是leader
 async fn add_learner(mut req: TideHttpRequest<Arc<Application>>) -> tide::Result {
     let (node_id, api_addr, rpc_addr): (NodeId, String, String) = req.body_json().await?;
 
@@ -74,14 +73,14 @@ async fn add_learner(mut req: TideHttpRequest<Arc<Application>>) -> tide::Result
     Ok(Response::builder(StatusCode::Ok).body(Body::from_json(&res)?).build())
 }
 
-/// Changes specified learners to members, or remove members.
+/// 需要是leader
 async fn change_membership(mut req: TideHttpRequest<Arc<Application>>) -> tide::Result {
     let body: BTreeSet<NodeId> = req.body_json().await?;
     let res = req.state().raft.change_membership(body, false).await;
     Ok(Response::builder(StatusCode::Ok).body(Body::from_json(&res)?).build())
 }
 
-/// Initialize a single-node cluster.
+/// initialize a single-node cluster.
 async fn init(tideHttpRequest: TideHttpRequest<Arc<Application>>) -> tide::Result {
     let mut nodes = BTreeMap::new();
 

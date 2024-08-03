@@ -137,6 +137,7 @@ impl RaftStateMachine<RaftTypeConfigImpl> for RaftStateMachineImpl {
         Ok((self.lastAppliedLogId, self.lastMembership.clone()))
     }
 
+    /// logReader的try_get_log_entries得到多个log 然后作为该函数原料
     async fn apply<I>(&mut self, entries: I) -> StorageResult<Vec<Response>>
     where
         I: IntoIterator<Item=types::Entry> + OptionalSend,
@@ -145,12 +146,12 @@ impl RaftStateMachine<RaftTypeConfigImpl> for RaftStateMachineImpl {
         let entries = entries.into_iter();
         let mut replies = Vec::with_capacity(entries.size_hint().0);
 
-        for ent in entries {
-            self.lastAppliedLogId = Some(ent.log_id);
+        for entry in entries {
+            self.lastAppliedLogId = Some(entry.log_id);
 
             let mut resp_value = None;
 
-            match ent.payload {
+            match entry.payload {
                 EntryPayload::Blank => {}
                 EntryPayload::Normal(request) => match request {
                     Request::Set { key, value } => {
@@ -159,7 +160,7 @@ impl RaftStateMachine<RaftTypeConfigImpl> for RaftStateMachineImpl {
                     }
                 },
                 EntryPayload::Membership(mem) => {
-                    self.lastMembership = StoredMembership::new(Some(ent.log_id), mem);
+                    self.lastMembership = StoredMembership::new(Some(entry.log_id), mem);
                 }
             }
 

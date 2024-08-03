@@ -107,9 +107,6 @@ async fn test_cluster() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n init single node cluster");
     httpClient1.init().await?;
 
-    println!("\n metrics after init");
-    httpClient1.metrics().await?;
-
     // 2 Add node 2 and 3 to the cluster as `Learner`, to let them start to receive log replication from the leader.
     println!("\n add learner 2");
     httpClient1.addLeaner((NODE_ID_2, HTTP_ADDR_2.to_string(), RPC_ADDR_2.to_string())).await?;
@@ -120,8 +117,7 @@ async fn test_cluster() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n metrics after add-learner");
     let x = httpClient1.metrics().await?;
     assert_eq!(&vec![btreeset![1]], x.membership_config.membership().get_joint_config());
-    let clusterNodes: BTreeMap<NodeId, Node> =
-        x.membership_config.nodes().map(|(nodeId, node)| (*nodeId, node.clone())).collect();
+    let clusterNodes: BTreeMap<NodeId, Node> = x.membership_config.nodes().map(|(nodeId, node)| (*nodeId, node.clone())).collect();
     assert_eq!(
         btreemap! {
             1 => Node{rpcAddr: RPC_ADDR_1.to_string(), httpAddr: HTTP_ADDR_1.to_string()},
