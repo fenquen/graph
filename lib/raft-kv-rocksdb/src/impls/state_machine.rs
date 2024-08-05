@@ -71,7 +71,7 @@ impl RaftStateMachineImpl {
         Ok(())
     }
 
-    async fn applySnapshot(&mut self, storedSnapshot: StoredSnapshot) -> Result<(), StorageError<NodeId>> {
+    async fn applySnapshot(&mut self, storedSnapshot: StoredSnapshot) -> StorageResult<()> {
         let kv: BTreeMap<String, String> =
             serde_json::from_slice(&storedSnapshot.data)
                 .map_err(|e| StorageIOError::read_snapshot(Some(storedSnapshot.snapshotMeta.signature()), &e))?;
@@ -166,6 +166,7 @@ impl RaftStateMachine<RaftTypeConfigImpl> for RaftStateMachineImpl {
 
             replies.push(Response { value: resp_value });
         }
+
         Ok(replies)
     }
 

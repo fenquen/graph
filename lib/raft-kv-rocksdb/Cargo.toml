@@ -10,21 +10,21 @@ authors = [
 repository = "https://github.com/datafuselabs/openraft"
 
 [dependencies]
-openraft = { version = "0.9.13", features = ["serde", "storage-v2"] }
+openraft = { version = "0.9.13", features = ["bt", "serde", "storage-v2"] }
 tokio = { version = "1", features = ["full"] }
 byteorder = "1.4.3"
 reqwest = { version = "0.11.9", features = ["json"] }
-rocksdb = {version =  "0.22.0",features = ["multi-threaded-cf"] }
+rocksdb = { version = "0.22.0", features = ["multi-threaded-cf"] }
 serde = { version = "1.0.204", features = ["serde_derive", "derive"] }
 serde_json = "1.0.121"
 tide = { version = "0.16" }
 # for toy-rpc, use `serde_json` instead of the default `serde_bincode`:
 # bincode which enabled by default by toy-rpc, does not support `#[serde(flatten)]`: https://docs.rs/bincode/2.0.0-alpha.1/bincode/serde/index.html#known-issues
-toy-rpc = { version = "0.8.6", features = [
-  "ws_tokio",
-  "server",
-  "client",
-  "tokio_runtime",
+toy-rpc = { version = "0.10.0", features = [
+    "ws_tokio",
+    "server",
+    "client",
+    "tokio_runtime",
 ] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.0", features = ["env-filter"] }

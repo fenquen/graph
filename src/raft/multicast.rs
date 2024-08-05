@@ -46,8 +46,9 @@ pub fn init() -> Result<(JoinHandle<Result<()>>, JoinHandle<Result<()>>)> {
                 let (len, _) = udpSocket.recv_from(&mut buf).unwrap();
 
                 let raftNode = serde_json::from_slice::<RaftNode>(&buf[..len])?;
-                raft::ONLINE_RAFT_ID_RAFT_NODE.write().unwrap().insert(raftNode.id,raftNode);
-                log::info!("receive: {}", String::from_utf8_lossy(&buf[..len]).deref());
+                raft::ONLINE_RAFT_ID_RAFT_NODE.write().unwrap().insert(raftNode.id, raftNode);
+
+                // log::info!("receive: {}", String::from_utf8_lossy(&buf[..len]).deref());
 
                 thread::sleep(Duration::from_millis(1000));
             }

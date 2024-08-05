@@ -1,5 +1,5 @@
 use std::alloc::Global;
-use std::collections::{BTreeMap};
+use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::Arc;
 use bumpalo::Bump;
@@ -8,8 +8,7 @@ use hashbrown::{HashMap, HashSet};
 use rocksdb::{BoundColumnFamily, DBIteratorWithThreadMode, DBRawIteratorWithThreadMode};
 use rocksdb::{DBWithThreadMode, MultiThreaded, SnapshotWithThreadMode};
 use serde_json::Value;
-use graph_independent::AllocatorExt;
-use crate::executor::{CommandExecutor, IterationCmd};
+use crate::executor::IterationCmd;
 use crate::graph_value::GraphValue;
 use anyhow::Result;
 
@@ -60,5 +59,3 @@ pub type SessionHashMap<'a, K, V> = HashMap<K, V, DefaultHashBuilder, &'a Bump>;
 pub type SessionHashSet<'a, T> = HashSet<T, DefaultHashBuilder, &'a Bump>;
 
 pub type ElementType = u8;
-
-pub type RaftNodeId = u64;

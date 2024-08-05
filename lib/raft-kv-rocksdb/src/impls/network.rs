@@ -23,15 +23,15 @@ use std::sync::Arc;
 use crate::{Application, Node};
 use crate::NodeId;
 use crate::RaftTypeConfigImpl;
-use crate::types::ToyRpcClient;
+use crate::types::{OpenRaftRPCError, ToyRpcClient};
 
-/// Raft protocol service.
-pub struct RpcEndpoint {
+/// 用来应对其它节点的rpc请求
+pub struct RaftRpcEndpoint {
     application: Arc<Application>,
 }
 
 #[export_impl]
-impl RpcEndpoint {
+impl RaftRpcEndpoint {
     pub fn new(application: Arc<Application>) -> Self {
         Self { application }
     }
@@ -105,43 +105,37 @@ impl RaftNetwork<RaftTypeConfigImpl> for RaftNetworkImpl {
     #[tracing::instrument(level = "debug", skip_all, err(Debug))]
     async fn append_entries(&mut self,
                             appendEntriesRequest: AppendEntriesRequest<RaftTypeConfigImpl>,
-                            _option: RPCOption) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
+                            _option: RPCOption) -> Result<AppendEntriesResponse<NodeId>, OpenRaftRPCError<RaftError<NodeId>>> {
         tracing::debug!(req = debug(&appendEntriesRequest), "append_entries");
-        self.getRpcClient().await?.rpc_endpoint().append(appendEntriesRequest).await.map_err(|e| to_error(e, self.targetNodeId))
+        self.getRpcClient().await?.rpc_endpoint().append(appendEntriesRequest).await.map_err(|e| toyRpcError2OpenRaftError(e, self.targetNodeId))
     }
 
     #[tracing::instrument(level = "debug", skip_all, err(Debug))]
     async fn install_snapshot(&mut self,
                               installSnapshotRequest: InstallSnapshotRequest<RaftTypeConfigImpl>,
-                              _option: RPCOption) -> Result<InstallSnapshotResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>> {
+                              _option: RPCOption) -> Result<InstallSnapshotResponse<NodeId>, OpenRaftRPCError<RaftError<NodeId, InstallSnapshotError>>> {
         tracing::debug!(req = debug(&installSnapshotRequest), "install_snapshot");
-        self.getRpcClient().await?.rpc_endpoint().installSnapshot(installSnapshotRequest).await.map_err(|e| to_error(e, self.targetNodeId))
+        self.getRpcClient().await?.rpc_endpoint().installSnapshot(installSnapshotRequest).await.map_err(|e| toyRpcError2OpenRaftError(e, self.targetNodeId))
     }
 
     #[tracing::instrument(level = "debug", skip_all, err(Debug))]
     async fn vote(&mut self,
                   voteReuest: VoteRequest<NodeId>,
-                  _option: RPCOption) -> Result<VoteResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
+                  _option: RPCOption) -> Result<VoteResponse<NodeId>, OpenRaftRPCError<RaftError<NodeId>>> {
         tracing::debug!(req = debug(&voteReuest), "vote");
-        self.getRpcClient().await?.rpc_endpoint().vote(voteReuest).await.map_err(|e| to_error(e, self.targetNodeId))
+        self.getRpcClient().await?.rpc_endpoint().vote(voteReuest).await.map_err(|e| toyRpcError2OpenRaftError(e, self.targetNodeId))
     }
 }
 
-fn to_error<E: std::error::Error + 'static + Clone>(e: toy_rpc::Error, target: NodeId) -> RPCError<NodeId, Node, E> {
+fn toyRpcError2OpenRaftError<E: std::error::Error + 'static + Clone>(e: toy_rpc::Error, target: NodeId) -> OpenRaftRPCError<E> {
     match e {
-        toy_rpc::Error::IoError(e) => RPCError::Network(NetworkError::new(&e)),
-        toy_rpc::Error::ParseError(e) => RPCError::Network(NetworkError::new(&ErrWrap(e))),
+        toy_rpc::Error::IoError(e) => OpenRaftRPCError::Network(NetworkError::new(&e)),
+        toy_rpc::Error::ParseError(e) => OpenRaftRPCError::Network(NetworkError::new(&ErrWrap(e))),
         toy_rpc::Error::Internal(e) => {
             let any: &dyn Any = &e;
             let error: &E = any.downcast_ref().unwrap();
-            RPCError::RemoteError(RemoteError::new(target, error.clone()))
+            OpenRaftRPCError::RemoteError(RemoteError::new(target, error.clone()))
         }
-        e @ (toy_rpc::Error::InvalidArgument
-        | toy_rpc::Error::ServiceNotFound
-        | toy_rpc::Error::MethodNotFound
-        | toy_rpc::Error::ExecutionError(_)
-        | toy_rpc::Error::Canceled(_)
-        | toy_rpc::Error::Timeout(_)
-        | toy_rpc::Error::MaxRetriesReached(_)) => RPCError::Network(NetworkError::new(&e)),
+        _ => OpenRaftRPCError::Network(NetworkError::new(&e)),
     }
 }

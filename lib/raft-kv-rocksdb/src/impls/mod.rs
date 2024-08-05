@@ -13,10 +13,7 @@ pub(crate) async fn newStorageAndStateMachine(dirPath: impl AsRef<Path>) -> (Raf
     options.create_missing_column_families(true);
     options.create_if_missing(true);
 
-    let store = ColumnFamilyDescriptor::new("store", Options::default());
-    let logs = ColumnFamilyDescriptor::new("logs", Options::default());
-
-    let db = Arc::new(DB::open_cf_descriptors(&options, dirPath, vec![store, logs]).unwrap());
+    let db = Arc::new(DB::open_cf(&options, dirPath, vec!["store", "logs"]).unwrap());
 
     let raftStorage = RaftLogReaderStorageImpl::new(db.clone());
     let raftStateMachine = RaftStateMachineImpl::new(db).await.unwrap();

@@ -196,7 +196,7 @@ impl Session {
         }
     }
 
-    // todo columnFamily的名字要使用id对应的string
+    // todo columnFamily的名字要使用id对应的string 完成
     pub fn getColumnFamily(dbobjectId: DBObjectId) -> Result<ColumnFamily<'static>> {
         let columnFamilyName = dbobjectId.to_string();
         match meta::STORE.dataStore.cf_handle(columnFamilyName.as_str()) {

@@ -8,7 +8,7 @@ use clap::Parser;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use crate::command_line::CommandLine;
-use crate::types::RaftNodeId;
+use crate::raft::GraphRaftNodeId;
 
 lazy_static! {
     pub static ref CONFIG :Config = load();
@@ -31,7 +31,7 @@ pub struct Config {
 
 #[derive(Deserialize, Debug, Serialize)]
 pub struct RaftConfig {
-    pub nodeId: RaftNodeId,
+    pub nodeId: GraphRaftNodeId,
 
     pub httpAddr: String,
     pub rpcAddr: String,

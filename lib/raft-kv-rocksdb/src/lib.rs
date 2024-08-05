@@ -12,7 +12,7 @@ use tokio::task;
 use tokio::sync::RwLock;
 use std::collections::BTreeMap;
 use impls::network::RaftNetworkFactoryImpl;
-use impls::network::RpcEndpoint;
+use impls::network::RaftRpcEndpoint;
 use types::{NodeId, TideHttpServer};
 use crate::types::OpenRaftConfig;
 
@@ -76,7 +76,7 @@ pub async fn startRaftNode(nodeId: NodeId,
                            rpcAddr: &str) -> std::io::Result<()> {
     let openRaftConfig = OpenRaftConfig {
         heartbeat_interval: 250,
-        election_timeout_min: 299,
+        election_timeout_min: 200,
         ..Default::default()
     };
 
@@ -109,7 +109,7 @@ pub async fn startRaftNode(nodeId: NodeId,
         });
 
     // rpc use in communication among raft node
-    let rpcServer = toy_rpc::Server::builder().register(Arc::new(RpcEndpoint::new(app.clone()))).build();
+    let rpcServer = toy_rpc::Server::builder().register(Arc::new(RaftRpcEndpoint::new(app.clone()))).build();
     let listener = TcpListener::bind(rpcAddr).await.unwrap();
     let handle = task::spawn(async move {
         rpcServer.accept_websocket(listener).await.unwrap();

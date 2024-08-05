@@ -37,7 +37,6 @@ use crate::NodeId;
 use crate::RaftTypeConfigImpl;
 use crate::impls::state_machine::RaftStateMachineImpl;
 use crate::types::{ColumnFamily, StorageResult};
-use crate::utils;
 
 #[derive(Debug, Clone)]
 pub struct RaftLogReaderStorageImpl {
@@ -46,10 +45,14 @@ pub struct RaftLogReaderStorageImpl {
 
 impl RaftLogReaderStorageImpl {
     const KEY_LAST_PURGED_LOG_ID: [u8; 18] = *b"last_purged_log_id";
+    const KEY_COMMTTED: [u8; 9] = *b"committed";
+    const KEY_VOTE: [u8; 4] = *b"vote";
 
     pub fn new(db: Arc<DB>) -> Self {
         Self { db }
     }
+
+    //---------------------------------------------------------------------------------
 
     /// 读取 store的last_purged_log_id
     fn readLastPurgedLogId(&self) -> StorageResult<Option<LogId<u64>>> {
@@ -70,34 +73,38 @@ impl RaftLogReaderStorageImpl {
         Ok(())
     }
 
+    //---------------------------------------------------------------------------------
+
     /// 读取 store的committed
-    fn readCommitted(&self) -> StorageResult<Option<LogId<NodeId>>> {
-        Ok(self.db.get_cf(&self.getStoreCF(), b"committed")
+    fn readLastCommittedLogId(&self) -> StorageResult<Option<LogId<NodeId>>> {
+        Ok(self.db.get_cf(&self.getStoreCF(), Self::KEY_COMMTTED)
             .map_err(|e| StorageError::IO { source: StorageIOError::read(&e) })?
             .and_then(|v| serde_json::from_slice(&v).ok()))
     }
 
     /// 写入 store的committed
-    fn saveCommitted(&self, committed: &Option<LogId<NodeId>>) -> Result<(), StorageIOError<NodeId>> {
+    fn saveLastCommittedLogId(&self, committed: &Option<LogId<NodeId>>) -> StorageResult<()> {
         let value = serde_json::to_vec(committed).unwrap();
 
-        self.db.put_cf(&self.getStoreCF(), b"committed", value).map_err(|e| StorageIOError::write(&e))?;
+        self.db.put_cf(&self.getStoreCF(), Self::KEY_COMMTTED, value).map_err(|e| StorageIOError::write(&e))?;
 
         self.flush(ErrorSubject::Store, ErrorVerb::Write)?;
 
         Ok(())
     }
 
+    //---------------------------------------------------------------------------------
+
     /// 读取 store的vote
     fn readVote(&self) -> StorageResult<Option<Vote<NodeId>>> {
-        Ok(self.db.get_cf(&self.getStoreCF(), b"vote")
-            .map_err(|e| StorageError::IO { source: StorageIOError::write_vote(&e) })?
+        Ok(self.db.get_cf(&self.getStoreCF(), Self::KEY_VOTE)
+            .map_err(|e| StorageError::IO { source: StorageIOError::read_vote(&e) })?
             .and_then(|v| serde_json::from_slice(&v).ok()))
     }
 
     /// 写入 store的vote
     fn saveVote(&self, vote: &Vote<NodeId>) -> StorageResult<()> {
-        self.db.put_cf(&self.getStoreCF(), b"vote", serde_json::to_vec(vote).unwrap())
+        self.db.put_cf(&self.getStoreCF(), Self::KEY_VOTE, serde_json::to_vec(vote).unwrap())
             .map_err(|e| StorageError::IO { source: StorageIOError::write_vote(&e) })?;
 
         self.flush(ErrorSubject::Vote, ErrorVerb::Write)?;
@@ -121,7 +128,10 @@ impl RaftLogReaderStorageImpl {
 
 impl RaftLogReader<RaftTypeConfigImpl> for RaftLogReaderStorageImpl {
     /// 和columnFamily logs交互,读取相应区间的
-    async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + OptionalSend>(&mut self, range: RB) -> StorageResult<Vec<Entry<RaftTypeConfigImpl>>> {
+    async fn try_get_log_entries<RB>(&mut self, range: RB) -> StorageResult<Vec<Entry<RaftTypeConfigImpl>>>
+    where
+        RB: RangeBounds<u64> + Clone + Debug + OptionalSend,
+    {
         let start = match range.start_bound() {
             std::ops::Bound::Included(x) => id2ByteVec(*x),
             std::ops::Bound::Excluded(x) => id2ByteVec(*x + 1),
@@ -132,11 +142,12 @@ impl RaftLogReader<RaftTypeConfigImpl> for RaftLogReaderStorageImpl {
             |res| {
                 let (id, val) = res.unwrap();
 
-                let entry: StorageResult<Entry<_>> =
-                    serde_json::from_slice(&val).map_err(|e| StorageError::IO { source: StorageIOError::read_logs(&e) });
                 let id = byteSlice2Id(&id);
 
-                assert_eq!(Ok(id), entry.as_ref().map(|e| e.log_id.index));
+                let entry: StorageResult<Entry<_>> =
+                    serde_json::from_slice(&val).map_err(|e| StorageError::IO { source: StorageIOError::read_logs(&e) });
+
+                assert_eq!(Ok(id), entry.as_ref().map(|entry| entry.log_id.index));
 
                 (id, entry)
             }).take_while(|(id, _)| range.contains(id)).map(|x| x.1).collect()
@@ -179,13 +190,12 @@ impl RaftLogStorage<RaftTypeConfigImpl> for RaftLogReaderStorageImpl {
         self.readVote()
     }
 
-    async fn save_committed(&mut self, _committed: Option<LogId<NodeId>>) -> Result<(), StorageError<NodeId>> {
-        self.saveCommitted(&_committed)?;
-        Ok(())
+    async fn save_committed(&mut self, committed: Option<LogId<NodeId>>) -> Result<(), StorageError<NodeId>> {
+        self.saveLastCommittedLogId(&committed)
     }
 
     async fn read_committed(&mut self) -> Result<Option<LogId<NodeId>>, StorageError<NodeId>> {
-        Ok(self.readCommitted()?)
+        self.readLastCommittedLogId()
     }
 
     /// 和columnFamily logs交互,把entries记录下来

@@ -87,7 +87,6 @@ impl<T> DerefMut for TrickyContainer<T> {
 }
 
 unsafe impl<T> Send for TrickyContainer<T> {}
-
 unsafe impl<T> Sync for TrickyContainer<T> {}
 
 /// 交集

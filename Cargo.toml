@@ -25,10 +25,11 @@ tokio-tungstenite = "0.23.1"
 futures-channel = "0.3.30"
 futures-util = "0.3.30"
 rayon = "1.10.0"
-bumpalo = { version = "3.16.0", features = ["allocator_api","allocator-api2"] }
+bumpalo = { version = "3.16.0", features = ["allocator_api", "allocator-api2"] }
 graph_independent = { path = "lib/graph_independent" }
 hashbrown = { version = "0.14.5", features = ["nightly", "serde"] }
 socket2 = "0.5.7"
+openraft = { version = "0.9.13", features = ["bt", "serde", "storage-v2"] }
 #enum-ordinalize = "4.3.0"
 
 # https://course.rs/cargo/reference/profiles.html
