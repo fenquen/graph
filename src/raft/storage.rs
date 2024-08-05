@@ -182,7 +182,7 @@ impl RaftLogStorage<GraphRaftTypeConfig> for GraphRaftLogReaderStorage {
         todo!()
     }
 
-    async fn truncate(&mut self, log_id: LogId<GraphRaftNodeId>) -> StorageResult<()> {
+    async fn truncate(&mut self, lastPurgedLogId: LogId<GraphRaftNodeId>) -> StorageResult<()> {
         todo!()
     }
 
