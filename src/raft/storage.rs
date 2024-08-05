@@ -179,14 +179,14 @@ impl RaftLogStorage<GraphRaftTypeConfig> for GraphRaftLogReaderStorage {
         I: IntoIterator<Item=Entry<GraphRaftTypeConfig>> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
+        Ok(())
+    }
+
+    async fn truncate(&mut self, logIdFromInclusive: LogId<GraphRaftNodeId>) -> StorageResult<()> {
         todo!()
     }
 
-    async fn truncate(&mut self, lastPurgedLogId: LogId<GraphRaftNodeId>) -> StorageResult<()> {
-        todo!()
-    }
-
-    async fn purge(&mut self, log_id: LogId<GraphRaftNodeId>) -> StorageResult<()> {
+    async fn purge(&mut self, lastPurgedLogId: LogId<GraphRaftNodeId>) -> StorageResult<()> {
         todo!()
     }
 }
