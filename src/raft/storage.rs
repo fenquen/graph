@@ -21,7 +21,7 @@ impl GraphRaftLogReaderStorage {
     const KEY_VOTE: [u8; 4] = *b"vote";
 
     pub fn new() -> Self {
-        Self {
+        GraphRaftLogReaderStorage {
             raftStore: &raft::RAFT_STORE
         }
     }
@@ -159,7 +159,7 @@ impl RaftLogStorage<GraphRaftTypeConfig> for GraphRaftLogReaderStorage {
     }
 
     async fn save_vote(&mut self, vote: &Vote<GraphRaftNodeId>) -> StorageResult<()> {
-       self.saveVote(vote)
+        self.saveVote(vote)
     }
 
     async fn read_vote(&mut self) -> StorageResult<Option<Vote<GraphRaftNodeId>>> {
