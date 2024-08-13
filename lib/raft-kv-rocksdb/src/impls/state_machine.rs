@@ -17,17 +17,17 @@ struct StoredSnapshot {
 
     /// The data of the state machine at the time of this snapshot<br>
     /// 目前传递的是 BTreeMap<String, String>的json的binary
-    pub data: Vec<u8>,
+    pub snapshotData: Vec<u8>,
 }
 
 /// 实现了 RaftSnapshotBuilder , RaftStateMachine
 #[derive(Debug, Clone)]
 pub struct RaftStateMachineImpl {
-    pub lastAppliedLogId: Option<LogId<NodeId>>,
-    pub lastMembership: StoredMembership<NodeId, Node>,
+    lastAppliedLogId: Option<LogId<NodeId>>,
+    lastMembership: StoredMembership<NodeId, Node>,
 
     /// state built from applying the raft logs
-    pub kv: Arc<RwLock<BTreeMap<String, String>>>,
+    kv: Arc<RwLock<BTreeMap<String, String>>>,
 
     /// snapshot index is not persisted in this example.
     ///
@@ -40,7 +40,9 @@ pub struct RaftStateMachineImpl {
 }
 
 impl RaftStateMachineImpl {
-    pub async fn new(db: Arc<DB>) -> Result<RaftStateMachineImpl, StorageError<NodeId>> {
+    const KEY_SNAPSHOT: &'static [u8] = b"snapshot";
+
+    pub async fn new(db: Arc<DB>) -> StorageResult<RaftStateMachineImpl> {
         let mut raftStateMachineImpl = RaftStateMachineImpl {
             lastAppliedLogId: None,
             lastMembership: Default::default(),
@@ -49,7 +51,7 @@ impl RaftStateMachineImpl {
             db,
         };
 
-        if let Some(storedSnapshot) = raftStateMachineImpl.readSnapshot()? {
+        if let Some(ref storedSnapshot) = raftStateMachineImpl.readSnapshot()? {
             raftStateMachineImpl.applySnapshot(storedSnapshot).await?;
         }
 
@@ -57,13 +59,13 @@ impl RaftStateMachineImpl {
     }
 
     fn readSnapshot(&self) -> StorageResult<Option<StoredSnapshot>> {
-        Ok(self.db.get_cf(&self.getStoreCF(), b"snapshot")
+        Ok(self.db.get_cf(&self.getStoreCF(), Self::KEY_SNAPSHOT)
             .map_err(|e| StorageError::IO { source: StorageIOError::read(&e) })?
             .and_then(|v| serde_json::from_slice(&v).ok()))
     }
 
-    fn saveSnapshot(&self, storedSnapshot: StoredSnapshot) -> StorageResult<()> {
-        self.db.put_cf(&self.getStoreCF(), b"snapshot", serde_json::to_vec(&storedSnapshot).unwrap().as_slice())
+    fn saveSnapshot(&self, storedSnapshot: &StoredSnapshot) -> StorageResult<()> {
+        self.db.put_cf(&self.getStoreCF(), Self::KEY_SNAPSHOT, serde_json::to_vec(&storedSnapshot).unwrap().as_slice())
             .map_err(|e| StorageError::IO { source: StorageIOError::write_snapshot(Some(storedSnapshot.snapshotMeta.signature()), &e) })?;
 
         self.flush(ErrorSubject::Snapshot(Some(storedSnapshot.snapshotMeta.signature())), ErrorVerb::Write)?;
@@ -71,14 +73,13 @@ impl RaftStateMachineImpl {
         Ok(())
     }
 
-    async fn applySnapshot(&mut self, storedSnapshot: StoredSnapshot) -> StorageResult<()> {
-        let kv: BTreeMap<String, String> =
-            serde_json::from_slice(&storedSnapshot.data)
-                .map_err(|e| StorageIOError::read_snapshot(Some(storedSnapshot.snapshotMeta.signature()), &e))?;
-
+    async fn applySnapshot(&mut self, storedSnapshot: &StoredSnapshot) -> StorageResult<()> {
         self.lastAppliedLogId = storedSnapshot.snapshotMeta.last_log_id;
         self.lastMembership = storedSnapshot.snapshotMeta.last_membership.clone();
 
+        let kv: BTreeMap<String, String> =
+            serde_json::from_slice(&storedSnapshot.snapshotData)
+                .map_err(|e| StorageIOError::read_snapshot(Some(storedSnapshot.snapshotMeta.signature()), &e))?;
         let mut x = self.kv.write().await;
         *x = kv;
 
@@ -97,11 +98,11 @@ impl RaftStateMachineImpl {
 
 impl RaftSnapshotBuilder<RaftTypeConfigImpl> for RaftStateMachineImpl {
     /// 读取当前在内存中的snapshot相应的信息,保存到rocksdb然后发送上报
-    async fn build_snapshot(&mut self) -> Result<Snapshot<RaftTypeConfigImpl>, StorageError<NodeId>> {
+    async fn build_snapshot(&mut self) -> StorageResult<Snapshot<RaftTypeConfigImpl>> {
         let lastAppliedLogId = self.lastAppliedLogId;
         let lastMembership = self.lastMembership.clone();
 
-        let mapJsonByteVec = serde_json::to_vec(&*self.kv.read().await).map_err(|e| StorageIOError::read_state_machine(&e))?;
+        let snapshotData = serde_json::to_vec(&*self.kv.read().await).map_err(|e| StorageIOError::read_state_machine(&e))?;
 
         let snapshotId =
             if let Some(lastAppliedLogId) = lastAppliedLogId {
@@ -117,15 +118,15 @@ impl RaftSnapshotBuilder<RaftTypeConfigImpl> for RaftStateMachineImpl {
         };
 
         // 保存到rocksdb
-        self.saveSnapshot(StoredSnapshot {
+        self.saveSnapshot(&StoredSnapshot {
             snapshotMeta: snapshotMeta.clone(),
-            data: mapJsonByteVec.clone(),
+            snapshotData: snapshotData.clone(),
         })?;
 
         // 上报
         Ok(Snapshot {
             meta: snapshotMeta,
-            snapshot: Box::new(Cursor::new(mapJsonByteVec)),
+            snapshot: Box::new(Cursor::new(snapshotData)),
         })
     }
 }
@@ -185,12 +186,14 @@ impl RaftStateMachine<RaftTypeConfigImpl> for RaftStateMachineImpl {
                               snapshotData: Box<Cursor<Vec<u8>>>) -> StorageResult<()> {
         let storedSnapshot = StoredSnapshot {
             snapshotMeta: snapshotMeta.clone(),
-            data: snapshotData.into_inner(),
+            snapshotData: snapshotData.into_inner(),
         };
 
-        self.applySnapshot(storedSnapshot.clone()).await?;
+        // 内存里边的修改
+        self.applySnapshot(&storedSnapshot).await?;
 
-        self.saveSnapshot(storedSnapshot)?;
+        // 持久话的记录的
+        self.saveSnapshot(&storedSnapshot)?;
 
         Ok(())
     }
@@ -198,7 +201,7 @@ impl RaftStateMachine<RaftTypeConfigImpl> for RaftStateMachineImpl {
     async fn get_current_snapshot(&mut self) -> StorageResult<Option<Snapshot<RaftTypeConfigImpl>>> {
         Ok(self.readSnapshot()?.map(|storedSnapshot| Snapshot {
             meta: storedSnapshot.snapshotMeta.clone(),
-            snapshot: Box::new(Cursor::new(storedSnapshot.data.clone())),
+            snapshot: Box::new(Cursor::new(storedSnapshot.snapshotData.clone())),
         }))
     }
 }

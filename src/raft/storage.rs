@@ -1,28 +1,29 @@
 use std::fmt::Debug;
-use std::future::Future;
 use std::ops::{Bound, RangeBounds};
-use openraft::{Entry, ErrorSubject, ErrorVerb, LogId, LogState, NodeId, OptionalSend, RaftLogReader, StorageError, StorageIOError, Vote};
+use openraft::{Entry, LogId, LogState, OptionalSend, RaftLogReader, StorageIOError, Vote};
 use openraft::storage::{LogFlushed, RaftLogStorage};
-use rocksdb::DB;
-use crate::raft;
-use crate::raft::{GraphRaftTypeConfig, GraphRaftNodeId};
+use rocksdb::{DB, IteratorMode};
+use crate::{meta, raft};
+use crate::raft::{GraphRaftNodeId, GraphRaftTypeConfig, StorageResult};
 use crate::types::DBRawIterator;
-
-type StorageResult<T> = Result<T, StorageError<GraphRaftNodeId>>;
 
 #[derive(Copy, Clone)]
 pub struct GraphRaftLogReaderStorage {
-    pub raftStore: &'static DB,
+    metaStore: &'static DB,
+    dataStore: &'static DB,
+    raftStore: &'static DB,
 }
 
 impl GraphRaftLogReaderStorage {
-    const KEY_LAST_PURGED_LOG_ID: [u8; 18] = *b"last_purged_log_id";
-    const KEY_LAST_COMMTTED_LOG_ID: [u8; 21] = *b"last_committed_log_id";
-    const KEY_VOTE: [u8; 4] = *b"vote";
+    const KEY_LAST_PURGED_LOG_ID: &'static [u8] = b"last_purged_log_id";
+    const KEY_LAST_COMMTTED_LOG_ID: &'static [u8] = b"last_committed_log_id";
+    const KEY_VOTE: &'static [u8] = b"vote";
 
     pub fn new() -> Self {
         GraphRaftLogReaderStorage {
-            raftStore: &raft::RAFT_STORE
+            metaStore: &meta::STORE.metaStore,
+            dataStore: &meta::STORE.dataStore,
+            raftStore: &raft::RAFT_STORE,
         }
     }
 
@@ -151,7 +152,30 @@ impl RaftLogStorage<GraphRaftTypeConfig> for GraphRaftLogReaderStorage {
     type LogReader = Self;
 
     async fn get_log_state(&mut self) -> StorageResult<LogState<GraphRaftTypeConfig>> {
-        todo!()
+        let columnFamily =
+            raft::getRaftColumnFamily(raft::COLUMN_FAMILY_NAME_LOG_ENTRIES).map_err(|e| StorageIOError::read(e))?;
+
+        let mut dbRawIterator: DBRawIterator = self.raftStore.raw_iterator_cf(&columnFamily);
+        dbRawIterator.seek_to_last();
+
+        let mut lastLogId = match dbRawIterator.value() {
+            Some(value) => {
+                let lastEntry: Entry<GraphRaftTypeConfig> = serde_json::from_slice(value).map_err(|e| StorageIOError::read(&e))?;
+                Some(lastEntry.log_id)
+            }
+            None => None
+        };
+
+        let lastPurgedLogId = self.readLastPurgedLogId()?;
+
+        if let None = lastLogId {
+            lastLogId = lastPurgedLogId;
+        }
+
+        Ok(LogState {
+            last_purged_log_id: lastPurgedLogId,
+            last_log_id: lastLogId,
+        })
     }
 
     async fn get_log_reader(&mut self) -> Self::LogReader {
@@ -179,14 +203,43 @@ impl RaftLogStorage<GraphRaftTypeConfig> for GraphRaftLogReaderStorage {
         I: IntoIterator<Item=Entry<GraphRaftTypeConfig>> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
+        for entry in entries {
+            let columnFamily =
+                raft::getRaftColumnFamily(raft::COLUMN_FAMILY_NAME_LOG_ENTRIES).map_err(|e| StorageIOError::write_log_entry(entry.log_id, e))?;
+
+            self.raftStore.put_cf(
+                &columnFamily,
+                entry.log_id.index.to_be_bytes(),
+                serde_json::to_vec(&entry).map_err(|e| StorageIOError::write_logs(&e))?)
+                .map_err(|e| StorageIOError::write_logs(&e))?;
+        }
+
+        callback.log_io_completed(Ok(()));
+
         Ok(())
     }
 
     async fn truncate(&mut self, logIdFromInclusive: LogId<GraphRaftNodeId>) -> StorageResult<()> {
-        todo!()
+        let columnFamily =
+            raft::getRaftColumnFamily(raft::COLUMN_FAMILY_NAME_LOG_ENTRIES).map_err(|e| StorageIOError::write_logs(e))?;
+
+        let from = logIdFromInclusive.index.to_be_bytes();
+        let to = u64::MAX.to_be_bytes();
+
+        self.raftStore.delete_range_cf(&columnFamily, from, to).map_err(|e| StorageIOError::write_logs(&e))?;
+
+        Ok(())
     }
 
     async fn purge(&mut self, lastPurgedLogId: LogId<GraphRaftNodeId>) -> StorageResult<()> {
-        todo!()
+        let columnFamily =
+            raft::getRaftColumnFamily(raft::COLUMN_FAMILY_NAME_LOG_ENTRIES).map_err(|e| StorageIOError::write_logs(e))?;
+
+        let from = 0u64.to_be_bytes();
+        let to = lastPurgedLogId.index.to_be_bytes();
+
+        self.raftStore.delete_range_cf(&columnFamily, from, to).map_err(|e| StorageIOError::write_logs(&e))?;
+
+        Ok(())
     }
 }

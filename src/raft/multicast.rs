@@ -12,7 +12,7 @@ use anyhow::Result;
 use lazy_static::lazy_static;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use crate::{config, raft};
-use crate::raft::RaftNode;
+use crate::raft::GraphRaftNode;
 
 const MTU_SIZE: usize = 1500;
 
@@ -45,7 +45,7 @@ pub fn init() -> Result<(JoinHandle<Result<()>>, JoinHandle<Result<()>>)> {
             loop {
                 let (len, _) = udpSocket.recv_from(&mut buf).unwrap();
 
-                let raftNode = serde_json::from_slice::<RaftNode>(&buf[..len])?;
+                let raftNode = serde_json::from_slice::<GraphRaftNode>(&buf[..len])?;
                 raft::ONLINE_RAFT_ID_RAFT_NODE.write().unwrap().insert(raftNode.id, raftNode);
 
                 // log::info!("receive: {}", String::from_utf8_lossy(&buf[..len]).deref());

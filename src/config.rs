@@ -87,7 +87,7 @@ impl Default for Config {
             sessionMemotySize: Config::DEFAULT_SESSION_MEMORY_SIZE,
             txUndergoingMaxCount: AtomicUsize::new(Config::DEFAULT_TX_UNDERGOING_MAX_COUNT),
 
-            distribute: true,
+            distribute: false,
             raftConfig: RaftConfig::default(),
         }
     }

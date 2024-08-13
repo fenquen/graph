@@ -587,11 +587,15 @@ impl DBObjectTrait for Index {
     }
 }
 
+const COLUMN_FAMILY_NAME_META: &str = "meta";
+const COLUMN_FAMILY_NAME_RAFT: &str = "raft";
+const COLUMN_FAMILY_NAME_RAFT_ENTRIES: &str = "raft_entries";
+
 pub fn init() -> Result<()> {
     let mut dbObjectVec = Vec::new();
 
     // 生成用来保存表文件和元数据的目录
-    // meta的保存格式是 tableId->json
+    // meta的保存格式是 tableId->json对应的binary
     let metaStore = {
         std::fs::create_dir_all(CONFIG.metaDir.as_str())?;
 

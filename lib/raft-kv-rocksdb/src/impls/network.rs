@@ -107,7 +107,7 @@ impl RaftNetwork<RaftTypeConfigImpl> for RaftNetworkImpl {
                             appendEntriesRequest: AppendEntriesRequest<RaftTypeConfigImpl>,
                             _option: RPCOption) -> Result<AppendEntriesResponse<NodeId>, OpenRaftRPCError<RaftError<NodeId>>> {
         tracing::debug!(req = debug(&appendEntriesRequest), "append_entries");
-        self.getRpcClient().await?.rpc_endpoint().append(appendEntriesRequest).await.map_err(|e| toyRpcError2OpenRaftError(e, self.targetNodeId))
+        self.getRpcClient().await?.raft_rpc_endpoint().append(appendEntriesRequest).await.map_err(|e| toyRpcError2OpenRaftError(e, self.targetNodeId))
     }
 
     #[tracing::instrument(level = "debug", skip_all, err(Debug))]
@@ -115,7 +115,7 @@ impl RaftNetwork<RaftTypeConfigImpl> for RaftNetworkImpl {
                               installSnapshotRequest: InstallSnapshotRequest<RaftTypeConfigImpl>,
                               _option: RPCOption) -> Result<InstallSnapshotResponse<NodeId>, OpenRaftRPCError<RaftError<NodeId, InstallSnapshotError>>> {
         tracing::debug!(req = debug(&installSnapshotRequest), "install_snapshot");
-        self.getRpcClient().await?.rpc_endpoint().installSnapshot(installSnapshotRequest).await.map_err(|e| toyRpcError2OpenRaftError(e, self.targetNodeId))
+        self.getRpcClient().await?.raft_rpc_endpoint().installSnapshot(installSnapshotRequest).await.map_err(|e| toyRpcError2OpenRaftError(e, self.targetNodeId))
     }
 
     #[tracing::instrument(level = "debug", skip_all, err(Debug))]
@@ -123,7 +123,7 @@ impl RaftNetwork<RaftTypeConfigImpl> for RaftNetworkImpl {
                   voteReuest: VoteRequest<NodeId>,
                   _option: RPCOption) -> Result<VoteResponse<NodeId>, OpenRaftRPCError<RaftError<NodeId>>> {
         tracing::debug!(req = debug(&voteReuest), "vote");
-        self.getRpcClient().await?.rpc_endpoint().vote(voteReuest).await.map_err(|e| toyRpcError2OpenRaftError(e, self.targetNodeId))
+        self.getRpcClient().await?.raft_rpc_endpoint().vote(voteReuest).await.map_err(|e| toyRpcError2OpenRaftError(e, self.targetNodeId))
     }
 }
 
