@@ -70,14 +70,15 @@ impl<'session> CommandExecutor<'session> {
                     // relation的src dest 的dataKey
                     let targetDataKey = extractTargetDataKeyFromPointerKey!(&*relPointerKey);
 
-                    let mut scanParams = ScanParams::default();
-                    scanParams.table = srcTable;
-                    scanParams.tableFilter = if processSrc {
-                        unlinkLinkStyle.srcTableFilter.as_ref()
-                    } else {
-                        unlinkLinkStyle.destTableFilter.as_ref()
+                    let scanParams = ScanParams {
+                        table: srcTable,
+                        tableFilter: if processSrc {
+                            unlinkLinkStyle.srcTableFilter.as_ref()
+                        } else {
+                            unlinkLinkStyle.destTableFilter.as_ref()
+                        },
+                        ..Default::default()
                     };
-                    scanParams.selectedColumnNames = None;
 
                     // 是不是符合src dest上的筛选expr
                     if self.getRowDatasByDataKeys(&[targetDataKey], &scanParams, &mut ScanHooks::default())?.is_empty() {

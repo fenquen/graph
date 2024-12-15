@@ -1,14 +1,22 @@
 use std::cell::Cell;
-use std::mem;
+use std::{mem, ptr};
+use std::alloc::Global;
+use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use dashmap::DashMap;
+use hashbrown::{DefaultHashBuilder, HashMap};
+use lazy_static::lazy_static;
 use tokio::fs::File;
 use tokio::sync::RwLock;
+use graph_independent::DummyAllocator;
+use hashbrown::raw::RawTable;
 use crate::graph_error::GraphError;
+use crate::graph_value::GraphValue;
 use crate::meta;
 use crate::meta::Table;
-use crate::types::Byte;
+use crate::types::{Byte, RowData};
 
 thread_local! {
     /// https://www.cnblogs.com/jiangbo4444/p/15932305.html <br>
@@ -82,3 +90,24 @@ pub const EMPTY_BINARY: Vec<Byte> = vec![];
 
 pub const 百分号_CHAR: char = '%';
 pub const 百分号_STR: &str = "%";
+
+// todo 20241127 如何对 DUMMY_ROW_DATA 实现 getRowSize() 是 0 需要有个标识来表明它是dummy的
+/// 通过强改 hashbrown-0.15.2 和它依赖的 foldhash-0.1.3 源码(private的mod,字段 变为pub的) 实现
+pub const DUMMY_ROW_DATA: RowData = const {
+    //let hash_builder = unsafe { MaybeUninit::<DefaultHashBuilder>::uninit().assume_init() };
+    //let table = unsafe { MaybeUninit::<hashbrown::raw::RawTable<(String, GraphValue)>>::uninit().assume_init() };
+    HashMap {
+        hash_builder: DefaultHashBuilder {
+            per_hasher_seed: 0,
+            global_seed: foldhash::seed::global::GlobalSeed {
+                _no_accidental_unsafe_init: (),
+            },
+        },
+        table: RawTable {
+            table: hashbrown::raw::RawTableInner::new(),
+            alloc: Global,
+            marker: PhantomData,
+        },
+        dummy: true,
+    }
+};

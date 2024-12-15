@@ -37,7 +37,6 @@ use crate::NodeId;
 use crate::RaftTypeConfigImpl;
 use crate::impls::state_machine::RaftStateMachineImpl;
 use crate::types::{ColumnFamily, StorageResult};
-use crate::utils;
 
 #[derive(Debug, Clone)]
 pub struct RaftLogReaderStorageImpl {

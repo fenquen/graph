@@ -26,15 +26,15 @@ pub(in crate::executor) enum MergeResult<'a> {
     Merged((Op, &'a GraphValue)),
 }
 
-pub(in crate::executor) fn accumulateOr<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> anyhow::Result<AccumulateResult> {
+pub(in crate::executor) fn accumulateOr<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Result<AccumulateResult> {
     accumulate(opValueVec, Logical::Or)
 }
 
-pub(in crate::executor) fn accumulateAnd<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> anyhow::Result<AccumulateResult> {
+pub(in crate::executor) fn accumulateAnd<T: Deref<Target=GraphValue>>(opValueVec: &[(Op, T)]) -> Result<AccumulateResult> {
     accumulate(opValueVec, Logical::And)
 }
 
-fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logical: Logical) -> anyhow::Result<AccumulateResult<'a>> {
+fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logical: Logical) -> Result<AccumulateResult<'a>> {
     let mut selfAccumulated =
         opValueVec.iter().map(|(op, value)| (*op, &**value)).collect::<Vec<(Op, &'a GraphValue)>>();
 
@@ -108,7 +108,7 @@ fn accumulate<'a, T: Deref<Target=GraphValue>>(opValueVec: &'a [(Op, T)], logica
         }
         // selfAccumulated = accumulated;
 
-        return anyhow::Result::<(AccumulateResult<'a>, bool)>::Ok((AccumulateResult::Ok(vec![]), merged));
+        return Result::<(AccumulateResult<'a>, bool)>::Ok((AccumulateResult::Ok(vec![]), merged));
     };
 
     loop {

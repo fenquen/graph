@@ -101,6 +101,7 @@ impl<'session> CommandExecutor<'session> {
             return Ok(None);
         }
 
+        // where条件出现过的col的name
         let tableFilterColNames: Vec<&String> = tableFilterColName_opValueVecVec.keys().collect();
 
         if isPureAnd == false {
@@ -137,6 +138,7 @@ impl<'session> CommandExecutor<'session> {
         // 候选的index名单
         let mut candiateInices = Vec::with_capacity(scanParams.table.indexNames.len());
 
+        // 遍历table的各个index
         'loopIndex:
         for indexName in &scanParams.table.indexNames {
             let dbObjectIndex = Session::getDBObjectByName(indexName)?;
@@ -146,9 +148,9 @@ impl<'session> CommandExecutor<'session> {
             // tableFilter的字段和index的字段就算有交集,tableFilter的字段也兜底要包含index的第1个字段
             // 例如 (b=1 and c=3),虽然index含有字段a,b,c,然而tableFilter未包含打头的a字段 不能使用
             // (a=1 and c=3) 虽然包含了打头的a字段,然而也只能用到index的a字段部分 因为缺了b字段 使得c用不了
-            let mut indexFilteredColNames = Vec::with_capacity(index.columnNames.len());
+            let mut indexColNamesUsedInFilter = Vec::with_capacity(index.columnNames.len());
 
-            // select 要是指明 colName 的话能用到index上的多少字段
+            // index的包含的字段有多少是要select的
             let mut indexSelectedColumnCount = usize::default();
 
             // index的各个用到的column上的表达式的集合,它的length便是index上用到的column数量
@@ -166,11 +168,11 @@ impl<'session> CommandExecutor<'session> {
                 // 保守认为: 单个字段上的过滤条件之间是or, 字段和字段之间是or 这样范围上只会多不会少
 
                 opValueVecVecAcrossIndexFilteredCols.push(opValueVecVec);
-                indexFilteredColNames.push(indexColumnName.clone());
+                indexColNamesUsedInFilter.push(indexColumnName.clone());
             }
 
             // index本身拥有的字段能涵盖多少要select字段
-            if let Some(selectedColumnNames) = scanParams.selectedColumnNames {
+            if let Some(selectedColumnNames) = scanParams.selectedColumnNames {  // 特意写了要seletc的col
                 for indexColumnName in &index.columnNames {
                     if selectedColumnNames.contains(indexColumnName) {
                         suffix_plus_plus!(indexSelectedColumnCount);
@@ -186,7 +188,7 @@ impl<'session> CommandExecutor<'session> {
             }
 
             // filter没有用到这个index的任何字段
-            if indexFilteredColNames.is_empty() {
+            if indexColNamesUsedInFilter.is_empty() {
                 continue 'loopIndex;
             }
 
@@ -239,7 +241,7 @@ impl<'session> CommandExecutor<'session> {
 
 
             // 不能直接放index 因为它是来源dbObject的 而for 循环结束后dbObject销毁了
-            candiateInices.push((dbObjectIndex, indexSelectedColumnCount, indexFilteredColNames, opValueVecVecAcrossIndexFilteredCols));
+            candiateInices.push((dbObjectIndex, indexSelectedColumnCount, indexColNamesUsedInFilter, opValueVecVecAcrossIndexFilteredCols));
         }
 
         if candiateInices.is_empty() {
@@ -316,6 +318,7 @@ impl<'session> CommandExecutor<'session> {
         let mut indexFilterColTypes = Vec::with_capacity(indexFilteredColNames.len());
         for index in 0..indexFilteredColNames.len() {
             let columnNameFromIndexUsed = &indexFilteredColNames[index];
+            
             for indexFilterColumn in &scanParams.table.columns {
                 if indexFilterColumn.name.as_str() != columnNameFromIndexUsed {
                     continue;
@@ -342,10 +345,11 @@ impl<'session> CommandExecutor<'session> {
             }
         }
 
-        // 能不能使用indexLocalSearch不用到原表上了
+        // 能不能使用indexLocalSearch,要是可以的话不用到原表上搜索data了
         let indexLocalSearch = {
             let mut indexLocalSearch = false;
 
+            // 覆盖全部的select字段
             let coverAllSelectedColumns =
                 if let Some(selectedColNames) = scanParams.selectedColumnNames {
                     // 覆盖全部的select 字段

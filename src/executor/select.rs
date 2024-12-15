@@ -48,6 +48,7 @@ impl<'session> CommandExecutor<'session> {
                 selectedColumnNames: selectTable.selectedColNames.as_ref(),
                 limit: selectTable.limit,
                 offset: selectTable.offset,
+                ..Default::default()
             };
 
             self.scanSatisfiedRows(scanParams, true, ScanHooks::default())?

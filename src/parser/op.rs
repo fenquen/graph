@@ -141,6 +141,7 @@ pub fn determineLikePattern(likePattern: &str) -> Result<LikePattern> {
 
         // 如果上边的不满足的话,就对应了下边的 两头都是"%"
     }
+    
     // like '%a%',提取当中的部分,使用contains
     if likePattern.starts_with(global::百分号_STR) && likePattern.ends_with(global::百分号_STR) {
         let targetStr = &likePattern[1..likePattern.len() - 1];

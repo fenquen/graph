@@ -21,6 +21,7 @@ pub struct Config {
     pub metaDir: String,
     pub dataDir: String,
 
+    /// in byte
     pub sessionMemotySize: usize,
     pub txUndergoingMaxCount: AtomicUsize,
 }
@@ -31,6 +32,8 @@ impl Config {
 
     pub const DEFAULT_TX_UNDERGOING_MAX_COUNT: usize = 10000;
     pub const MIN_TX_UNDERGOING_MAX_COUNT: usize = 1000;
+
+    pub const DEFAULT_WORKING_MEMORY_SIZE: usize = 2048 * 1024 * 1024;
 }
 
 impl Default for Config {

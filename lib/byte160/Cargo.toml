@@ -19,7 +19,6 @@ authors = [
     "Sean McArthur <sean@seanmonstar.com>",
 ]
 description = "Types and traits for working with bytes"
-readme = "README.md"
 keywords = [
     "buffers",
     "zero-copy",

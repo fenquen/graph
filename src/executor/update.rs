@@ -137,6 +137,7 @@ impl<'session> CommandExecutor<'session> {
         let mut rowDataBuffer = self.newIn();
 
         for (ref oldDataKey, rowData) in &mut targetRowDatas {
+            // todo update时候如何干掉oldDataKey对应的index ✅
             // 趁着rowData还是原始模样的时候
             self.generateIndexData(table, &mut keyBuffer, *oldDataKey, rowData, true)?;
 
@@ -179,8 +180,6 @@ impl<'session> CommandExecutor<'session> {
 
             // 新的data的相应的index
             self.generateIndexData(table, &mut keyBuffer, newDataKey, &rowData, false)?;
-
-            // todo update时候如何干掉oldDataKey对应的index
         }
 
         Ok(CommandExecResult::DmlResult)

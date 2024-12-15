@@ -131,12 +131,15 @@ impl Default for SearchPointerKeyHooks<Box<dyn CommittedPointerKeyProcessor>, Bo
 }
 
 /// 随着scan函数的参数越来越多,是有必要将它们都收拢到1道
-pub(super) struct ScanParams<'Table, 'TableFilter, 'SelectedColumnNames> {
+pub(super) struct ScanParams<'Table, 'TableFilter, 'SelectedColNames> {
     pub table: &'Table Table,
     pub tableFilter: Option<&'TableFilter Expr>,
-    pub selectedColumnNames: Option<&'SelectedColumnNames Vec<String>>,
+    pub selectedColumnNames: Option<&'SelectedColNames Vec<String>>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    /// 为了尽量减少对原来代码逻辑的影响,默认是true <br>
+    /// 目前看来linkTo用到的时候不会需要rowData
+    pub needRowData: bool,
 }
 
 lazy_static! {
@@ -149,10 +152,11 @@ impl<'Table> Default for ScanParams<'Table, '_, '_> {
     fn default() -> Self {
         ScanParams {
             table: &DUMMY_TABLE,
-            tableFilter: None,
-            selectedColumnNames: None,
-            limit: None,
-            offset: None,
+            tableFilter: Default::default(),
+            selectedColumnNames: Default::default(),
+            limit: Default::default(),
+            offset: Default::default(),
+            needRowData: true,
         }
     }
 }
@@ -282,6 +286,7 @@ impl<'session> CommandExecutor<'session> {
             if scanParams.tableFilter.is_some() || select {
                 let mut satisfiedRows = Vec::new();
 
+                // 不使用index
                 let mut scanSearch = true;
 
                 if scanParams.tableFilter.is_some() {
@@ -450,10 +455,12 @@ impl<'session> CommandExecutor<'session> {
                                                 continue;
                                             }
 
-                                            let mut scanParams = ScanParams::default();
-                                            scanParams.table = table;
-                                            scanParams.tableFilter = tableFilter;
-                                            scanParams.selectedColumnNames = selectedColumnNames;
+                                            let scanParams = ScanParams {
+                                                table,
+                                                tableFilter,
+                                                selectedColumnNames,
+                                                ..Default::default()
+                                            };
 
                                             if let Some(rowData) = commandExecutor.readRowDataBinary(&*rowDataBinary, &scanParams)? {
                                                 // committed post
@@ -490,15 +497,15 @@ impl<'session> CommandExecutor<'session> {
                             // 不然的话下边的遍历receiver永远也不会return
                             drop(sender);
 
-                            for a in receiver {
-                                let a = a?;
+                            for dataKeyRowData in receiver {
+                                let dataKeyRowData = dataKeyRowData?;
                                 if let Some(limit) = scanParams.limit {
                                     if satisfiedRows.len() >= limit {
                                         break;
                                     }
                                 }
 
-                                satisfiedRows.push(a);
+                                satisfiedRows.push(dataKeyRowData);
                             }
 
                             Result::<Vec<(DataKey, RowData)>>::Ok(satisfiedRows)
@@ -652,7 +659,11 @@ impl<'session> CommandExecutor<'session> {
         // todo  select user[id](name like 'tom') 因为未选取name 使得name过滤的时候报错 不能提前prune 完成
         if let GraphValue::Boolean(satisfy) = scanParams.tableFilter.unwrap().calc(Some(&rowData))? {
             if satisfy {
-                Ok(Some(pruneRowData(rowData, scanParams.selectedColumnNames)?))
+                if scanParams.needRowData {
+                    Ok(Some(pruneRowData(rowData, scanParams.selectedColumnNames)?))
+                } else {
+                    Ok(Some(global::DUMMY_ROW_DATA))
+                }
             } else {
                 Ok(None)
             }
@@ -893,10 +904,11 @@ impl<'session> CommandExecutor<'session> {
 
         self.searchPointerKeyByPrefix(src.id, pointerKeyBuffer.as_ref(), searchPointerKeyHooks)?;
 
-        let mut scanParams = ScanParams::default();
-        scanParams.table = dest;
-        scanParams.tableFilter = destFilter;
-        scanParams.selectedColumnNames = None;
+        let scanParams = ScanParams {
+            table: dest,
+            tableFilter: destFilter,
+            ..Default::default()
+        };
 
         let relationDatas = self.getRowDatasByDataKeys(targetRelationDataKeys.as_slice(), &scanParams, &mut ScanHooks::default())?;
 
@@ -904,8 +916,7 @@ impl<'session> CommandExecutor<'session> {
     }
 }
 
-pub(super) fn pruneRowData(mut rowData: RowData,
-                           selectedColName: Option<&Vec<String>>) -> Result<RowData> {
+pub(super) fn pruneRowData(mut rowData: RowData, selectedColName: Option<&Vec<String>>) -> Result<RowData> {
     let mut prunedRowData: RowData = HashMap::with_capacity(rowData.len());
 
     if selectedColName.is_none() {

@@ -71,6 +71,7 @@ impl<'session> CommandExecutor<'session> {
                     let scanParams = ScanParams {
                         table: srcTable,
                         tableFilter: linkTo.srcTableFilter.as_ref(),
+                        needRowData: false,
                         ..Default::default()
                     };
 
@@ -90,6 +91,7 @@ impl<'session> CommandExecutor<'session> {
             let scanParams = ScanParams {
                 table: destTable,
                 tableFilter: linkTo.destTableFilter.as_ref(),
+                needRowData: false,
                 ..Default::default()
             };
 

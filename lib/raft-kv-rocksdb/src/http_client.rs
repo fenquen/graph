@@ -168,7 +168,7 @@ impl HttpClient {
                 RPCError::Network(NetworkError::new(&e))
             })?;
 
-        let res: Result<Resp, Err> = resp.json().await.map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let res: Result<Resp, RPCError<NodeId,Node,Err>> = resp.json().await.map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         println!("client recv reply from {}: {}", leaderHttpUrl, serde_json::to_string_pretty(&res).unwrap());
 
         res

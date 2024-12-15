@@ -122,9 +122,11 @@ impl<'session> CommandExecutor<'session> {
 
             let rowDataBinary = dbRawIteratorTable.value().unwrap();
 
-            let mut scanParams = ScanParams::default();
-            scanParams.table = table;
-            scanParams.selectedColumnNames = Some(&index.columnNames);
+            let scanParams = ScanParams {
+                table,
+                selectedColumnNames: Some(&index.columnNames),
+                ..Default::default()
+            };
 
             let rowData = self.readRowDataBinary(rowDataBinary, &scanParams)?.unwrap();
 

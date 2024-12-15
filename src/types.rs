@@ -1,9 +1,9 @@
-use std::alloc::Global;
+use std::alloc::{Allocator, Global};
 use std::collections::{BTreeMap};
 use std::ops::Bound;
 use std::sync::Arc;
 use bumpalo::Bump;
-use hashbrown::hash_map::DefaultHashBuilder;
+use hashbrown::DefaultHashBuilder;
 use hashbrown::{HashMap, HashSet};
 use rocksdb::{BoundColumnFamily, DBIteratorWithThreadMode, DBRawIteratorWithThreadMode};
 use rocksdb::{DBWithThreadMode, MultiThreaded, SnapshotWithThreadMode};
@@ -54,6 +54,28 @@ pub type RelationDepth = (Bound<usize>, Bound<usize>);
 pub type Pointer = u64;
 
 pub type RowData<A = Global> = HashMap<String, GraphValue, DefaultHashBuilder, A>;
+
+pub trait HashMapExt {
+    fn getRowSize(&self) -> usize;
+}
+
+impl<A: Allocator> HashMapExt for HashMap<String, GraphValue, DefaultHashBuilder, A> {
+    fn getRowSize(&self) -> usize {
+        if self.dummy {
+            return 0;
+        }
+        
+        let mut size: usize = 0;
+
+        self.values().for_each(|graphValue| {
+            if let Some(s) = graphValue.size() {
+                size += s;
+            }
+        });
+
+        size
+    }
+}
 
 pub type SessionVec<'a, T> = Vec<T, &'a Bump>;
 pub type SessionHashMap<'a, K, V> = HashMap<K, V, DefaultHashBuilder, &'a Bump>;
