@@ -21,3 +21,5 @@ graph_meta
 *.log
 
 lib/raft-kv-rocksdb/node*
+
+*.db
