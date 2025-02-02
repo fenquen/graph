@@ -11,7 +11,6 @@ mod macros;
 mod graph_error;
 mod global;
 mod meta;
-mod a;
 mod expr;
 mod graph_value;
 mod session;
