@@ -355,7 +355,7 @@ impl<'session> CommandExecutor<'session> {
     /// scan(committed uncommitted)满足要求的node数据 <br>
     /// searchPointerKeys得到(committed uncommitted)属于node的,满足位置要求的,指向relation的pointerKey <br>
     /// 到pointerKey提取relation的dataKey <br>
-    /// 调用getByDataKeys(committed uncommitted) 融合 对relarion的过滤条件 确定 relation是不是满足
+    /// 调用getByDataKeys(committed uncommitted) 融合 对relation的过滤条件 确定 relation是不是满足
     /// <br>
     /// 相当是在原来基础上再加上对data指向的rel的筛选
     fn selectTableUnderRels(&self, selectTableUnderRels: &SelectTableUnderRels) -> Result<CommandExecResult> {

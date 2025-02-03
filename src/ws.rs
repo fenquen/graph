@@ -147,13 +147,11 @@ async fn processGraphWsRequest(writeStream: &mut SplitSink<WebSocketStream<TcpSt
                                text: &str,
                                session: &mut Session,
                                remoteAddr: &SocketAddr) -> Result<()> {
-    let graphWsRequest = serde_json::from_str::<GraphWsRequest>(text);
-    if let Err(e) = graphWsRequest {
-        return Err(anyhow::Error::new(GraphError::new(&e.to_string())));
-    }
-
-    let graphWsRequest = graphWsRequest.unwrap();
-
+    let graphWsRequest =
+        match serde_json::from_str::<GraphWsRequest>(text) {
+            Err(e) => return Err(anyhow::Error::new(GraphError::new(&e.to_string()))),
+            Ok(graphWsRequest) => graphWsRequest
+        };
 
     log::info!("current thread: {:?}",thread::current().id());
 

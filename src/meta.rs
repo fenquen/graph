@@ -58,7 +58,7 @@ pub const KEY_PREFIX_DATA: KeyPrefix = 0;
 pub const KEY_PREFIX_POINTER: KeyPrefix = 1;
 /// 应对的是data本身的 pointer体系的mvcc信息是在pointerKey末尾
 pub const KEY_PREFIX_MVCC: KeyPrefix = 2;
-pub const KEY_PPREFIX_ORIGIN_DATA_KEY: KeyPrefix = 3;
+pub const KEY_PREFIX_ORIGIN_DATA_KEY: KeyPrefix = 3;
 
 // ----------------------------------------------------------------------
 

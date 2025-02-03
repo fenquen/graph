@@ -1,3 +1,4 @@
+use core::slice;
 use std::cell::RefCell;
 use hashbrown::{HashMap, HashSet};
 use std::collections::{BTreeMap};
@@ -181,16 +182,16 @@ impl<'session> CommandExecutor<'session> {
 
         let mut rowDatas = Vec::with_capacity(dataKeys.len());
 
-        let columnFamily = Session::getColumnFamily(scanParams.table.id)?;
-
         let mut mvccKeyBuffer = &mut self.withCapacityIn(meta::MVCC_KEY_BYTE_LEN);
+
+        let columnFamily = Session::getColumnFamily(scanParams.table.id)?;
         let mut rawIterator: DBRawIterator = self.session.getDBRawIterator(&columnFamily)?;
 
         let dbObjectId_mutations = self.session.dbObjectId_mutations.read().unwrap();
         let tableMutations: Option<&TableMutations> = dbObjectId_mutations.get(&scanParams.table.id);
 
         let mut processDataKey =
-            |dataKey: DataKey, sender: Option<SyncSender<(DataKey, RowData)>>| -> Result<()> {
+            |dataKey: DataKey, sender: Option<&SyncSender<(DataKey, RowData)>>| -> Result<()> {
                 // todo getRowDatasByDataKeys 增加对uncommitted的区域的搜索 完成
                 // 习惯的套路和scan函数相同 都是先搜索committed然后是uncommitted 这对scan来说是可以的
                 // 对这边的直接通过datakey获取有点不合适了 搜索uncommitted逻辑要到前边,要是有的话可以提前return
@@ -252,9 +253,57 @@ impl<'session> CommandExecutor<'session> {
                 processDataKey(dataKey, None)?;
             }
         } else {
-            // todo 使用rayon 遍历
-            for dataKey in dataKeys {
-                processDataKey(*dataKey, None)?;
+            unsafe {
+                const DATA_KEYS_PER_THREAD: usize = 1;
+
+                let count = dataKeys.len() / DATA_KEYS_PER_THREAD;
+                let tailLen = dataKeys.len() % DATA_KEYS_PER_THREAD;
+
+                if count == 0 {
+                    // todo 使用rayon 遍历
+                    for dataKey in dataKeys {
+                        processDataKey(*dataKey, None)?;
+                    }
+                } else {
+                    rayon::scope(|scope| {
+                        let mut ptr = dataKeys.as_ptr();
+
+                        let mut subSliceVec = if tailLen > 0 {
+                            Vec::with_capacity(count)
+                        } else {
+                            Vec::with_capacity(count + 1)
+                        };
+
+                        for _ in 0..count {
+                            ptr = ptr.add(DATA_KEYS_PER_THREAD);
+
+                            // slice使用指针套路且分成多个小slice
+                            subSliceVec.push(slice::from_raw_parts(ptr, DATA_KEYS_PER_THREAD));
+                        }
+
+                        if tailLen > 0 {
+                            subSliceVec.push(slice::from_raw_parts(ptr, tailLen));
+                        }
+
+                        let (sender, receiver) = mpsc::sync_channel(DATA_KEYS_PER_THREAD);
+
+                        for subSlice in subSliceVec {
+                            let sender = sender.clone();
+
+                            scope.spawn(move |_| {
+                                for dataKey in subSlice {
+                                    processDataKey(*dataKey, Some(&sender));
+                                }
+                            })
+                        }
+
+                        // scope.spawn(move |_| {
+                        //     for dataKey in subSlice {
+                        //         processDataKey(*dataKey, None);
+                        //     }
+                        // });
+                    });
+                }
             }
         }
 
@@ -413,12 +462,13 @@ impl<'session> CommandExecutor<'session> {
                                     let processor = || {
                                         let tableName = scanParams.table.name.clone();
 
-                                        // 还原变为
+                                        // 以下是lambda外部的共用的 通过ptr还原
                                         let commandExecutor: &CommandExecutor<'session> = mem::transmute(commandExecutorPointer as *const CommandExecutor);
                                         let tableFilter: Option<&Expr> = tableFilterPointer.map(|tableFilterPointer| mem::transmute(tableFilterPointer as *const Expr));
                                         let selectedColumnNames: Option<&Vec<String>> = selectedColumnNamesPointer.map(|selectedColumnNamesPointer| mem::transmute(selectedColumnNamesPointer as *const Vec<String>));
                                         let scanHooks: &mut ScanHooks<A, B, C, D> = mem::transmute(scanHooksPointer as *mut ScanHooks<A, B, C, D>);
 
+                                        // 以下是各个thread上单独的
                                         let table = Session::getDBObjectByName(tableName.as_str())?;
                                         let table = table.asTable()?;
 

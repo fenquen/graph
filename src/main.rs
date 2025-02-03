@@ -25,6 +25,7 @@ use std::string::ToString;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt;
+
 #[tokio::main]
 pub async fn main() -> Result<()> {
     log4rs::init_file(config::CONFIG.log4RsYamlPath.as_str(), Default::default())?;

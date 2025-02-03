@@ -63,7 +63,7 @@ impl<'session> CommandExecutor<'session> {
 
                         // rowId对应的各个体系都需要干掉, dataKey mvccKey pointerKey originDataKeyKey
                         if thresholdTxIdInclude >= xmax && xmax != meta::TX_ID_INVALID {
-                            for keyPrefix in meta::KEY_PREFIX_DATA..=meta::KEY_PPREFIX_ORIGIN_DATA_KEY {
+                            for keyPrefix in meta::KEY_PREFIX_DATA..=meta::KEY_PREFIX_ORIGIN_DATA_KEY {
                                 dataStore.delete_range_cf(&columnFamily,
                                                           u64ToByteArrRef!(keyPrefixAddRowId!(keyPrefix, rowId)),
                                                           u64ToByteArrRef!(keyPrefixAddRowId!(keyPrefix, rowId + 1)))?;

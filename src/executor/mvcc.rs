@@ -53,7 +53,7 @@ impl<'session> CommandExecutor<'session> {
         let snapshot = self.session.getSnapshot()?;
 
         // 应对多个tx对相同rowId的数据update而产生的多条新data
-        let originDataKeyKey = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, extractRowIdFromDataKey!(dataKey)));
+        let originDataKeyKey = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_ORIGIN_DATA_KEY, extractRowIdFromDataKey!(dataKey)));
         let originDataKey = snapshot.get_cf(columnFamily, originDataKeyKey)?.unwrap();
         let originDataKey = byte_slice_to_u64!(originDataKey);
         // 说明本条data是通过update而来 老data的dataKey是originDataKey
@@ -200,7 +200,7 @@ impl<'session> CommandExecutor<'session> {
     pub(super) fn generateOrigin(&self, selfDataKey: DataKey, originDataKey: DataKey) -> KV {
         let selfRowId = extractRowIdFromDataKey!(selfDataKey);
         (
-            u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PPREFIX_ORIGIN_DATA_KEY, selfRowId)).to_vec(),
+            u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_ORIGIN_DATA_KEY, selfRowId)).to_vec(),
             u64ToByteArrRef!(originDataKey).to_vec()
         )
     }
