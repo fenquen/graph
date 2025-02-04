@@ -1,10 +1,11 @@
 use std::io;
+use std::ops::{BitAnd, Sub};
 use anyhow::Result;
 
-pub(crate) fn getPageSize() -> usize {
+pub(crate) fn getOsPageSize() -> u16 {
     invokeLibcFn(|| { unsafe { libc::sysconf(libc::_SC_PAGESIZE) } }).map_or_else(
         |_| { DEFAULT_PAGE_SIZE },
-        |pageSize| { pageSize as usize },
+        |pageSize| { pageSize as u16 },
     )
 }
 
@@ -14,7 +15,7 @@ pub(crate) fn invokeLibcFn<T: LibcResult>(func: impl Fn() -> T) -> Result<T> {
     if t.success() {
         Ok(t)
     } else {
-        Err(anyhow::Error::msg(t.errMsg()))
+        throw!(t.errMsg())
     }
 }
 
@@ -36,5 +37,12 @@ impl LibcResult for i64 {
     }
 }
 
+pub(crate) fn isPowerOfTwo<T>(n: T) -> bool
+where
+    T: BitAnd<Output=T> + Sub<Output=T> + PartialEq + From<u8> + Copy,
+{
+    n != T::from(0) && (n & (n - T::from(1))) == T::from(0)
+}
+
 pub(crate) const EMPTY_STR: &str = "";
-pub(crate) const DEFAULT_PAGE_SIZE: usize = 4096;
+pub(crate) const DEFAULT_PAGE_SIZE: u16 = 4096;
