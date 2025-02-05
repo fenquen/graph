@@ -247,8 +247,12 @@ impl<'session> CommandExecutor<'session> {
                 Ok(())
             };
 
+        for dataKey in dataKeys[1]..=dataKeys[2] {
+            processDataKey(dataKey, None)?;
+        }
+
         // 要得到表的全部的data
-        if dataKeys[0] == global::TOTAL_DATA_OF_TABLE {
+       /* if dataKeys[0] == global::TOTAL_DATA_OF_TABLE {
             for dataKey in dataKeys[1]..=dataKeys[2] {
                 processDataKey(dataKey, None)?;
             }
@@ -296,16 +300,10 @@ impl<'session> CommandExecutor<'session> {
                                 }
                             })
                         }
-
-                        // scope.spawn(move |_| {
-                        //     for dataKey in subSlice {
-                        //         processDataKey(*dataKey, None);
-                        //     }
-                        // });
                     });
                 }
             }
-        }
+        }*/
 
         Ok(rowDatas)
     }
