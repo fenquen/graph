@@ -13,7 +13,7 @@ mod tests {
     #[test]
     fn general() {
         let dbOption = DBOption {
-            dirPath: "graph.db".to_string(),
+            dirPath: "data".to_string(),
             mmapUnitSize: 0,
         };
 
