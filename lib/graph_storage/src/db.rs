@@ -1,33 +1,29 @@
 use crate::utils;
 use anyhow::{Result};
 use std::fmt::Display;
-use std::fs;
+use std::{fs, mem};
 use std::fs::{File, OpenOptions};
+use std::mem::{forget, ManuallyDrop};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::FileExt;
-use std::path::Path;
-use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
-use memmap2::MmapMut;
+use std::path::{Path, PathBuf};
+use libc::mmap;
+use memmap2::{Advice, MmapMut, MmapOptions};
 
 const MAGIC: u32 = 0xCAFEBABE;
 const VERSION: u16 = 1;
-const DB_HEADER_LEN: usize = 100;
-const DEFAULT_MMAP_UNIT_LEN: u32 = 1024 * 1024 * 1;
 
+pub(crate) const DB_HEADER_SIZE: usize = 100;
+const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024 * 1;
 
 pub struct DB {
-    pub dirPath: String,
-    pub header: DBHeader,
+    data0Fd: RawFd,
+    dbHeaderMmap: MmapMut,
 }
 
 impl DB {
     pub fn open(dbOption: &DBOption) -> Result<DB> {
         Self::verifyDirPath(&dbOption.dirPath)?;
-       
-        let mut db = DB {
-            header: Default::default(),
-            dirPath: dbOption.dirPath.clone(),
-        };
 
         let shouldInit = {
             let mut shouldInit = true;
@@ -41,72 +37,80 @@ impl DB {
             shouldInit
         };
 
-        if shouldInit {
-            db.init(dbOption)?;
-        } else {
-            // open the already exsit db files
-            db.validate()?;
-        }
+        let data0 =
+            if shouldInit {
+                // AsRef::<Path>::as_ref(&self.dirPath).join("data_0");
+                let data0Path = Path::join(dbOption.dirPath.as_ref(), "0.data");
+                let data0 = OpenOptions::new().read(true).write(true).create_new(true).open(data0Path)?;
 
-        Ok(db)
-    }
+                // extend as big as mmapUnitSize
+                let blockSize = if dbOption.blockSize > 0 {
+                    dbOption.blockSize
+                } else {
+                    DEFAULT_BLOCK_SIZE
+                };
+                data0.set_len(blockSize as u64)?;
+                data0.sync_all()?;
 
-    fn validate(&mut self) -> Result<()> {
-        let mut dbHeaderBuf = [0u8; DB_HEADER_LEN];
+                data0
+            } else { // open the already exsit db files
+                let data0Path = Path::join(dbOption.dirPath.as_ref(), "0.data");
+                let data0 = OpenOptions::new().read(true).write(true).open(data0Path)?;
 
-        let data0Path = Path::join(self.dirPath.as_ref(), "0.data");
-        let data0 = OpenOptions::new().read(true).write(true).open(data0Path)?;
+                if data0.metadata()?.len() < DB_HEADER_SIZE as u64 {
+                    throw!("0.data size should be greate than db DB_HEADER_SIZE");
+                }
 
-        let readLen = data0.read_at(dbHeaderBuf.as_mut_slice(), 0)?;
-        if readLen != DB_HEADER_LEN {
-            throw!("incorrect length");
-        }
-
-        unsafe {
-            self.header = *(dbHeaderBuf.as_ptr() as *const DBHeader);
-        }
-
-        self.header.validate()?;
-
-        // mmapUnitSize should equal with file length
-        if self.header.mmapUnitSize != data0.metadata()?.len() as u32 {
-            throw!("incorrect mmap size");
-        }
-
-        Ok(())
-    }
-
-    fn init(&mut self, dbOption: &DBOption) -> Result<()> {
-        let dbHeaderBuf = [0u8; DB_HEADER_LEN];
-
-        unsafe {
-            let dbHeader = dbHeaderBuf.as_ptr() as *mut DBHeader;
-            (*dbHeader).magic = MAGIC;
-            (*dbHeader).version = VERSION;
-            (*dbHeader).pageSize = utils::getOsPageSize();
-            (*dbHeader).mmapUnitSize = if dbOption.mmapUnitSize > 0 {
-                dbOption.mmapUnitSize
-            } else {
-                DEFAULT_MMAP_UNIT_LEN
+                data0
             };
 
-            self.header = *dbHeader;
+        let mut dbHeaderMmap = unsafe {
+            let mmapMut = {
+                let mut mmapOptions = MmapOptions::new();
+                mmapOptions.offset(0).len(DB_HEADER_SIZE);
+                mmapOptions.map_mut(data0.as_raw_fd())?
+            };
 
-            self.header.validate()?;
+            mmapMut.advise(Advice::WillNeed)?;
+            mmapMut.lock()?;
+
+            mmapMut
+        };
+
+        let dbHeader = (&mut dbHeaderMmap[..]).as_ptr() as *mut DBHeader;
+        let dbHeader = unsafe { mem::transmute::<*const DBHeader, &mut DBHeader>(dbHeader) };
+
+        if shouldInit {
+            dbHeader.magic = MAGIC;
+            dbHeader.version = VERSION;
+            dbHeader.pageSize = utils::getOsPageSize();
+            dbHeader.blockSize = if dbOption.blockSize > 0 {
+                dbOption.blockSize
+            } else {
+                DEFAULT_BLOCK_SIZE
+            };
+
+            dbHeaderMmap.flush()?;
         }
 
-        // AsRef::<Path>::as_ref(&self.dirPath).join("data_0");
-        let data0Path = Path::join(self.dirPath.as_ref(), "0.data");
-        let data0 = OpenOptions::new().read(true).write(true).create_new(true).open(data0Path)?;
+        dbHeader.validate()?;
 
-        // extend as big as mmapUnitSize
-        data0.set_len(self.header.mmapUnitSize as u64)?;
+        for readDir in fs::read_dir(&dbOption.dirPath)? {
+            let readDir = readDir?;
 
-        data0.write_at(dbHeaderBuf.as_slice(), 0)?;
+            if readDir.metadata()?.len() != dbHeader.blockSize as u64 {
+                throw!("data file size should be equal to block size");
+            }
+        }
 
-        data0.sync_all()?;
+        let db = DB {
+            data0Fd: data0.as_raw_fd(),
+            dbHeaderMmap,
+        };
 
-        Ok(())
+        let _ = ManuallyDrop::new(data0);
+
+        Ok(db)
     }
 
     fn verifyDirPath(dirPath: impl AsRef<Path> + Display) -> Result<()> {
@@ -138,15 +142,32 @@ impl DB {
 
         Ok(())
     }
+    
+    
+    
+}
+
+impl Drop for DB {
+    fn drop(&mut self) {
+        if self.data0Fd != 0 {
+            let file = unsafe { File::from_raw_fd(self.data0Fd) };
+            drop(file);
+        }
+    }
+}
+
+pub struct DBOption {
+    pub dirPath: String,
+    pub blockSize: u32,
 }
 
 #[derive(Default, Clone, Copy)]
 #[repr(C)]
-pub struct DBHeader {
+pub(crate) struct DBHeader {
     pub magic: u32,
     pub version: u16,
     pub pageSize: u16,
-    pub mmapUnitSize: u32,
+    pub blockSize: u32,
 }
 
 impl DBHeader {
@@ -164,11 +185,11 @@ impl DBHeader {
             throw!("page size must be a power of two");
         }
 
-        if utils::isPowerOfTwo(self.mmapUnitSize) == false {
+        if utils::isPowerOfTwo(self.blockSize) == false {
             throw!("mmap unit size must be a power of two");
         }
 
-        if self.pageSize as u32 > self.mmapUnitSize {
+        if self.pageSize as u32 > self.blockSize {
             throw!("page size should not exceed mmapUnitSize");
         }
 
@@ -176,7 +197,6 @@ impl DBHeader {
     }
 }
 
-pub struct DBOption {
-    pub dirPath: String,
-    pub mmapUnitSize: u32,
-}
+#[derive(Default, Clone, Copy)]
+#[repr(C)]
+pub(crate) struct BlockHeader;

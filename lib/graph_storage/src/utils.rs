@@ -30,10 +30,10 @@ pub(crate) trait LibcResult: Sized + Copy {
 
     fn errMsg(&self) -> String {
         if self.success() {
-            return EMPTY_STR.to_string();
+             EMPTY_STR.to_string()
+        } else {
+            io::Error::last_os_error().to_string()
         }
-
-        io::Error::last_os_error().to_string()
     }
 }
 
