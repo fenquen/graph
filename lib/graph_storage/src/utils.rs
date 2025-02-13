@@ -1,9 +1,11 @@
 use std::{fs, io};
-use std::fs::Metadata;
+use std::fs::{Metadata};
 use std::ops::{BitAnd, Sub};
+use std::os::fd::{RawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use anyhow::Result;
+use memmap2::{Mmap, MmapOptions};
 
 pub(crate) const EMPTY_STR: &str = "";
 pub(crate) const DEFAULT_PAGE_SIZE: u16 = 4096;
@@ -30,7 +32,7 @@ pub(crate) trait LibcResult: Sized + Copy {
 
     fn errMsg(&self) -> String {
         if self.success() {
-             EMPTY_STR.to_string()
+            EMPTY_STR.to_string()
         } else {
             io::Error::last_os_error().to_string()
         }
@@ -92,4 +94,21 @@ pub(crate) fn haveWritePermission(metadata: &Metadata) -> bool {
     }
 
     writable
+}
+
+#[inline]
+pub(crate) fn mmapFd(fd: RawFd, offset: u64, len: usize) -> Result<Mmap> {
+    unsafe {
+        Ok(MmapOptions::new().offset(offset).len(len).map(fd)?)
+    }
+}
+
+pub(crate) unsafe fn slice2Ref<'a, T>(slice: impl AsRef<[u8]>) -> &'a T {
+    let slice = slice.as_ref();
+    &*(slice.as_ptr() as *const T)
+}
+
+pub(crate) unsafe fn slice2RefMut<'a, T>(mut slice: impl AsMut<[u8]>) -> &'a mut T {
+    let slice = slice.as_mut();
+    &mut *(slice.as_mut_ptr() as *mut T)
 }

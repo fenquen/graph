@@ -1,8 +1,9 @@
 use std::{mem, ptr};
 use crate::types::PageId;
 
-pub(crate) const PAGE_FLAG_LEAF: u16 = 1;
-pub(crate) const PAGE_FLAG_BRANCH: u16 = 1 << 1;
+pub(crate) const PAGE_FLAG_META: u16 = 1;
+pub(crate) const PAGE_FLAG_LEAF: u16 = 1 << 1;
+pub(crate) const PAGE_FLAG_BRANCH: u16 = 1 << 2;
 
 pub(crate) const PAGE_HEADER_SIZE: usize = size_of::<PageHeader>();
 

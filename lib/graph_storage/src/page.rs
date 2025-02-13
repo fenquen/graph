@@ -1,16 +1,21 @@
-use crate::page::Elem::{Branch, Leaf};
+use std::sync::{Arc, RwLock};
+use dashmap::mapref::one::RefMut;
+use memmap2::Mmap;
 use crate::page_header::PageHeader;
 use crate::types::PageId;
 
 /// page presentation in program
-pub(crate) struct Page<'a> {
-    pub(crate) pageId: PageId,
-    pub(crate) flags: u16,
-    pub(crate) elems: Vec<Elem<'a>>,
+pub(crate) struct Page {
+    pub(crate) parentPage: Option<Arc<RwLock<Page>>>,
+    rwLock: RwLock<()>,
+    pub(crate) mmap: Mmap,
+    pub(crate) header: &'static PageHeader,
+    pub(crate) elems: Vec<PageElem<'static>>,
+    pub(crate) childPages: Option<Vec<Arc<RwLock<Page>>>>,
 }
 
-impl<'a> Page<'a> {
-    pub(crate) fn readFromPageHeader(pageHeader: &'a PageHeader) -> Self {
+impl Page {
+    pub(crate) fn readFromPageHeader(mmap: Mmap, pageHeader: &'static PageHeader) -> Page {
         let elems = {
             let mut elems = Vec::with_capacity(pageHeader.elemCount as usize);
 
@@ -19,10 +24,10 @@ impl<'a> Page<'a> {
                     if pageHeader.isLeaf() {
                         let leafElemMeta = pageHeader.readLeafElemMeta(a);
                         let (k, v) = leafElemMeta.readKV();
-                        Elem::Leaf(k, v)
+                        PageElem::LeafR(k, v)
                     } else {
                         let branchElemMeta = pageHeader.readBranchElemMeta(a);
-                        Elem::Branch(branchElemMeta.readKey())
+                        PageElem::BranchR(branchElemMeta.readKey())
                     };
 
                 elems.push(elem);
@@ -30,25 +35,31 @@ impl<'a> Page<'a> {
 
             elems
         };
-        
+
         Page {
-            pageId: pageHeader.pageId,
-            flags: pageHeader.flags,
+            parentPage: None,
+            rwLock: RwLock::new(()),
+            mmap,
+            header: pageHeader,
             elems,
+            childPages: None,
         }
     }
 }
 
-pub(crate) enum Elem<'a> {
-    Leaf(&'a [u8], &'a [u8]),
-    Branch(&'a [u8]),
+// table(文件)->block   block(文件)->page
+pub(crate) enum PageElem<'a> {
+    LeafR(&'a [u8], &'a [u8]),
+    LeafRW(Vec<u8>, Vec<u8>),
+    BranchR(&'a [u8]),
+    BranchRW(Vec<u8>),
 }
 
-impl<'a> Elem<'a> {
+impl<'a> PageElem<'a> {
     pub(crate) fn isLeaf(&self) -> bool {
         match self {
-            Leaf { .. } => true,
-            Branch(_) => false,
+            PageElem::LeafR(_, _) | PageElem::LeafRW(_, _) => true,
+            PageElem::BranchR(_) | PageElem::BranchRW(_) => false,
         }
     }
 }

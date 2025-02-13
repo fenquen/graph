@@ -1,14 +1,25 @@
-use crate::utils;
+use crate::{page_header, utils};
 use anyhow::{Result};
 use std::fmt::Display;
 use std::{fs, mem};
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::mem::{forget, ManuallyDrop};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
-use libc::mmap;
-use memmap2::{Advice, MmapMut, MmapOptions};
+use std::path::{Path};
+use std::str::FromStr;
+use std::sync::{Arc, RwLock};
+use std::sync::atomic::AtomicUsize;
+use dashmap::DashMap;
+use dashmap::mapref::multiple::RefMulti;
+use dashmap::mapref::one::RefMut;
+use libc::read;
+use memmap2::{Advice, Mmap, MmapMut, MmapOptions};
+use crate::page::Page;
+use crate::page_header::PageHeader;
+use crate::types::{PageId, TxId};
 
 const MAGIC: u32 = 0xCAFEBABE;
 const VERSION: u16 = 1;
@@ -17,8 +28,14 @@ pub(crate) const DB_HEADER_SIZE: usize = 100;
 const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024 * 1;
 
 pub struct DB {
-    data0Fd: RawFd,
     dbHeaderMmap: MmapMut,
+    /// source from dbHeaderMap
+    dbHeader: &'static DBHeader,
+    /// sorted by block file number
+    dataFds: Vec<RawFd>,
+    pageId2Page: DashMap<PageId, Arc<RwLock<Page>>>,
+    memTable: HashMap<Vec<u8>, Vec<u8>>,
+    immutableMemTables: Vec<HashMap<Vec<u8>, Vec<u8>>>,
 }
 
 impl DB {
@@ -37,38 +54,87 @@ impl DB {
             shouldInit
         };
 
-        let data0 =
+        let block0FileFd =
+            // generate dbHeader and initial some pages, write them into files
             if shouldInit {
-                // AsRef::<Path>::as_ref(&self.dirPath).join("data_0");
-                let data0Path = Path::join(dbOption.dirPath.as_ref(), "0.data");
-                let data0 = OpenOptions::new().read(true).write(true).create_new(true).open(data0Path)?;
+                // allocate space for 2 pages in memory
+                let pageSize = utils::getOsPageSize();
+                let mut pageSpace = vec![0; pageSize as usize * 2];
 
-                // extend as big as mmapUnitSize
-                let blockSize = if dbOption.blockSize > 0 {
+                // transmute as dbHeader in page0, write dbHeader field values
+                let dbHeader: &mut DBHeader = unsafe { utils::slice2RefMut(&mut pageSpace) };
+                dbHeader.magic = MAGIC;
+                dbHeader.version = VERSION;
+                dbHeader.pageSize = utils::getOsPageSize();
+                dbHeader.blockSize = if dbOption.blockSize > 0 {
                     dbOption.blockSize
                 } else {
                     DEFAULT_BLOCK_SIZE
                 };
-                data0.set_len(blockSize as u64)?;
-                data0.sync_all()?;
+                dbHeader.nextTxId = 0;
+                dbHeader.rootPageId = 1;
 
-                data0
+                // transmute as pageHeader in page0
+                let page0Header: &mut PageHeader = unsafe { utils::slice2RefMut(&mut pageSpace[DB_HEADER_SIZE..]) };
+                page0Header.pageId = 0;
+                page0Header.flags = page_header::PAGE_FLAG_META;
+
+                // transmute as pageHeader in page1
+                let page0Header: &mut PageHeader = unsafe { utils::slice2RefMut(&mut pageSpace[pageSize as usize..]) };
+                page0Header.pageId = 1;
+                page0Header.flags = page_header::PAGE_FLAG_LEAF;
+
+                // bbolt
+                let blockCount = (pageSpace.capacity() + dbHeader.blockSize as usize - 1) / dbHeader.blockSize as usize;
+
+                let mut block0Fd = 0;
+                for blockFileNum in 0..blockCount {
+                    let blockFilePath = Path::join(dbOption.dirPath.as_ref(), format!("{}.data", blockFileNum));
+                    let mut blockFile = OpenOptions::new().read(true).write(true).create_new(true).open(blockFilePath)?;
+
+                    // extend to blockSize
+                    blockFile.set_len(dbHeader.blockSize as u64)?;
+
+                    // last part
+                    let data2Write =
+                        if blockFileNum == blockCount - 1 {
+                            &pageSpace[blockFileNum * dbHeader.blockSize as usize..]
+                        } else {
+                            &pageSpace[blockFileNum * dbHeader.blockSize as usize..(blockFileNum + 1) * dbHeader.blockSize as usize]
+                        };
+
+                    let writtenSize = blockFile.write(data2Write)?;
+                    assert_eq!(writtenSize, data2Write.len());
+
+                    blockFile.sync_all()?;
+
+                    if blockFileNum == 0 {
+                        block0Fd = blockFile.as_raw_fd();
+                        forget(blockFile);
+                    }
+                }
+
+                block0Fd
             } else { // open the already exsit db files
-                let data0Path = Path::join(dbOption.dirPath.as_ref(), "0.data");
-                let data0 = OpenOptions::new().read(true).write(true).open(data0Path)?;
+                let block0FilePath = Path::join(dbOption.dirPath.as_ref(), "0.data");
+                let block0File = OpenOptions::new().read(true).write(true).open(block0FilePath)?;
 
-                if data0.metadata()?.len() < DB_HEADER_SIZE as u64 {
+                if block0File.metadata()?.len() < DB_HEADER_SIZE as u64 {
                     throw!("0.data size should be greate than db DB_HEADER_SIZE");
                 }
 
-                data0
+                let block0FileFd = block0File.as_raw_fd();
+                forget(block0File);
+
+                block0FileFd
             };
 
+        // map 0.data leading part into dbHeader
         let mut dbHeaderMmap = unsafe {
             let mmapMut = {
                 let mut mmapOptions = MmapOptions::new();
                 mmapOptions.offset(0).len(DB_HEADER_SIZE);
-                mmapOptions.map_mut(data0.as_raw_fd())?
+                mmapOptions.map_mut(block0FileFd)?
             };
 
             mmapMut.advise(Advice::WillNeed)?;
@@ -77,38 +143,60 @@ impl DB {
             mmapMut
         };
 
-        let dbHeader = (&mut dbHeaderMmap[..]).as_ptr() as *mut DBHeader;
-        let dbHeader = unsafe { mem::transmute::<*const DBHeader, &mut DBHeader>(dbHeader) };
-
-        if shouldInit {
-            dbHeader.magic = MAGIC;
-            dbHeader.version = VERSION;
-            dbHeader.pageSize = utils::getOsPageSize();
-            dbHeader.blockSize = if dbOption.blockSize > 0 {
-                dbOption.blockSize
-            } else {
-                DEFAULT_BLOCK_SIZE
-            };
-
-            dbHeaderMmap.flush()?;
-        }
-
+        let dbHeader = unsafe { utils::slice2RefMut::<'static, DBHeader>(&mut dbHeaderMmap) };
         dbHeader.validate()?;
 
-        for readDir in fs::read_dir(&dbOption.dirPath)? {
-            let readDir = readDir?;
+        // try to hold all data file fds
+        let dataFds = {
+            let mut dataFds = Vec::new();
 
-            if readDir.metadata()?.len() != dbHeader.blockSize as u64 {
-                throw!("data file size should be equal to block size");
+            dataFds.push((0, block0FileFd));
+
+            for readDir in fs::read_dir(&dbOption.dirPath)? {
+                let readDir = readDir?;
+
+                let path = readDir.path();
+
+                if !path.ends_with(".data") {
+                    continue;
+                }
+
+                let dataFileNameStr = path.file_name().unwrap().to_str().unwrap();
+                let elemVec = dataFileNameStr.split(".").collect::<Vec<&str>>();
+                if 1 >= elemVec.len() {
+                    continue;
+                }
+
+                let blockNum = u64::from_str(elemVec.get(0).unwrap())?;
+
+                // block file size
+                if readDir.metadata()?.len() != dbHeader.blockSize as u64 {
+                    throw!("block file size should be equal to blockSize in dbHeader");
+                }
+
+                // already added
+                if blockNum == 0 {
+                    continue;
+                }
+
+                let dataFile = OpenOptions::new().read(true).write(true).open(path)?;
+                dataFds.push((blockNum, dataFile.as_raw_fd()));
+                let _ = ManuallyDrop::new(dataFile);
             }
-        }
 
-        let db = DB {
-            data0Fd: data0.as_raw_fd(),
-            dbHeaderMmap,
+            dataFds.sort_by(|a, b| { a.0.cmp(&b.0) });
+
+            dataFds.into_iter().map(|x| x.1).collect::<Vec<_>>()
         };
 
-        let _ = ManuallyDrop::new(data0);
+        let db = DB {
+            dbHeaderMmap,
+            dbHeader,
+            dataFds,
+            pageId2Page: DashMap::new(),
+            memTable: Default::default(),
+            immutableMemTables: Default::default(),
+        };
 
         Ok(db)
     }
@@ -142,15 +230,40 @@ impl DB {
 
         Ok(())
     }
-    
-    
-    
+
+    pub(crate) fn getPageById(&self,
+                              pageId: PageId,
+                              parentPage: Option<Arc<RwLock<Page>>>) -> Result<Arc<RwLock<Page>>> {
+        if let Some(page) = self.pageId2Page.get(&pageId) {
+            return Ok(page.clone());
+        }
+
+        let targetBlockFd = {
+            let blockNum = (self.dbHeader.pageSize as u64 * pageId) / self.dbHeader.blockSize as u64;
+            self.dataFds.get(blockNum as usize).unwrap()
+        };
+
+        let pageMmap = {
+            let pageHeaderOffsetInBlock = (self.dbHeader.pageSize as u64 * pageId) % self.dbHeader.blockSize as u64;
+            utils::mmapFd(*targetBlockFd, pageHeaderOffsetInBlock, self.dbHeader.pageSize as usize)?
+        };
+
+        let pageHeader = unsafe { utils::slice2Ref::<'static, PageHeader>(&pageMmap) };
+
+        let mut page = Page::readFromPageHeader(pageMmap, pageHeader);
+        page.parentPage = parentPage;
+
+        let page = Arc::new(RwLock::new(page));
+        self.pageId2Page.insert(pageId, page.clone());
+
+        Ok(page)
+    }
 }
 
 impl Drop for DB {
     fn drop(&mut self) {
-        if self.data0Fd != 0 {
-            let file = unsafe { File::from_raw_fd(self.data0Fd) };
+        for dataFd in self.dataFds.iter() {
+            let file = unsafe { File::from_raw_fd(*dataFd) };
             drop(file);
         }
     }
@@ -168,6 +281,8 @@ pub(crate) struct DBHeader {
     pub version: u16,
     pub pageSize: u16,
     pub blockSize: u32,
+    pub nextTxId: TxId,
+    pub rootPageId: PageId,
 }
 
 impl DBHeader {
