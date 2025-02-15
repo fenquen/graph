@@ -9,6 +9,7 @@ mod page_header;
 mod types;
 mod page;
 mod tx;
+mod constant;
 
 #[cfg(test)]
 mod tests {

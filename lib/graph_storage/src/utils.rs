@@ -108,7 +108,7 @@ pub(crate) unsafe fn slice2Ref<'a, T>(slice: impl AsRef<[u8]>) -> &'a T {
     &*(slice.as_ptr() as *const T)
 }
 
-pub(crate) unsafe fn slice2RefMut<'a, T>(mut slice: impl AsMut<[u8]>) -> &'a mut T {
-    let slice = slice.as_mut();
-    &mut *(slice.as_mut_ptr() as *mut T)
+pub(crate) unsafe fn slice2RefMut<'a, T>(slice: impl AsRef<[u8]>) -> &'a mut T {
+    let slice = slice.as_ref();
+    &mut *(slice.as_ptr() as *mut T)
 }
