@@ -1,27 +1,23 @@
-use crate::{constant, page_header, utils};
-use anyhow::{Result};
-use std::fmt::Display;
-use std::{fs, mem};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::mem::{forget, ManuallyDrop};
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use std::path::{Path};
-use std::str::FromStr;
-use std::sync::{Arc, Mutex, RwLock};
-use std::sync::atomic::{AtomicU64, AtomicUsize};
-use std::sync::atomic::Ordering as atomic_ordering;
-use dashmap::DashMap;
-use dashmap::mapref::multiple::RefMulti;
-use dashmap::mapref::one::RefMut;
-use libc::read;
-use memmap2::{Advice, Mmap, MmapMut, MmapOptions};
 use crate::page::Page;
 use crate::page_header::PageHeader;
 use crate::tx::Tx;
 use crate::types::{PageId, TxId};
+use crate::{constant, page_header, utils};
+use anyhow::Result;
+use dashmap::DashMap;
+use memmap2::{Advice, MmapMut, MmapOptions};
+use std::collections::BTreeMap;
+use std::fmt::Display;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::mem::{forget, ManuallyDrop};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::path::Path;
+use std::str::FromStr;
+use std::sync::atomic::Ordering as atomic_ordering;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex, RwLock};
+use std::fs;
 
 const MAGIC: u32 = 0xCAFEBABE;
 const VERSION: u16 = 1;
@@ -36,11 +32,11 @@ pub struct DB {
     /// sorted by block file number
     blockFileFds: Vec<RawFd>,
     pageId2Page: DashMap<PageId, Arc<RwLock<Page>>>,
-    memTable: BTreeMap<Vec<u8>, Vec<u8>>,
-    immutableMemTables: Vec<BTreeMap<Vec<u8>, Vec<u8>>>,
+    pub(crate) memTable: BTreeMap<Vec<u8>, Arc<Vec<u8>>>,
+    pub(crate) immutableMemTables: Vec<BTreeMap<Vec<u8>, Arc<Vec<u8>>>>,
 }
 
-// pub
+// pub fn
 impl DB {
     pub fn open(dbOption: &DBOption) -> Result<DB> {
         Self::verifyDirPath(&dbOption.dirPath)?;
@@ -153,6 +149,7 @@ impl DB {
 
         let dbHeader = self.getHeaderMut();
 
+        // txId increase
         {
             let lock = self.lock.lock().unwrap();
             dbHeader.lastTxId = txId;
@@ -170,8 +167,9 @@ impl DB {
     }
 }
 
-// pub (crate)
+// pub (crate) fn
 impl DB {
+    #[inline]
     pub(crate) fn getHeader(&self) -> &DBHeader {
         unsafe { utils::slice2Ref(&self.dbHeaderMmap) }
     }
@@ -212,6 +210,7 @@ impl DB {
     }
 }
 
+// fn
 impl DB {
     fn verifyDirPath(dirPath: impl AsRef<Path> + Display) -> Result<()> {
         if Path::exists(&dirPath.as_ref()) == false {

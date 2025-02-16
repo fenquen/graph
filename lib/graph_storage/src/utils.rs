@@ -98,9 +98,7 @@ pub(crate) fn haveWritePermission(metadata: &Metadata) -> bool {
 
 #[inline]
 pub(crate) fn mmapFd(fd: RawFd, offset: u64, len: usize) -> Result<Mmap> {
-    unsafe {
-        Ok(MmapOptions::new().offset(offset).len(len).map(fd)?)
-    }
+    unsafe { Ok(MmapOptions::new().offset(offset).len(len).map(fd)?) }
 }
 
 pub(crate) unsafe fn slice2Ref<'a, T>(slice: impl AsRef<[u8]>) -> &'a T {

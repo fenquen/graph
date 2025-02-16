@@ -7,7 +7,6 @@ use crate::types::PageId;
 /// page presentation in program
 pub(crate) struct Page {
     pub(crate) parentPage: Option<Arc<RwLock<Page>>>,
-    rwLock: RwLock<()>,
     pub(crate) mmap: Mmap,
     pub(crate) header: &'static PageHeader,
     pub(crate) elems: Vec<PageElem<'static>>,
@@ -38,7 +37,6 @@ impl Page {
 
         Page {
             parentPage: None,
-            rwLock: RwLock::new(()),
             mmap,
             header: pageHeader,
             elems,
