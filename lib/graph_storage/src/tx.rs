@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::{mpsc, Arc};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 
 pub struct Tx {
@@ -103,6 +103,11 @@ impl Tx {
     }
 
     pub fn commit(self) -> Result<()> {
+        if let Err(_) = self.committed.compare_exchange(false, true,
+                                                        Ordering::SeqCst, Ordering::Acquire) {
+            return Ok(());
+        }
+
         if self.changes.is_empty() {
             return Ok(());
         }
