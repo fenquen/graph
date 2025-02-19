@@ -1,6 +1,6 @@
 use crate::page::Page;
 use crate::page_header::PageHeader;
-use crate::tx::Tx;
+use crate::tx::{CommitReq, Tx};
 use crate::types::{PageId, TxId};
 use crate::{constant, page_header, utils};
 use anyhow::Result;
@@ -8,22 +8,24 @@ use dashmap::DashMap;
 use memmap2::{Advice, MmapMut, MmapOptions};
 use std::collections::BTreeMap;
 use std::fmt::Display;
+use std::{fs, thread};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::mem::{forget, ManuallyDrop};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::atomic::Ordering as atomic_ordering;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, RwLock};
-use std::fs;
+use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::mpsc::{Receiver, SyncSender};
 
 const MAGIC: u32 = 0xCAFEBABE;
 const VERSION: u16 = 1;
 
 pub(crate) const DB_HEADER_SIZE: usize = 100;
-const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024 * 1;
+pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024 * 1;
+pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1000;
 
 pub struct DB {
     dbHeaderMmap: MmapMut,
@@ -31,14 +33,17 @@ pub struct DB {
     txIdCounter: AtomicU64,
     /// sorted by block file number
     blockFileFds: Vec<RawFd>,
-    pageId2Page: DashMap<PageId, Arc<RwLock<Page>>>,
-    pub(crate) memTable: BTreeMap<Vec<u8>, Arc<Vec<u8>>>,
+    pageId2Page: DashMap<PageId, Arc<Page>>,
+    pub(crate) memTable: RwLock<BTreeMap<Vec<u8>, Arc<Vec<u8>>>>,
     pub(crate) immutableMemTables: Vec<BTreeMap<Vec<u8>, Arc<Vec<u8>>>>,
+    pub(crate) commitReqSender: SyncSender<CommitReq>,
 }
 
 // pub fn
 impl DB {
-    pub fn open(dbOption: &DBOption) -> Result<DB> {
+    pub fn open(dbOption: Option<DBOption>) -> Result<Arc<DB>> {
+        let dbOption = dbOption.unwrap_or(DBOption::default());
+
         Self::verifyDirPath(&dbOption.dirPath)?;
 
         let shouldInit =
@@ -54,7 +59,7 @@ impl DB {
         let block0FileFd =
             // generate dbHeader and initial some pages, write them into files
             if shouldInit {
-                Self::init(dbOption)?
+                Self::init(&dbOption)?
             } else { // open the already exsit db files
                 let block0FilePath = Path::join(dbOption.dirPath.as_ref(), "0.data");
                 let block0File = OpenOptions::new().read(true).write(true).open(block0FilePath)?;
@@ -70,17 +75,17 @@ impl DB {
             };
 
         // map 0.data leading part into dbHeader
-        let mut dbHeaderMmap = unsafe {
-            let mmapMut = {
+        let dbHeaderMmap = unsafe {
+            let dbHeaderMmap = {
                 let mut mmapOptions = MmapOptions::new();
                 mmapOptions.offset(0).len(DB_HEADER_SIZE);
                 mmapOptions.map_mut(block0FileFd)?
             };
 
-            mmapMut.advise(Advice::WillNeed)?;
-            mmapMut.lock()?;
+            dbHeaderMmap.advise(Advice::WillNeed)?;
+            dbHeaderMmap.lock()?;
 
-            mmapMut
+            dbHeaderMmap
         };
 
         let dbHeader = unsafe { utils::slice2RefMut::<DBHeader>(&dbHeaderMmap) };
@@ -129,22 +134,29 @@ impl DB {
             blockFileFds.into_iter().map(|x| x.1).collect::<Vec<_>>()
         };
 
-        let lastTxId = dbHeader.lastTxId;
+        let (commitReqSender, commitReqReceiver) =
+            mpsc::sync_channel::<CommitReq>(dbOption.commitReqChanBufferSize);
 
-        let db = DB {
+        let db = Arc::new(DB {
             dbHeaderMmap,
             lock: Mutex::new(()),
-            txIdCounter: AtomicU64::new(lastTxId),
+            txIdCounter: AtomicU64::new(dbHeader.lastTxId + 1),
             blockFileFds: dataFds,
             pageId2Page: DashMap::new(),
             memTable: Default::default(),
             immutableMemTables: Default::default(),
-        };
+            commitReqSender,
+        });
+
+        let dbClone = db.clone();
+        let _ = thread::Builder::new().name("thread_process_commit_reqs".to_string()).spawn(move || {
+            dbClone.processCommitReqs(commitReqReceiver)
+        });
 
         Ok(db)
     }
 
-    pub fn newTx(self: &Arc<Self>, writable: bool) -> Result<Tx> {
+    pub fn newTx(self: &Arc<Self>) -> Result<Tx> {
         let txId = self.txIdCounter.fetch_add(1, atomic_ordering::SeqCst);
 
         let dbHeader = self.getHeaderMut();
@@ -158,9 +170,9 @@ impl DB {
 
         let tx = Tx {
             id: txId,
-            writable,
             db: self.clone(),
             changes: BTreeMap::new(),
+            committed: AtomicBool::new(false),
         };
 
         Ok(tx)
@@ -181,7 +193,7 @@ impl DB {
 
     pub(crate) fn getPageById(&self,
                               pageId: PageId,
-                              parentPage: Option<Arc<RwLock<Page>>>) -> Result<Arc<RwLock<Page>>> {
+                              parentPage: Option<Arc<Page>>) -> Result<Arc<Page>> {
         let dbHeader = self.getHeader();
 
         if let Some(page) = self.pageId2Page.get(&pageId) {
@@ -198,12 +210,10 @@ impl DB {
             utils::mmapFd(*targetBlockFd, pageHeaderOffsetInBlock, dbHeader.pageSize as usize)?
         };
 
-        let pageHeader = unsafe { utils::slice2Ref::<PageHeader>(&pageMmap) };
-
-        let mut page = Page::readFromPageHeader(pageMmap, pageHeader);
+        let mut page = Page::readFromPageHeader(pageMmap);
         page.parentPage = parentPage;
 
-        let page = Arc::new(RwLock::new(page));
+        let page = Arc::new(page);
         self.pageId2Page.insert(pageId, page.clone());
 
         Ok(page)
@@ -302,6 +312,13 @@ impl DB {
 
         Ok(block0Fd)
     }
+
+    fn processCommitReqs(&self, commitReqReceiver: Receiver<CommitReq>) {
+        // write changes in commitReq into memtable
+        for commitReq in commitReqReceiver {
+            commitReq.commitResultSender.send(Ok(())).unwrap()
+        }
+    }
 }
 
 impl Drop for DB {
@@ -311,11 +328,6 @@ impl Drop for DB {
             drop(file);
         }
     }
-}
-
-pub struct DBOption {
-    pub dirPath: String,
-    pub blockSize: u32,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -359,3 +371,19 @@ impl DBHeader {
 #[derive(Default, Clone, Copy)]
 #[repr(C)]
 pub(crate) struct BlockHeader;
+
+pub struct DBOption {
+    pub dirPath: String,
+    pub blockSize: u32,
+    pub commitReqChanBufferSize: usize,
+}
+
+impl Default for DBOption {
+    fn default() -> Self {
+        DBOption {
+            dirPath: "./data".to_string(),
+            blockSize: DEFAULT_BLOCK_SIZE,
+            commitReqChanBufferSize: DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE,
+        }
+    }
+}

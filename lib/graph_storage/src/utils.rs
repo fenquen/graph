@@ -110,3 +110,12 @@ pub(crate) unsafe fn slice2RefMut<'a, T>(slice: impl AsRef<[u8]>) -> &'a mut T {
     let slice = slice.as_ref();
     &mut *(slice.as_ptr() as *mut T)
 }
+
+pub(crate) fn slice2ArrayRef<const N: usize>(slice: &[u8]) -> Option<&[u8; N]> {
+    if slice.len() == N {
+        let arr_ref: &[u8; N] = unsafe { &*(slice.as_ptr() as *const [u8; N]) };
+        Some(arr_ref)
+    } else {
+        None
+    }
+}

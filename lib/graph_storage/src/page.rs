@@ -1,20 +1,24 @@
-use std::sync::{Arc, RwLock};
-use dashmap::mapref::one::RefMut;
-use memmap2::Mmap;
 use crate::page_header::PageHeader;
+use crate::utils;
+use memmap2::Mmap;
+use std::sync::Arc;
 use crate::types::PageId;
+use anyhow::Result;
 
 /// page presentation in program
 pub(crate) struct Page {
-    pub(crate) parentPage: Option<Arc<RwLock<Page>>>,
+    pub(crate) parentPage: Option<Arc<Page>>,
     pub(crate) mmap: Mmap,
     pub(crate) header: &'static PageHeader,
     pub(crate) elems: Vec<PageElem<'static>>,
-    pub(crate) childPages: Option<Vec<Arc<RwLock<Page>>>>,
+    pub(crate) childPages: Option<Vec<Arc<Page>>>,
 }
 
+// pub(crate) fn
 impl Page {
-    pub(crate) fn readFromPageHeader(mmap: Mmap, pageHeader: &'static PageHeader) -> Page {
+    pub(crate) fn readFromPageHeader(mmap: Mmap) -> Page {
+        let pageHeader = unsafe { utils::slice2Ref::<PageHeader>(&mmap) };
+
         let elems = {
             let mut elems = Vec::with_capacity(pageHeader.elemCount as usize);
 
@@ -22,11 +26,12 @@ impl Page {
                 let elem =
                     if pageHeader.isLeaf() {
                         let leafElemMeta = pageHeader.readLeafElemMeta(a);
-                        let (k, v) = leafElemMeta.readKV();
-                        PageElem::LeafR(k, v)
+                        let (key, val) = leafElemMeta.readKV();
+                        PageElem::LeafR(key, val)
                     } else {
                         let branchElemMeta = pageHeader.readBranchElemMeta(a);
-                        PageElem::BranchR(branchElemMeta.readKey())
+                        let (key, pageId) = branchElemMeta.readKey();
+                        PageElem::BranchR(key, pageId)
                     };
 
                 elems.push(elem);
@@ -43,21 +48,35 @@ impl Page {
             childPages: None,
         }
     }
+
+    #[inline]
+    pub(crate) fn isLeaf(&self) -> bool {
+        self.header.isLeaf()
+    }
 }
 
 // table(文件)->block   block(文件)->page
 pub(crate) enum PageElem<'a> {
+    /// key is with txId
     LeafR(&'a [u8], &'a [u8]),
-    LeafRW(Vec<u8>, Vec<u8>),
-    BranchR(&'a [u8]),
-    BranchRW(Vec<u8>),
+
+    /// key is not with txId
+    BranchR(&'a [u8], PageId),
 }
 
 impl<'a> PageElem<'a> {
     pub(crate) fn isLeaf(&self) -> bool {
         match self {
-            PageElem::LeafR(_, _) | PageElem::LeafRW(_, _) => true,
-            PageElem::BranchR(_) | PageElem::BranchRW(_) => false,
+            PageElem::LeafR(_, _) => true,
+            PageElem::BranchR(_, _) => false,
+        }
+    }
+
+    pub(crate) fn asBranchR(&self) -> Result<(&'a [u8], PageId)> {
+        if let PageElem::BranchR(keyWithoutTxId, pageId) = self {
+            Ok((keyWithoutTxId, *pageId))
+        } else {
+            throw!("a")
         }
     }
 }

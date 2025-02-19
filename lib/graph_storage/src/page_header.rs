@@ -6,6 +6,7 @@ pub(crate) const PAGE_FLAG_LEAF: u16 = 1 << 1;
 pub(crate) const PAGE_FLAG_BRANCH: u16 = 1 << 2;
 
 pub(crate) const PAGE_HEADER_SIZE: usize = size_of::<PageHeader>();
+pub(crate) const PAGE_ID_SIZE: usize = size_of::<PageId>();
 
 pub(crate) const LEAF_ELEM_META_SIZE: usize = size_of::<LeafElemMeta>();
 pub(crate) const BRANCH_ELEM_META_SIZE: usize = size_of::<BranchElemMeta>();
@@ -20,6 +21,7 @@ pub(crate) struct PageHeader {
     pub(crate) nextOverflowPageId: PageId,
 }
 
+// pub (crate) fn
 impl PageHeader {
     #[inline]
     pub(crate) fn isLeaf(&self) -> bool {
@@ -72,11 +74,17 @@ pub(crate) struct BranchElemMeta {
 }
 
 impl<'a> BranchElemMeta {
-    pub(crate) fn readKey(&'a self) -> (&'a [u8]) {
+    pub(crate) fn readKey(&'a self) -> (&'a [u8], PageId) {
         unsafe {
             let ptr = (self as *const _ as *const u8).add(self.offset as usize);
             let key = ptr::slice_from_raw_parts(ptr, self.keySize as usize);
-            &*key
+
+            let pageId = {
+                let pageId = ptr::slice_from_raw_parts(ptr.add(self.keySize as usize), PAGE_ID_SIZE);
+                PageId::from_be_bytes(*(pageId as *const _))
+            };
+
+            (&*key, pageId)
         }
     }
 }

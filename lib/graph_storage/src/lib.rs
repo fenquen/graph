@@ -11,19 +11,31 @@ mod types;
 mod page;
 mod tx;
 mod constant;
+mod cursor;
 
 #[cfg(test)]
 mod tests {
-    use libc::printf;
-    use crate::db::{DBOption, DB};
+    use crate::db::DB;
+    use std::thread;
 
     #[test]
     fn general() {
-        let dbOption = DBOption {
-            dirPath: "data".to_string(),
-            blockSize: 0,
-        };
+        let s = [0, 1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55];
+        let seek = 7;
+        assert_eq!(s.binary_search_by(|probe| probe.cmp(&seek)), Err(8));
 
-        DB::open(&dbOption).unwrap();
+        let db = DB::open(None).unwrap();
+        let dbClone = db.clone();
+
+        let a = thread::spawn(move || {
+            let mut tx = dbClone.newTx().unwrap();
+            assert_eq!(tx.get(&[1]).unwrap(), None);
+
+            tx.set(&[0], &[1]).unwrap();
+
+            tx.commit().unwrap();
+        });
+
+        let _ = a.join();
     }
 }
