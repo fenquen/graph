@@ -26,10 +26,10 @@ impl Tx {
             return Ok(val.as_ref().map(|val| (&*val).clone()));
         }
 
-        let keyWithTxId = self.appendKeyWithTxId(keyWithoutTxId);
+        let keyWithTxId = utils::appendKeyWithTxId(keyWithoutTxId, self.id);
 
         let scanMemTable =
-            |memTable: &BTreeMap<Vec<u8>, Arc<Vec<u8>>>| -> Option<Arc<Vec<u8>>> {
+            |memTable: &BTreeMap<Vec<u8>, Option<Arc<Vec<u8>>>>| -> Option<Arc<Vec<u8>>> {
                 let memTableCurosr = memTable.upper_bound(Bound::Included(&keyWithTxId));
 
                 if let Some((keyWithTxId0, val)) = memTableCurosr.peek_prev() {
@@ -37,7 +37,7 @@ impl Tx {
 
                     if keyWithoutTxId == originKey {
                         if txId <= self.id {
-                            return Some(val.clone());
+                            return val.clone();
                         }
                     }
                 }
@@ -103,6 +103,7 @@ impl Tx {
     }
 
     pub fn commit(self) -> Result<()> {
+        // alreay committed
         if let Err(_) = self.committed.compare_exchange(false, true,
                                                         Ordering::SeqCst, Ordering::Acquire) {
             return Ok(());
@@ -134,14 +135,7 @@ impl Tx {
 }
 
 // pub (crate) fn
-impl Tx {
-    pub(crate) fn appendKeyWithTxId(&self, key: &[u8]) -> Vec<u8> {
-        let mut keyWithTxId = Vec::with_capacity(key.len() + constant::TX_ID_SIZE);
-        keyWithTxId.extend_from_slice(&key[..]);
-        keyWithTxId.extend_from_slice(self.id.to_be_bytes().as_ref());
-        keyWithTxId
-    }
-}
+impl Tx {}
 
 // fn
 impl Tx {

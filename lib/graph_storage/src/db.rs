@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::atomic::Ordering as atomic_ordering;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::sync::mpsc::{Receiver, SyncSender};
+use crate::mem_table::MemTable;
 
 const MAGIC: u32 = 0xCAFEBABE;
 const VERSION: u16 = 1;
@@ -28,14 +29,19 @@ pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024 * 1;
 pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1000;
 
 pub struct DB {
+    dbOption: DBOption,
     dbHeaderMmap: MmapMut,
     lock: Mutex<()>,
     txIdCounter: AtomicU64,
+
     /// sorted by block file number
     blockFileFds: Vec<RawFd>,
+
     pageId2Page: DashMap<PageId, Arc<Page>>,
-    pub(crate) memTable: RwLock<BTreeMap<Vec<u8>, Arc<Vec<u8>>>>,
-    pub(crate) immutableMemTables: Vec<BTreeMap<Vec<u8>, Arc<Vec<u8>>>>,
+
+    pub(crate) memTable: RwLock<BTreeMap<Vec<u8>, Option<Arc<Vec<u8>>>>>,
+    pub(crate) immutableMemTables: Vec<BTreeMap<Vec<u8>, Option<Arc<Vec<u8>>>>>,
+
     pub(crate) commitReqSender: SyncSender<CommitReq>,
 }
 
@@ -56,25 +62,28 @@ impl DB {
                 Ok(true)
             }()?;
 
-        let block0FileFd =
-            // generate dbHeader and initial some pages, write them into files
-            if shouldInit {
-                Self::init(&dbOption)?
-            } else { // open the already exsit db files
-                let block0FilePath = Path::join(dbOption.dirPath.as_ref(), "0.data");
-                let block0File = OpenOptions::new().read(true).write(true).open(block0FilePath)?;
 
-                if block0File.metadata()?.len() < DB_HEADER_SIZE as u64 {
-                    throw!("0.data size should be greate than db DB_HEADER_SIZE");
-                }
+        // generate dbHeader and initial some pages, write them into block files
+        if shouldInit {
+            Self::init(&dbOption)?
+        }
 
-                let block0FileFd = block0File.as_raw_fd();
-                forget(block0File);
+        // get the first block file
+        let block0FileFd = {
+            let block0FilePath = Path::join(dbOption.dirPath.as_ref(), "0.data");
+            let block0File = OpenOptions::new().read(true).write(true).open(block0FilePath)?;
 
-                block0FileFd
-            };
+            if block0File.metadata()?.len() < DB_HEADER_SIZE as u64 {
+                throw!("0.data size should be greate than db DB_HEADER_SIZE");
+            }
 
-        // map 0.data leading part into dbHeader
+            let block0FileFd = block0File.as_raw_fd();
+            forget(block0File);
+
+            block0FileFd
+        };
+
+        // mmap dbHeader in block0
         let dbHeaderMmap = unsafe {
             let dbHeaderMmap = {
                 let mut mmapOptions = MmapOptions::new();
@@ -92,7 +101,7 @@ impl DB {
         dbHeader.verify()?;
 
         // try to hold all data file fds
-        let dataFds = {
+        let blockFileFds = {
             let mut blockFileFds = Vec::new();
 
             blockFileFds.push((0, block0FileFd));
@@ -138,10 +147,11 @@ impl DB {
             mpsc::sync_channel::<CommitReq>(dbOption.commitReqChanBufferSize);
 
         let db = Arc::new(DB {
+            dbOption,
             dbHeaderMmap,
             lock: Mutex::new(()),
             txIdCounter: AtomicU64::new(dbHeader.lastTxId + 1),
-            blockFileFds: dataFds,
+            blockFileFds,
             pageId2Page: DashMap::new(),
             memTable: Default::default(),
             immutableMemTables: Default::default(),
@@ -252,7 +262,7 @@ impl DB {
         Ok(())
     }
 
-    fn init(dbOption: &DBOption) -> Result<RawFd> {
+    fn init(dbOption: &DBOption) -> Result<()> {
         // allocate space for 2 init pages in memory
         let pageSize = utils::getOsPageSize();
         let mut pageSpace = vec![0; pageSize as usize * 2];
@@ -270,6 +280,8 @@ impl DB {
         dbHeader.lastTxId = 0;
         dbHeader.rootPageId = 1;
 
+        dbHeader.verify()?;
+
         // transmute as pageHeader in page0
         let page0Header: &mut PageHeader = unsafe { utils::slice2RefMut(&mut pageSpace[DB_HEADER_SIZE..]) };
         page0Header.pageId = 0;
@@ -283,7 +295,6 @@ impl DB {
         // idea from bbolt
         let blockCount = (pageSpace.capacity() + dbHeader.blockSize as usize - 1) / dbHeader.blockSize as usize;
 
-        let mut block0Fd = 0;
         for blockFileNum in 0..blockCount {
             let blockFilePath = Path::join(dbOption.dirPath.as_ref(), format!("{}.data", blockFileNum));
             let mut blockFile = OpenOptions::new().read(true).write(true).create_new(true).open(blockFilePath)?;
@@ -303,19 +314,22 @@ impl DB {
             assert_eq!(writtenSize, data2Write.len());
 
             blockFile.sync_all()?;
-
-            if blockFileNum == 0 {
-                block0Fd = blockFile.as_raw_fd();
-                forget(blockFile);
-            }
         }
 
-        Ok(block0Fd)
+        Ok(())
     }
 
     fn processCommitReqs(&self, commitReqReceiver: Receiver<CommitReq>) {
         // write changes in commitReq into memtable
         for commitReq in commitReqReceiver {
+            let mut memTable = self.memTable.write().unwrap();
+
+            for (keyWithoutTxId, val) in commitReq.changes {
+                let keyWithTxId = utils::appendKeyWithTxId(&keyWithoutTxId, commitReq.txId);
+
+                memTable.insert(keyWithTxId, val.map(|v| Arc::new(v)));
+            }
+
             commitReq.commitResultSender.send(Ok(())).unwrap()
         }
     }
@@ -374,8 +388,10 @@ pub(crate) struct BlockHeader;
 
 pub struct DBOption {
     pub dirPath: String,
+    /// used only when init
     pub blockSize: u32,
     pub commitReqChanBufferSize: usize,
+    pub memTableMaxSize: usize,
 }
 
 impl Default for DBOption {
@@ -384,6 +400,7 @@ impl Default for DBOption {
             dirPath: "./data".to_string(),
             blockSize: DEFAULT_BLOCK_SIZE,
             commitReqChanBufferSize: DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE,
+            memTableMaxSize: 0,
         }
     }
 }

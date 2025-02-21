@@ -2,6 +2,7 @@ use crate::page::{Page, PageElem};
 use crate::tx::Tx;
 use anyhow::Result;
 use std::sync::Arc;
+use crate::utils;
 
 pub struct Cursor<'tx> {
     pub(crate) tx: &'tx Tx,
@@ -33,7 +34,7 @@ impl<'tx> Cursor<'tx> {
 
         // try to locate the index in page
         if currentPage.header.isLeaf() {
-            let keyWithtxId = tx.appendKeyWithTxId(keyWithoutTxId);
+            let keyWithtxId = utils::appendKeyWithTxId(keyWithoutTxId, tx.id);
 
             // returns the the index of minimal value which is greater or equal with the search value
             // if there is an equivalent value ,then returns Ok(index) else returns Err(index)
@@ -91,11 +92,11 @@ impl<'tx> Cursor<'tx> {
     pub(crate) fn currentKV(&self) -> Option<(&[u8], &[u8])> {
         let (currentPage, currentIndexInPage) = self.stackTop();
         assert!(currentPage.isLeaf());
-        
+
         if currentPage.elems.is_empty() {
             return None;
         }
-        
+
         match currentPage.elems.get(*currentIndexInPage).unwrap() {
             PageElem::LeafR(keyWithTxId, val) => Some((keyWithTxId, val)),
             _ => panic!("impossible")

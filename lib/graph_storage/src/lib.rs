@@ -12,6 +12,7 @@ mod page;
 mod tx;
 mod constant;
 mod cursor;
+mod mem_table;
 
 #[cfg(test)]
 mod tests {

@@ -6,6 +6,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use anyhow::Result;
 use memmap2::{Mmap, MmapOptions};
+use crate::constant;
+use crate::types::TxId;
 
 pub(crate) const EMPTY_STR: &str = "";
 pub(crate) const DEFAULT_PAGE_SIZE: u16 = 4096;
@@ -118,4 +120,11 @@ pub(crate) fn slice2ArrayRef<const N: usize>(slice: &[u8]) -> Option<&[u8; N]> {
     } else {
         None
     }
+}
+
+pub(crate) fn appendKeyWithTxId(key: &[u8], txId: TxId) -> Vec<u8> {
+    let mut keyWithTxId = Vec::with_capacity(key.len() + constant::TX_ID_SIZE);
+    keyWithTxId.extend_from_slice(&key[..]);
+    keyWithTxId.extend_from_slice(txId.to_be_bytes().as_ref());
+    keyWithTxId
 }
