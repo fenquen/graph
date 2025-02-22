@@ -4,8 +4,9 @@ use std::ops::{BitAnd, Sub};
 use std::os::fd::{RawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
+use std::str::FromStr;
 use anyhow::Result;
-use memmap2::{Mmap, MmapOptions};
+use memmap2::{Mmap, MmapMut, MmapOptions};
 use crate::constant;
 use crate::types::TxId;
 
@@ -103,14 +104,35 @@ pub(crate) fn mmapFd(fd: RawFd, offset: u64, len: usize) -> Result<Mmap> {
     unsafe { Ok(MmapOptions::new().offset(offset).len(len).map(fd)?) }
 }
 
-pub(crate) unsafe fn slice2Ref<'a, T>(slice: impl AsRef<[u8]>) -> &'a T {
-    let slice = slice.as_ref();
-    &*(slice.as_ptr() as *const T)
+#[inline]
+pub(crate) fn mmapMutFd(fd: RawFd, offset: Option<u64>, len: Option<usize>) -> Result<MmapMut> {
+    unsafe {
+        let mut mmapOptions = MmapOptions::new();
+
+        if let Some(offset) = offset {
+            mmapOptions.offset(offset);
+        }
+
+        if let Some(len) = len {
+            mmapOptions.len(len);
+        }
+
+        Ok(mmapOptions.map_mut(fd)?)
+    }
 }
 
-pub(crate) unsafe fn slice2RefMut<'a, T>(slice: impl AsRef<[u8]>) -> &'a mut T {
-    let slice = slice.as_ref();
-    &mut *(slice.as_ptr() as *mut T)
+pub(crate) fn slice2Ref<'a, T>(slice: impl AsRef<[u8]>) -> &'a T {
+    unsafe {
+        let slice = slice.as_ref();
+        &*(slice.as_ptr() as *const T)
+    }
+}
+
+pub(crate) fn slice2RefMut<'a, T>(slice: impl AsRef<[u8]>) -> &'a mut T {
+    unsafe {
+        let slice = slice.as_ref();
+        &mut *(slice.as_ptr() as *mut T)
+    }
 }
 
 pub(crate) fn slice2ArrayRef<const N: usize>(slice: &[u8]) -> Option<&[u8; N]> {
@@ -127,4 +149,14 @@ pub(crate) fn appendKeyWithTxId(key: &[u8], txId: TxId) -> Vec<u8> {
     keyWithTxId.extend_from_slice(&key[..]);
     keyWithTxId.extend_from_slice(txId.to_be_bytes().as_ref());
     keyWithTxId
+}
+
+pub(crate) fn extractFileNum(path: impl AsRef<Path>) -> Option<usize> {
+    let fileName = path.as_ref().file_name().unwrap().to_str().unwrap();
+    let elemVec = fileName.split(constant::DOT_STR).collect::<Vec<&str>>();
+    if 1 >= elemVec.len() {
+        return None;
+    }
+
+    usize::from_str(elemVec.get(0).unwrap()).ok()
 }

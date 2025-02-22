@@ -17,7 +17,7 @@ pub(crate) struct Page {
 // pub(crate) fn
 impl Page {
     pub(crate) fn readFromPageHeader(mmap: Mmap) -> Page {
-        let pageHeader = unsafe { utils::slice2Ref::<PageHeader>(&mmap) };
+        let pageHeader =   utils::slice2Ref::<PageHeader>(&mmap) ;
 
         let elems = {
             let mut elems = Vec::with_capacity(pageHeader.elemCount as usize);

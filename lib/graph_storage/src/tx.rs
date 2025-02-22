@@ -8,6 +8,7 @@ use std::ops::Bound;
 use std::sync::{mpsc, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
+use crate::mem_table::MemTable;
 
 pub struct Tx {
     pub(crate) id: TxId,
@@ -29,8 +30,8 @@ impl Tx {
         let keyWithTxId = utils::appendKeyWithTxId(keyWithoutTxId, self.id);
 
         let scanMemTable =
-            |memTable: &BTreeMap<Vec<u8>, Option<Arc<Vec<u8>>>>| -> Option<Arc<Vec<u8>>> {
-                let memTableCurosr = memTable.upper_bound(Bound::Included(&keyWithTxId));
+            |memTable: &MemTable| -> Option<Arc<Vec<u8>>> {
+                let memTableCurosr = memTable.actions.upper_bound(Bound::Included(&keyWithTxId));
 
                 if let Some((keyWithTxId0, val)) = memTableCurosr.peek_prev() {
                     let (originKey, txId) = parseKeyWithTxId(keyWithTxId0);

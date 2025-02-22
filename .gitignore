@@ -24,3 +24,6 @@ lib/raft-kv-rocksdb/node*
 
 *.db
 *.data
+
+*.mem
+*.block
