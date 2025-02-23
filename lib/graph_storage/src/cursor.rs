@@ -2,7 +2,7 @@ use crate::page::{Page, PageElem};
 use crate::tx::Tx;
 use anyhow::Result;
 use std::sync::Arc;
-use crate::utils;
+use crate::{tx, utils};
 
 pub struct Cursor<'tx> {
     pub(crate) tx: &'tx Tx,
@@ -34,7 +34,7 @@ impl<'tx> Cursor<'tx> {
 
         // try to locate the index in page
         if currentPage.header.isLeaf() {
-            let keyWithtxId = utils::appendKeyWithTxId(keyWithoutTxId, tx.id);
+            let keyWithtxId = tx::appendKeyWithTxId(keyWithoutTxId, tx.id);
 
             // returns the the index of minimal value which is greater or equal with the search value
             // if there is an equivalent value ,then returns Ok(index) else returns Err(index)

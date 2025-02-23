@@ -2,8 +2,6 @@
 #![allow(non_snake_case)]
 //#![allow(unused)]
 
-extern crate core;
-
 #[macro_use] // 宏引入到当前mod及其子mod,限当前crate内部使用,需放到打头使用
 mod macros;
 pub mod db;
@@ -40,5 +38,22 @@ mod tests {
         });
 
         let _ = a.join();
+    }
+
+    #[test]
+    fn testWrite() {
+        let db = DB::open(None).unwrap();
+
+        let mut tx = db.newTx().unwrap();
+        tx.set(&[0], &[1]).unwrap();
+
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn testRead() {
+        let db = DB::open(None).unwrap();
+        let tx = db.newTx().unwrap();
+        assert_eq!(tx.get(&[0]).unwrap(), Some(vec![1]));
     }
 }

@@ -103,7 +103,7 @@ impl DB {
 
         let memTable = {
             let mutableMemTableFileNum =
-                immutableMemTables.last().map_or_else(|| 0, |m| m.memTableFileNum);
+                immutableMemTables.last().map_or_else(|| 1, |m| m.memTableFileNum + 1);
 
             let mutableMemTableFilePath =
                 Path::join(dbOption.dirPath.as_ref(),
@@ -310,7 +310,16 @@ impl DB {
                         forget(blockFile);
                     }
                     MEM_TABLE_FILE_EXTENSION => { // memTable file
-                        immutableMemTables.push(MemTable::open(&path, dbOption.memTableMaxSize * 2)?);
+                        let memTable = MemTable::open(&path, dbOption.memTableMaxSize * 2)?;
+
+                        // empty
+                        if memTable.changes.is_empty() {
+                            drop(memTable);
+                            fs::remove_file(path)?;
+                            continue;
+                        }
+
+                        immutableMemTables.push(memTable);
                     }
                     _ => continue,
                 }
@@ -335,14 +344,7 @@ impl DB {
         // write changes in commitReq into memtable
         for commitReq in commitReqReceiver {
             let mut memTable = self.memTable.write().unwrap();
-
-            for (keyWithoutTxId, val) in commitReq.changes {
-                let keyWithTxId = utils::appendKeyWithTxId(&keyWithoutTxId, commitReq.txId);
-
-                memTable.actions.insert(keyWithTxId, val.map(|v| Arc::new(v)));
-            }
-
-            commitReq.commitResultSender.send(Ok(())).unwrap()
+            memTable.processCommitReq(commitReq);
         }
     }
 }

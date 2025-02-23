@@ -27,11 +27,11 @@ impl Tx {
             return Ok(val.as_ref().map(|val| (&*val).clone()));
         }
 
-        let keyWithTxId = utils::appendKeyWithTxId(keyWithoutTxId, self.id);
+        let keyWithTxId = appendKeyWithTxId(keyWithoutTxId, self.id);
 
         let scanMemTable =
             |memTable: &MemTable| -> Option<Arc<Vec<u8>>> {
-                let memTableCurosr = memTable.actions.upper_bound(Bound::Included(&keyWithTxId));
+                let memTableCurosr = memTable.changes.upper_bound(Bound::Included(&keyWithTxId));
 
                 if let Some((keyWithTxId0, val)) = memTableCurosr.peek_prev() {
                     let (originKey, txId) = parseKeyWithTxId(keyWithTxId0);
@@ -157,6 +157,18 @@ fn extractTxIdFromKeyWithTxId(keyWithTxId: &[u8]) -> TxId {
     let txId = utils::slice2ArrayRef(&keyWithTxId[pos..]).unwrap();
 
     TxId::from_be_bytes(*txId)
+}
+
+pub(crate) fn appendKeyWithTxId(key: &[u8], txId: TxId) -> Vec<u8> {
+    let mut keyWithTxId = Vec::with_capacity(key.len() + constant::TX_ID_SIZE);
+    keyWithTxId.extend_from_slice(&key[..]);
+    keyWithTxId.extend_from_slice(txId.to_be_bytes().as_ref());
+    keyWithTxId
+}
+
+pub(crate) fn appendKeyWithTxId0(mut key: Vec<u8>, txId: TxId) -> Vec<u8> {
+    key.extend_from_slice(txId.to_be_bytes().as_ref());
+    key
 }
 
 pub(crate) struct CommitReq {

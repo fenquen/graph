@@ -144,13 +144,6 @@ pub(crate) fn slice2ArrayRef<const N: usize>(slice: &[u8]) -> Option<&[u8; N]> {
     }
 }
 
-pub(crate) fn appendKeyWithTxId(key: &[u8], txId: TxId) -> Vec<u8> {
-    let mut keyWithTxId = Vec::with_capacity(key.len() + constant::TX_ID_SIZE);
-    keyWithTxId.extend_from_slice(&key[..]);
-    keyWithTxId.extend_from_slice(txId.to_be_bytes().as_ref());
-    keyWithTxId
-}
-
 pub(crate) fn extractFileNum(path: impl AsRef<Path>) -> Option<usize> {
     let fileName = path.as_ref().file_name().unwrap().to_str().unwrap();
     let elemVec = fileName.split(constant::DOT_STR).collect::<Vec<&str>>();
