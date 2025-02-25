@@ -56,4 +56,42 @@ mod tests {
         let tx = db.newTx().unwrap();
         assert_eq!(tx.get(&[0]).unwrap(), Some(vec![1]));
     }
+
+    use std::rc::{Rc, Weak};
+
+    struct B {
+        // 存储对 A 的弱引用
+        a: Weak<A>,
+    }
+
+    impl B {
+        fn get_a(&self) -> Option<Rc<A>> {
+            self.a.upgrade()
+        }
+    }
+
+    // 定义 struct A
+    struct A {
+        b: B,
+    }
+
+    fn a() {
+        let mut a = Rc::new(A {
+            b: B {
+                // 初始化时，b 中的 a 弱引用为空
+                a: Weak::new(),
+            },
+        });
+
+        let weaka = Rc::downgrade(&a);
+
+        let amut = Rc::get_mut(&mut a).unwrap();
+        amut.b.a = weaka;
+
+        if let Some(a) = a.b.get_a() {
+            println!("Successfully retrieved A from B");
+        } else {
+            println!("Failed to retrieve A from B");
+        }
+    }
 }

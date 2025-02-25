@@ -102,6 +102,7 @@ impl MemTable {
     pub(crate) fn processCommitReq(&mut self, commitReq: CommitReq) {
         let process = || {
             let changeCount = commitReq.changes.len() as u32;
+
             for (keyWithoutTxId, val) in commitReq.changes {
                 let keyWithTxId = tx::appendKeyWithTxId0(keyWithoutTxId, commitReq.txId);
                 self.writeChange(keyWithTxId, val)?;
@@ -119,32 +120,36 @@ impl MemTable {
 
     fn writeChange(&mut self, keyWithTxId: Vec<u8>, val: Option<Vec<u8>>) -> Result<()> {
         // write to file
-        let memTableFileEntryHeader = {
-            let memTableFileEntryHeader: &mut MemTableFileEntryHeader = utils::slice2RefMut(&self.memTableFileMmap[self.pos..]);
+        {
+            let memTableFileEntryHeader = {
+                let memTableFileEntryHeader: &mut MemTableFileEntryHeader = utils::slice2RefMut(&self.memTableFileMmap[self.pos..]);
 
-            memTableFileEntryHeader.keySize = keyWithTxId.len() as u16;
+                memTableFileEntryHeader.keySize = keyWithTxId.len() as u16;
 
+                if let Some(ref val) = val {
+                    memTableFileEntryHeader.valSize = val.len() as u32;
+                }
+
+                memTableFileEntryHeader
+            };
+
+            let entryContentMmap = {
+                let start = self.pos + MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
+                let end = self.pos + memTableFileEntryHeader.entrySize();
+
+                &mut self.memTableFileMmap[start..end]
+            };
+
+            // write key
+            entryContentMmap[..keyWithTxId.len()].copy_from_slice(keyWithTxId.as_slice());
+
+            // write val
             if let Some(ref val) = val {
-                memTableFileEntryHeader.valSize = val.len() as u32;
+                entryContentMmap[keyWithTxId.len()..].copy_from_slice(val);
             }
 
-            memTableFileEntryHeader
-        };
-
-        let entryMmap = {
-            let start = self.pos + MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
-            let end = self.pos + memTableFileEntryHeader.entrySize();
-
-            &mut self.memTableFileMmap[start..end]
-        };
-
-        entryMmap[..keyWithTxId.len()].copy_from_slice(keyWithTxId.as_slice());
-
-        if let Some(ref val) = val {
-            entryMmap[keyWithTxId.len()..].copy_from_slice(val);
+            self.pos += memTableFileEntryHeader.entrySize();
         }
-
-        self.pos += memTableFileEntryHeader.entrySize();
 
         // write to map
         self.changes.insert(keyWithTxId, val.map(Arc::new));
@@ -178,7 +183,7 @@ pub(crate) struct MemTableFileHeader {
     pub(crate) entryCount: u32,
 }
 
-/// represenation in file <br>
+/// representation in file <br>
 /// keySize u16 | valSize u32 | key | val
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]

@@ -104,7 +104,7 @@ impl Tx {
     }
 
     pub fn commit(self) -> Result<()> {
-        // alreay committed
+        // already committed
         if let Err(_) = self.committed.compare_exchange(false, true,
                                                         Ordering::SeqCst, Ordering::Acquire) {
             return Ok(());
