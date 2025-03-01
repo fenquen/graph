@@ -31,9 +31,9 @@ impl Tx {
 
         let scanMemTable =
             |memTable: &MemTable| -> Option<Arc<Vec<u8>>> {
-                let memTableCurosr = memTable.changes.upper_bound(Bound::Included(&keyWithTxId));
+                let memTableCursor = memTable.changes.upper_bound(Bound::Included(&keyWithTxId));
 
-                if let Some((keyWithTxId0, val)) = memTableCurosr.peek_prev() {
+                if let Some((keyWithTxId0, val)) = memTableCursor.peek_prev() {
                     let (originKey, txId) = parseKeyWithTxId(keyWithTxId0);
 
                     if keyWithoutTxId == originKey {

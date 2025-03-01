@@ -16,8 +16,9 @@ mod mem_table;
 
 #[cfg(test)]
 mod tests {
-    use crate::db::DB;
-    use std::thread;
+    use crate::db::{DBOption, DB};
+    use std::{fs, thread, time};
+    use std::time::SystemTime;
 
     #[test]
     fn general() {
@@ -42,18 +43,34 @@ mod tests {
 
     #[test]
     fn testWrite() {
+        _ = fs::remove_dir_all(DBOption::default().dirPath);
+
         let db = DB::open(None).unwrap();
 
         let mut tx = db.newTx().unwrap();
-        tx.set(&[0], &[1]).unwrap();
+
+        let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+
+        for a in 0..1024usize {
+            let aa = a.to_be_bytes();
+            tx.set(&aa, &aa).unwrap();
+        }
 
         tx.commit().unwrap();
+
+        let end = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+        println!("total time: {} ms", end - start);
     }
 
     #[test]
     fn testRead() {
         let db = DB::open(None).unwrap();
         let tx = db.newTx().unwrap();
-        assert_eq!(tx.get(&[0]).unwrap(), Some(vec![1]));
+
+        for a in 0..1024usize {
+            let aa = a.to_be_bytes();
+            assert_eq!(tx.get(&aa).unwrap(), Some(aa.to_vec()));
+        }
+
     }
 }

@@ -19,19 +19,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{mpsc, Arc, Mutex, RwLock, Weak};
 use std::{fs, thread, u64, usize};
-use std::rc::Rc;
 
 const MAGIC: u32 = 0xCAFEBABE;
 const VERSION: u16 = 1;
 
 pub(crate) const DB_HEADER_SIZE: usize = 100;
 
-pub(crate) const DEAULT_DIR_PATH: &str = "./graph_storage";
+pub(crate) const DEFAULT_DIR_PATH: &str = "./graph_storage";
 pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024 * 1;
 pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1000;
 pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE_MB: usize = 16;
 
-pub(crate) const BLOCK_FILE_EXTENTION: &str = "block";
+pub(crate) const BLOCK_FILE_EXTENSION: &str = "block";
 pub(crate) const FIRST_BLOCK_FILE_NAME: &str = "0.block";
 pub(crate) const MEM_TABLE_FILE_EXTENSION: &str = "mem";
 
@@ -81,7 +80,7 @@ impl DB {
             let block0File = OpenOptions::new().read(true).write(true).open(block0FilePath)?;
 
             if block0File.metadata()?.len() < DB_HEADER_SIZE as u64 {
-                throw!("0.data size should be greate than db DB_HEADER_SIZE");
+                throw!("0.data size should be greater than db DB_HEADER_SIZE");
             }
 
             let block0FileFd = block0File.as_raw_fd();
@@ -102,6 +101,7 @@ impl DB {
 
         let (blockFileFds, immutableMemTables) = DB::scanDir(dbHeader, &dbOption)?;
 
+        // db current mutable memTable
         let memTable = {
             let mutableMemTableFileNum =
                 immutableMemTables.last().map_or_else(|| 0, |m| m.memTableFileNum + 1);
@@ -110,7 +110,7 @@ impl DB {
                 Path::join(dbOption.dirPath.as_ref(),
                            format!("{}.{}", mutableMemTableFileNum, MEM_TABLE_FILE_EXTENSION));
 
-            MemTable::open(mutableMemTableFilePath, dbOption.memTableMaxSize * 2)?
+            MemTable::open(mutableMemTableFilePath, dbOption.memTableMaxSize)?
         };
 
         let db = Arc::new(DB {
@@ -278,7 +278,7 @@ impl DB {
         let blockCount = (pageSpace.capacity() + dbHeader.blockSize as usize - 1) / dbHeader.blockSize as usize;
 
         for blockFileNum in 0..blockCount {
-            let blockFilePath = Path::join(dbOption.dirPath.as_ref(), format!("{}.{}", blockFileNum, BLOCK_FILE_EXTENTION));
+            let blockFilePath = Path::join(dbOption.dirPath.as_ref(), format!("{}.{}", blockFileNum, BLOCK_FILE_EXTENSION));
             let mut blockFile = OpenOptions::new().read(true).write(true).create_new(true).open(blockFilePath)?;
 
             // extend to blockSize
@@ -312,7 +312,7 @@ impl DB {
 
             if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
                 match extension {
-                    BLOCK_FILE_EXTENTION => { // block file
+                    BLOCK_FILE_EXTENSION => { // block file
                         // block file size
                         if readDir.metadata()?.len() != dbHeader.blockSize as u64 {
                             throw!("block file size should be equal to blockSize in dbHeader");
@@ -326,7 +326,9 @@ impl DB {
                         forget(blockFile);
                     }
                     MEM_TABLE_FILE_EXTENSION => { // memTable file
-                        let memTable = MemTable::open(&path, dbOption.memTableMaxSize * 2)?;
+                        let memTableFileLen = readDir.metadata()?.len() as usize;
+
+                        let memTable = MemTable::open(&path, memTableFileLen)?;
 
                         // empty
                         if memTable.changes.is_empty() {
@@ -432,10 +434,10 @@ pub struct DBOption {
 impl Default for DBOption {
     fn default() -> Self {
         DBOption {
-            dirPath: DEAULT_DIR_PATH.to_string(),
+            dirPath: DEFAULT_DIR_PATH.to_string(),
             blockSize: DEFAULT_BLOCK_SIZE,
             commitReqChanBufferSize: DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE,
-            memTableMaxSize: DEFAULT_MEM_TABLE_MAX_SIZE_MB,
+            memTableMaxSize: DEFAULT_MEM_TABLE_MAX_SIZE_MB * 1024 * 1024,
         }
     }
 }

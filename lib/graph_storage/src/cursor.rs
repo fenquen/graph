@@ -34,19 +34,19 @@ impl<'tx> Cursor<'tx> {
 
         // try to locate the index in page
         if currentPage.header.isLeaf() {
-            let keyWithtxId = tx::appendKeyWithTxId(keyWithoutTxId, tx.id);
+            let keyWithTxId = tx::appendKeyWithTxId(keyWithoutTxId, tx.id);
 
             // returns the the index of minimal value which is greater or equal with the search value
             // if there is an equivalent value ,then returns Ok(index) else returns Err(index)
             let index =
                 currentPage.elems.binary_search_by(|pageElem| {
                     match pageElem {
-                        PageElem::LeafR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&keyWithtxId.as_slice()),
+                        PageElem::LeafR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&keyWithTxId.as_slice()),
                         _ => panic!("impossible")
                     }
                 }).unwrap_or_else(|index| {
-                    // means that there is no equivalant key
-                    // the index represents the minial key larger than target key
+                    // means that there is no equivalent key
+                    // the index represents the minimal key larger than target key
                     if index == 0 {
                         0
                     } else {
