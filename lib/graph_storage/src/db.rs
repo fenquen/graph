@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering as atomic_ordering;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock, Weak};
 use std::{fs, thread, u64, usize};
 use std::rc::Rc;
 
@@ -140,9 +140,9 @@ impl DB {
             }
         }
 
-        let dbClone = db.clone();
+        let dbWeak = Arc::downgrade(&db);
         let _ = thread::Builder::new().name("thread_process_commit_reqs".to_string()).spawn(move || {
-            dbClone.processCommitReqs(commitReqReceiver)
+            DB::processCommitReqs(dbWeak, commitReqReceiver);
         });
 
         Ok(db)
@@ -356,10 +356,11 @@ impl DB {
         Ok((blockFileFds, immutableMemTables))
     }
 
-    fn processCommitReqs(&self, commitReqReceiver: Receiver<CommitReq>) {
-        // write changes in commitReq into memtable
+    fn processCommitReqs(dbWeak: Weak<DB>, commitReqReceiver: Receiver<CommitReq>) {
+        // write changes in commitReq into memTable
         for commitReq in commitReqReceiver {
-            let mut memTable = self.memTable.write().unwrap();
+            let db = dbWeak.upgrade().unwrap();
+            let mut memTable = db.memTable.write().unwrap();
             memTable.processCommitReq(commitReq);
         }
     }
