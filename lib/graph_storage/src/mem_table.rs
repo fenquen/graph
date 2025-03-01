@@ -8,7 +8,8 @@ use std::fs::{File, OpenOptions};
 use std::mem::forget;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use crate::db::DB;
 
 /// memTable and underlying data
 pub(crate) struct MemTable {
@@ -21,8 +22,10 @@ pub(crate) struct MemTable {
     memTableFileMmap: MmapMut,
 
     pos: usize,
-
     pub(crate) changes: BTreeMap<Vec<u8>, Option<Arc<Vec<u8>>>>,
+
+    /// the reference to db
+    pub(crate) db: Weak<DB>,
 }
 
 impl MemTable {
@@ -55,6 +58,7 @@ impl MemTable {
             memTableFileMmap,
             pos: MEM_TABLE_FILE_HEADER_SIZE,
             changes: BTreeMap::new(),
+            db: Weak::new(),
         };
 
         if alreadyExisted == false {
@@ -153,6 +157,13 @@ impl MemTable {
 
         // write to map
         self.changes.insert(keyWithTxId, val.map(Arc::new));
+        
+        let db = self.db.upgrade().unwrap();
+        
+        // become immutable memTable
+        if self.pos >= db.dbOption.memTableMaxSize {
+           
+        }
 
         Ok(())
     }
@@ -183,6 +194,8 @@ pub(crate) struct MemTableFileHeader {
     pub(crate) entryCount: u32,
 }
 
+pub(crate) const MEM_TABLE_FILE_ENTRY_HEADER_SIZE: usize = size_of::<MemTableFileEntryHeader>();
+
 /// representation in file <br>
 /// keySize u16 | valSize u32 | key | val
 #[repr(C)]
@@ -191,8 +204,6 @@ pub(crate) struct MemTableFileEntryHeader {
     pub(crate) keySize: u16,
     pub(crate) valSize: u32,
 }
-
-pub(crate) const MEM_TABLE_FILE_ENTRY_HEADER_SIZE: usize = size_of::<MemTableFileEntryHeader>();
 
 impl MemTableFileEntryHeader {
     #[inline]

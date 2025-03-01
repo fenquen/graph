@@ -56,9 +56,13 @@ impl Tx {
         }
 
         // find in immutableMemTables in reverse order
-        for immutableMemTable in self.db.immutableMemTables.iter().rev() {
-            if let Some(val) = scanMemTable(immutableMemTable) {
-                return Ok(Some((&*val).clone()));
+        {
+            let immutableMemTables = self.db.immutableMemTables.read().unwrap();
+
+            for immutableMemTable in immutableMemTables.iter().rev() {
+                if let Some(val) = scanMemTable(immutableMemTable) {
+                    return Ok(Some((&*val).clone()));
+                }
             }
         }
 

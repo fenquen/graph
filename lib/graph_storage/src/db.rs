@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::{fs, thread, u64, usize};
+use std::rc::Rc;
 
 const MAGIC: u32 = 0xCAFEBABE;
 const VERSION: u16 = 1;
@@ -35,7 +36,7 @@ pub(crate) const FIRST_BLOCK_FILE_NAME: &str = "0.block";
 pub(crate) const MEM_TABLE_FILE_EXTENSION: &str = "mem";
 
 pub struct DB {
-    dbOption: DBOption,
+    pub(crate) dbOption: DBOption,
     dbHeaderMmap: MmapMut,
     lock: Mutex<()>,
     txIdCounter: AtomicU64,
@@ -46,7 +47,7 @@ pub struct DB {
     pageId2Page: DashMap<PageId, Arc<Page>>,
 
     pub(crate) memTable: RwLock<MemTable>,
-    pub(crate) immutableMemTables: Vec<MemTable>,
+    pub(crate) immutableMemTables: RwLock<Vec<MemTable>>,
 
     pub(crate) commitReqSender: SyncSender<CommitReq>,
 }
@@ -103,7 +104,7 @@ impl DB {
 
         let memTable = {
             let mutableMemTableFileNum =
-                immutableMemTables.last().map_or_else(|| 1, |m| m.memTableFileNum + 1);
+                immutableMemTables.last().map_or_else(|| 0, |m| m.memTableFileNum + 1);
 
             let mutableMemTableFilePath =
                 Path::join(dbOption.dirPath.as_ref(),
@@ -120,9 +121,24 @@ impl DB {
             blockFileFds,
             pageId2Page: DashMap::new(),
             memTable: RwLock::new(memTable),
-            immutableMemTables,
+            immutableMemTables: RwLock::new(immutableMemTables),
             commitReqSender,
         });
+
+        // set reference to db
+        {
+            {
+                let mut memTable = db.memTable.write().unwrap();
+                memTable.db = Arc::downgrade(&db);
+            }
+
+            {
+                let mut immutableMemTables = db.immutableMemTables.write().unwrap();
+                for memTable in immutableMemTables.iter_mut() {
+                    memTable.db = Arc::downgrade(&db);
+                }
+            }
+        }
 
         let dbClone = db.clone();
         let _ = thread::Builder::new().name("thread_process_commit_reqs".to_string()).spawn(move || {
@@ -402,9 +418,13 @@ pub(crate) struct BlockHeader;
 
 pub struct DBOption {
     pub dirPath: String,
+
     /// used only when init
     pub blockSize: u32,
+
     pub commitReqChanBufferSize: usize,
+
+    /// the max size in memory
     pub memTableMaxSize: usize,
 }
 
