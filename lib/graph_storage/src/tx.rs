@@ -30,7 +30,7 @@ impl Tx {
         let keyWithTxId = appendKeyWithTxId(keyWithoutTxId, self.id);
 
         let scanMemTable =
-            |memTable: &MemTable| -> Option<Arc<Vec<u8>>> {
+            |memTable: &MemTable| -> Option<Vec<u8>> {
                 let memTableCursor = memTable.changes.upper_bound(Bound::Included(&keyWithTxId));
 
                 if let Some((keyWithTxId0, val)) = memTableCursor.peek_prev() {
@@ -51,7 +51,7 @@ impl Tx {
             let memTable = self.db.memTable.read().unwrap();
 
             if let Some(val) = scanMemTable(&*memTable) {
-                return Ok(Some((&*val).clone()));
+                return Ok(Some(val));
             }
         }
 
@@ -61,7 +61,7 @@ impl Tx {
 
             for immutableMemTable in immutableMemTables.iter().rev() {
                 if let Some(val) = scanMemTable(immutableMemTable) {
-                    return Ok(Some((&*val).clone()));
+                    return Ok(Some(val));
                 }
             }
         }
@@ -69,13 +69,13 @@ impl Tx {
         // find in lower level
         let mut cursor = self.createCursor()?;
 
-        cursor.seek(keyWithoutTxId)?;
+        cursor.seek(keyWithoutTxId, false, None)?;
 
         if let Some((keyWithTxId, val)) = cursor.currentKV() {
             if keyWithTxId.starts_with(keyWithoutTxId) {
-                let keyTxId = extractTxIdFromKeyWithTxId(keyWithTxId);
+                let keyTxId = extractTxIdFromKeyWithTxId(keyWithTxId.as_slice());
                 if self.id >= keyTxId {
-                    return Ok(Some(val.to_vec()));
+                    return Ok(Some(val));
                 }
             }
         }
@@ -145,7 +145,7 @@ impl Tx {}
 // fn
 impl Tx {
     fn createCursor(&self) -> Result<Cursor> {
-        Cursor::new(self)
+        Cursor::new(self.db.clone(), Some(self))
     }
 }
 

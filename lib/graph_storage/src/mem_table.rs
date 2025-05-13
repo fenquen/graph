@@ -3,17 +3,22 @@ use crate::{tx, utils};
 use anyhow::Result;
 use memmap2::{Advice, MmapMut};
 use std::collections::BTreeMap;
-use std::{fs, mem};
+use std::{fs, mem, ptr};
 use std::fs::{File, OpenOptions};
 use std::mem::forget;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
+use crate::cursor::Cursor;
 use crate::db::{DB, MEM_TABLE_FILE_EXTENSION};
 
-/// memTable and underlying data
+/// memTable 文件结构
+/// | entryCount | keySize | valSize | 实际data | keySize | valSize | 实际data |
 pub(crate) struct MemTable {
     pub(crate) memTableFileNum: usize,
+
+    /// so idiot, can not get path by file struct
+    memTableFilePath: PathBuf,
 
     /// underlying data file fd
     memTableFileFd: RawFd,
@@ -22,9 +27,9 @@ pub(crate) struct MemTable {
     memTableFileMmap: MmapMut,
 
     posInFile: usize,
-    pub(crate) changes: BTreeMap<Vec<u8>, Option<Arc<Vec<u8>>>>,
+    pub(crate) changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
-    /// the reference to db
+    /// db本身会持有MemTable,需要使用weak的
     pub(crate) db: Weak<DB>,
 
     pub(crate) immutable: bool,
@@ -51,11 +56,12 @@ impl MemTable {
         let memTableFileFd = memTableFile.as_raw_fd();
         forget(memTableFile);
 
-        let memTableFileMmap = utils::mmapMutFd(memTableFileFd, None, None)?;
+        let memTableFileMmap = utils::mmapFdMut(memTableFileFd, None, None)?;
         memTableFileMmap.advise(Advice::WillNeed)?;
 
         let mut memTable = MemTable {
             memTableFileNum,
+            memTableFilePath: memTableFilePath.as_ref().to_owned(),
             memTableFileFd,
             memTableFileMmap,
             posInFile: MEM_TABLE_FILE_HEADER_SIZE,
@@ -75,6 +81,7 @@ impl MemTable {
         Ok(memTable)
     }
 
+    /// 回放memTable,memTable其实也起到了wal用途
     pub(crate) fn replay(&mut self) -> Result<()> {
         assert!(self.immutable);
 
@@ -96,7 +103,7 @@ impl MemTable {
                 if memTableFileEntryHeader.valSize > 0 {
                     let start = self.posInFile + MEM_TABLE_FILE_ENTRY_HEADER_SIZE + memTableFileEntryHeader.keySize as usize;
                     let end = start + memTableFileEntryHeader.valSize as usize;
-                    Some(Arc::new((&self.memTableFileMmap[start..end]).to_vec()))
+                    Some((&self.memTableFileMmap[start..end]).to_vec())
                 } else {
                     None
                 };
@@ -109,6 +116,7 @@ impl MemTable {
         Ok(())
     }
 
+    /// protected by write mutex
     pub(crate) fn processCommitReq(&mut self, commitReq: CommitReq) {
         assert_eq!(self.immutable, false);
 
@@ -117,7 +125,7 @@ impl MemTable {
 
             for (keyWithoutTxId, val) in commitReq.changes {
                 let keyWithTxId = tx::appendKeyWithTxId0(keyWithoutTxId, commitReq.txId);
-                MemTable::writeChange(self, keyWithTxId, val)?;
+                self.writeChange(keyWithTxId, val)?;
             }
 
             let memTableFileHeader = self.getMemTableFileHeaderMut();
@@ -130,18 +138,18 @@ impl MemTable {
         _ = commitReq.commitResultSender.send(process());
     }
 
-    fn writeChange(memTable: &mut MemTable,
+    /// protected by write mutex
+    fn writeChange(self: &mut Self,
                    keyWithTxId: Vec<u8>, val: Option<Vec<u8>>) -> Result<()> {
-        assert_eq!(memTable.immutable, false);
+        assert_eq!(self.immutable, false);
 
-        let db = memTable.db.upgrade().unwrap();
+        let db = self.db.upgrade().unwrap();
 
-        let mut switchToNewMemTable = |oldMemTable: &mut MemTable, newMemTableFileSize: usize| {
+        let switchToNewMemTable = |oldMemTable: &mut MemTable, newMemTableFileSize: usize| {
             // open a new memTable
             let mut newMemTable = {
                 let mutableMemTableFilePath =
-                    Path::join(db.dbOption.dirPath.as_ref(),
-                               format!("{}.{}", oldMemTable.memTableFileNum + 1, MEM_TABLE_FILE_EXTENSION));
+                    Path::join(db.dbOption.dirPath.as_ref(), format!("{}.{}", oldMemTable.memTableFileNum + 1, MEM_TABLE_FILE_EXTENSION));
 
                 MemTable::open(mutableMemTableFilePath, newMemTableFileSize)?
             };
@@ -155,6 +163,40 @@ impl MemTable {
             // move the old memTable to immutableMemTables
             let mut immutableMemTables = db.immutableMemTables.write().unwrap();
             immutableMemTables.push(memTableOld);
+
+            // 如果落地的memTable文件达到数量了,需要将现有的全部memTable文件内容落地到db的数据文件的
+            if immutableMemTables.len() > db.dbOption.immutableMemTableCount {
+                // immutableMemTables are in order from the oldest to the latest
+                // merge changes across immutableMemTables
+
+                let mut changesTotal = BTreeMap::new();
+
+                // 遍历各个immutableMemTable 将其changes偷梁换柱替换的
+                for immutableMemTable in immutableMemTables.iter() {
+                    // here we can not move out changes, because memTable implenments Drop
+                    // https://doc.rust-lang.org/error_codes/E0509.html
+                    /*for (key, val) in immutableMemTable.changes {
+                        cursor.put(key, val)?;
+                    }*/
+
+                    // 使用replace偷换出需要的内容,减少不必要的clone的
+                    let changes: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+                        unsafe {
+                            ptr::replace(&immutableMemTable.changes as *const BTreeMap<_, _> as _, BTreeMap::<_, _>::new())
+                        };
+
+                    for (key, val) in changes {
+                        changesTotal.insert(key, val);
+                    }
+                }
+
+                let mut cursor = Cursor::new(db.clone(), None)?;
+
+                for (key, val) in changesTotal {
+                    // 将变动落地到当前的内存中结构中
+                    cursor.seek(key.as_slice(), true, val)?;
+                }
+            }
 
             anyhow::Ok(())
         };
@@ -174,13 +216,13 @@ impl MemTable {
             };
 
             // should move the current one to immutableMemTables then build a new one
-            if memTable.posInFile + entryTotalSize >= memTable.memTableFileMmap.len() {
-                switchToNewMemTable(memTable, db.dbOption.memTableMaxSize + MEM_TABLE_FILE_HEADER_SIZE + entryTotalSize)?;
+            if self.posInFile + entryTotalSize >= self.memTableFileMmap.len() {
+                switchToNewMemTable(self, db.dbOption.memTableMaxSize + MEM_TABLE_FILE_HEADER_SIZE + entryTotalSize)?;
             }
 
             let memTableFileEntryHeader = {
                 let memTableFileEntryHeader: &mut MemTableFileEntryHeader =
-                    utils::slice2RefMut(&memTable.memTableFileMmap[memTable.posInFile..]);
+                    utils::slice2RefMut(&self.memTableFileMmap[self.posInFile..]);
 
                 memTableFileEntryHeader.keySize = keyWithTxId.len() as u16;
 
@@ -192,10 +234,10 @@ impl MemTable {
             };
 
             let entryContentMmap = {
-                let start = memTable.posInFile + MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
-                let end = memTable.posInFile + memTableFileEntryHeader.entrySize();
+                let start = self.posInFile + MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
+                let end = self.posInFile + memTableFileEntryHeader.entrySize();
 
-                &mut memTable.memTableFileMmap[start..end]
+                &mut self.memTableFileMmap[start..end]
             };
 
             // write key
@@ -206,11 +248,11 @@ impl MemTable {
                 entryContentMmap[keyWithTxId.len()..].copy_from_slice(val);
             }
 
-            memTable.posInFile += memTableFileEntryHeader.entrySize();
+            self.posInFile += memTableFileEntryHeader.entrySize();
         }
 
         // write to map
-        memTable.changes.insert(keyWithTxId, val.map(Arc::new));
+        self.changes.insert(keyWithTxId, val);
 
         Ok(())
     }
@@ -223,6 +265,15 @@ impl MemTable {
     #[inline]
     fn getMemTableFileHeaderMut(&self) -> &mut MemTableFileHeader {
         utils::slice2RefMut(&self.memTableFileMmap)
+    }
+
+    fn destory(self) -> Result<()> {
+        let memTableFilePath = self.memTableFilePath.clone();
+
+        mem::drop(self);
+        fs::remove_file(memTableFilePath)?;
+
+        Ok(())
     }
 }
 

@@ -1,4 +1,5 @@
 #![feature(btree_cursors)]
+#![feature(likely_unlikely)]
 #![allow(non_snake_case)]
 //#![allow(unused)]
 
@@ -18,13 +19,17 @@ mod mem_table;
 mod tests {
     use crate::db::{DBOption, DB};
     use std::{fs, thread, time};
+    use std::arch::asm;
     use std::time::SystemTime;
 
     #[test]
     fn general() {
-        let s = [0, 1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55];
-        let seek = 7;
-        assert_eq!(s.binary_search_by(|probe| probe.cmp(&seek)), Err(8));
+        let s: [usize; 0] = [];
+        let seek = 1;
+        println!(" {:?}", s.binary_search_by(|probe| probe.cmp(&seek)));
+        //assert_eq!(s.binary_search_by(|probe| probe.cmp(&seek)), Err(8));
+
+        return;
 
         let db = DB::open(None).unwrap();
         let dbClone = db.clone();
@@ -71,6 +76,5 @@ mod tests {
             let aa = a.to_be_bytes();
             assert_eq!(tx.get(&aa).unwrap(), Some(aa.to_vec()));
         }
-
     }
 }

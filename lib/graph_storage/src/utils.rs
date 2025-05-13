@@ -8,7 +8,6 @@ use std::str::FromStr;
 use anyhow::Result;
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use crate::constant;
-use crate::types::TxId;
 
 pub(crate) const EMPTY_STR: &str = "";
 pub(crate) const DEFAULT_PAGE_SIZE: u16 = 4096;
@@ -105,7 +104,7 @@ pub(crate) fn mmapFd(fd: RawFd, offset: u64, len: usize) -> Result<Mmap> {
 }
 
 #[inline]
-pub(crate) fn mmapMutFd(fd: RawFd, offset: Option<u64>, len: Option<usize>) -> Result<MmapMut> {
+pub(crate) fn mmapFdMut(fd: RawFd, offset: Option<u64>, len: Option<usize>) -> Result<MmapMut> {
     unsafe {
         let mut mmapOptions = MmapOptions::new();
 

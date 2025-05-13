@@ -6,7 +6,7 @@ use crate::types::{PageId, TxId};
 use crate::{page_header, utils};
 use anyhow::Result;
 use dashmap::DashMap;
-use memmap2::{Advice, MmapMut};
+use memmap2::{Advice, Mmap, MmapMut};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
@@ -28,7 +28,7 @@ pub(crate) const DB_HEADER_SIZE: usize = 100;
 pub(crate) const DEFAULT_DIR_PATH: &str = "./graph_storage";
 pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024 * 1;
 pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1000;
-pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE_MB: usize = 16;
+pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 16 * 1024 * 1024;
 
 pub(crate) const BLOCK_FILE_EXTENSION: &str = "block";
 pub(crate) const FIRST_BLOCK_FILE_NAME: &str = "0.block";
@@ -39,11 +39,12 @@ pub struct DB {
     dbHeaderMmap: MmapMut,
     lock: Mutex<()>,
     txIdCounter: AtomicU64,
+    pageIdCounter: AtomicU64,
 
     /// sorted by block file number
-    blockFileFds: Vec<RawFd>,
+    blockFileFds: RwLock<Vec<RawFd>>,
 
-    pageId2Page: DashMap<PageId, Arc<Page>>,
+    pageId2Page: DashMap<PageId, Arc<RwLock<Page>>>,
 
     pub(crate) memTable: RwLock<MemTable>,
     pub(crate) immutableMemTables: RwLock<Vec<MemTable>>,
@@ -85,7 +86,8 @@ impl DB {
 
             let block0FileFd = block0File.as_raw_fd();
 
-            let dbHeaderMmap = utils::mmapMutFd(block0FileFd, None, Some(DB_HEADER_SIZE))?;
+            // 这里就算后边block0FileFd close了也是不会影响的
+            let dbHeaderMmap = utils::mmapFdMut(block0FileFd, None, Some(DB_HEADER_SIZE))?;
 
             dbHeaderMmap.advise(Advice::WillNeed)?;
             dbHeaderMmap.lock()?;
@@ -117,8 +119,10 @@ impl DB {
             dbOption,
             dbHeaderMmap,
             lock: Mutex::new(()),
+            // 接着原来的保存在dbHeader的txId
             txIdCounter: AtomicU64::new(dbHeader.lastTxId + 1),
-            blockFileFds,
+            pageIdCounter: AtomicU64::new(dbHeader.lastPageId + 1),
+            blockFileFds: RwLock::new(blockFileFds),
             pageId2Page: DashMap::new(),
             memTable: RwLock::new(memTable),
             immutableMemTables: RwLock::new(immutableMemTables),
@@ -149,16 +153,7 @@ impl DB {
     }
 
     pub fn newTx(self: &Arc<Self>) -> Result<Tx> {
-        let txId = self.txIdCounter.fetch_add(1, atomic_ordering::SeqCst);
-
-        let dbHeader = self.getHeaderMut();
-
-        // txId increase
-        {
-            let lock = self.lock.lock().unwrap();
-            dbHeader.lastTxId = txId;
-            self.dbHeaderMmap.flush()?;
-        }
+        let txId = self.allocateTxId()?;
 
         let tx = Tx {
             id: txId,
@@ -185,30 +180,89 @@ impl DB {
 
     pub(crate) fn getPageById(&self,
                               pageId: PageId,
-                              parentPage: Option<Arc<Page>>) -> Result<Arc<Page>> {
+                              parentPage: Option<Arc<RwLock<Page>>>) -> Result<Arc<RwLock<Page>>> {
         let dbHeader = self.getHeader();
 
         if let Some(page) = self.pageId2Page.get(&pageId) {
             return Ok(page.clone());
         }
 
-        let targetBlockFd = {
+        let targetBlockFileFd = {
             let blockNum = (dbHeader.pageSize as u64 * pageId) / dbHeader.blockSize as u64;
-            self.blockFileFds.get(blockNum as usize).unwrap()
+
+            let blockFileFds = self.blockFileFds.read().unwrap();
+            blockFileFds.get(blockNum as usize).unwrap().clone()
         };
 
-        let pageMmap = {
+        let pageMmapMut = {
             let pageHeaderOffsetInBlock = (dbHeader.pageSize as u64 * pageId) % dbHeader.blockSize as u64;
-            utils::mmapFd(*targetBlockFd, pageHeaderOffsetInBlock, dbHeader.pageSize as usize)?
+            utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize as usize))?
         };
 
-        let mut page = Page::readFromPageHeader(pageMmap);
+        let mut page = Page::readFromMmap(pageMmapMut)?;
         page.parentPage = parentPage;
 
-        let page = Arc::new(page);
+        let page = Arc::new(RwLock::new(page));
         self.pageId2Page.insert(pageId, page.clone());
 
         Ok(page)
+    }
+
+    pub(crate) fn allocateTxId(self: &Arc<Self>) -> Result<TxId> {
+        let txId = self.txIdCounter.fetch_add(1, atomic_ordering::SeqCst);
+
+        let dbHeader = self.getHeaderMut();
+
+        // txId increase
+        {
+            let lock = self.lock.lock().unwrap();
+            dbHeader.lastTxId = txId;
+            self.dbHeaderMmap.flush()?;
+        }
+
+        Ok(txId)
+    }
+
+    pub(crate) fn allocateNewPage(self: &Arc<Self>) -> Result<MmapMut> {
+        // 需要blockSize 和 pageSize
+        let dbHeader = self.getHeader();
+
+        let pageId = self.allocatePageId()?;
+
+        // 得到这个page应该是在哪个blockFile
+        // blockFile可能需新建也能依然有了
+        let blockFileNum = (dbHeader.pageSize as usize * pageId as usize) / dbHeader.blockSize as usize;
+
+        // blockFile尚未创建
+        let mut blockFileFds = self.blockFileFds.write().unwrap();
+        if blockFileNum >= blockFileFds.len() {
+            let blockFile = DB::generateBlockFile(&self.dbOption, blockFileNum, self.getHeader())?;
+            blockFileFds.push(blockFile.as_raw_fd());
+        }
+        
+        let targetBlockFileFd = blockFileFds.get(blockFileNum).unwrap().clone();
+        
+        let newPageMmap = {
+            let pageHeaderOffsetInBlock = (dbHeader.pageSize as u64 * pageId) % dbHeader.blockSize as u64;
+            utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize as usize))?
+        };
+
+        Ok(newPageMmap)
+    }
+
+    pub(crate) fn allocatePageId(self: &Arc<Self>) -> Result<PageId> {
+        let pageId = self.pageIdCounter.fetch_add(1, atomic_ordering::SeqCst);
+
+        let dbHeader = self.getHeaderMut();
+
+        // pageId increase
+        {
+            let lock = self.lock.lock().unwrap();
+            dbHeader.lastPageId = pageId;
+            self.dbHeaderMmap.flush()?;
+        }
+
+        Ok(pageId)
     }
 }
 
@@ -270,22 +324,22 @@ impl DB {
         page0Header.flags = page_header::PAGE_FLAG_META;
 
         // transmute as pageHeader in page1
-        let page0Header: &mut PageHeader = utils::slice2RefMut(&mut pageSpace[pageSize as usize..]);
-        page0Header.pageId = 1;
-        page0Header.flags = page_header::PAGE_FLAG_LEAF;
+        let page1Header: &mut PageHeader = utils::slice2RefMut(&mut pageSpace[pageSize as usize..]);
+        page1Header.pageId = 1;
+        page1Header.flags = page_header::PAGE_FLAG_LEAF;
 
-        // idea from bbolt
+        // idea from bbolt,用来计算占用的数量而不是对应的block的index的
         let blockCount = (pageSpace.capacity() + dbHeader.blockSize as usize - 1) / dbHeader.blockSize as usize;
 
+        // 生成各个需要的block对应文件
         for blockFileNum in 0..blockCount {
-            let blockFilePath = Path::join(dbOption.dirPath.as_ref(), format!("{}.{}", blockFileNum, BLOCK_FILE_EXTENSION));
-            let mut blockFile = OpenOptions::new().read(true).write(true).create_new(true).open(blockFilePath)?;
+            let mut blockFile = DB::generateBlockFile(dbOption, blockFileNum, dbHeader)?;
 
             // extend to blockSize
             blockFile.set_len(dbHeader.blockSize as u64)?;
 
-            // last part
             let data2Write =
+                // last part
                 if blockFileNum == blockCount - 1 {
                     &pageSpace[blockFileNum * dbHeader.blockSize as usize..]
                 } else {
@@ -366,11 +420,22 @@ impl DB {
             memTable.processCommitReq(commitReq);
         }
     }
+
+    fn generateBlockFile(dbOption: &DBOption, blockFileNum: usize, dbHeader: &DBHeader) -> Result<File> {
+        let blockFilePath = Path::join(dbOption.dirPath.as_ref(), format!("{}.{}", blockFileNum, BLOCK_FILE_EXTENSION));
+        let blockFile = OpenOptions::new().read(true).write(true).create_new(true).open(blockFilePath)?;
+
+        blockFile.set_len(dbHeader.blockSize as u64)?;
+        blockFile.sync_all()?;
+
+        Ok(blockFile)
+    }
 }
 
 impl Drop for DB {
     fn drop(&mut self) {
-        for dataFd in self.blockFileFds.iter() {
+        let blockFileFds = self.blockFileFds.read().unwrap();
+        for dataFd in blockFileFds.iter() {
             let file = unsafe { File::from_raw_fd(*dataFd) };
             drop(file);
         }
@@ -382,9 +447,12 @@ impl Drop for DB {
 pub(crate) struct DBHeader {
     pub magic: u32,
     pub version: u16,
+    /// 等同os的pageSize <br>
+    /// linux 4MB, mac 16MB
     pub pageSize: u16,
     pub blockSize: u32,
     pub lastTxId: TxId,
+    pub lastPageId: PageId,
     pub rootPageId: PageId,
 }
 
@@ -429,6 +497,9 @@ pub struct DBOption {
 
     /// the max size in memory
     pub memTableMaxSize: usize,
+
+    /// how many immutable memTables to hold
+    pub immutableMemTableCount: usize,
 }
 
 impl Default for DBOption {
@@ -437,7 +508,8 @@ impl Default for DBOption {
             dirPath: DEFAULT_DIR_PATH.to_string(),
             blockSize: DEFAULT_BLOCK_SIZE,
             commitReqChanBufferSize: DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE,
-            memTableMaxSize: DEFAULT_MEM_TABLE_MAX_SIZE_MB * 1024 * 1024,
+            memTableMaxSize: DEFAULT_MEM_TABLE_MAX_SIZE,
+            immutableMemTableCount: 0,
         }
     }
 }
