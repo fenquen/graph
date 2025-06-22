@@ -94,7 +94,8 @@ impl<'tx> Cursor<'tx> {
                 let index =
                     currentPageWriteGuard.pageElems.binary_search_by(|pageElem| {
                         match pageElem {
-                            PageElem::LeafR(keyWithTxIdInElem, _) |
+                            PageElem::LeafR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0.as_slice()),
+                            PageElem::Dummy4PutLeaf(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0),
                             PageElem::LeafOverflowR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0.as_slice()),
                             _ => panic!("impossible")
                         }
