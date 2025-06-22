@@ -1,13 +1,11 @@
-use std::hint::unlikely;
-use std::ops::DerefMut;
-use std::slice;
-use crate::page::{Page, PageElem};
-use crate::tx::Tx;
-use crate::{page, page_header, tx};
-use anyhow::Result;
-use std::sync::{Arc, RwLock};
-use memmap2::MmapMut;
 use crate::db::DB;
+use crate::page::Page;
+use crate::tx::Tx;
+use crate::{page, tx};
+use anyhow::Result;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, RwLock};
+use crate::page_elem::PageElem;
 
 pub struct Cursor<'tx> {
     db: Arc<DB>,
@@ -16,7 +14,7 @@ pub struct Cursor<'tx> {
     /// currentPage currentIndexInPage
     stack: Vec<(Arc<RwLock<Page>>, usize)>,
 
-    writeDestLeafPages: Vec<Arc<RwLock<Page>>>,
+    pub(crate) writeDestLeafPages: Vec<(Arc<RwLock<Page>>, usize)>,
 }
 
 // pub fn
@@ -36,96 +34,6 @@ impl<'tx> Cursor<'tx> {
     pub(crate) fn seek(&mut self, key: &[u8], put: bool, val: Option<Vec<u8>>) -> Result<()> {
         self.move2Root()?;
         self.seek0(key, put, val)?;
-
-        // 如果是put的话还有善后处理涉及到的全部的leaf的
-        if put {
-            let pageSize = self.db.getHeader().pageSize as usize;
-
-            for writeDestLeafPage in self.writeDestLeafPages.iter() {
-                let mut writeDestLeafPage = writeDestLeafPage.write().unwrap();
-                let writeDestLeafPage = writeDestLeafPage.deref_mut();
-
-                let pageIsDummy = writeDestLeafPage.isDummy();
-
-                // 读取writeDestLeafPage当前含有的全部pageElem, 遍历它们挨个写入到page
-                // 如果是现有的page,那么可以先复用当前已有的这个page
-                let mut curPageMmapMut: Option<MmapMut> = None;
-                let mut curPosInPage = 0usize;
-                let mut firstPage = true;
-
-                for pageElem in writeDestLeafPage.pageElems.iter_mut() {
-                    // 说明要新写1个page了
-                    if unlikely(curPageMmapMut.is_none()) {
-                        // 确定分配1个新的pageMmapMut
-                        curPageMmapMut = {
-                            // 对第1个要分配的page来说是不是dummy有区别
-                            if firstPage && pageIsDummy == false {
-                                // 过会用了后不要忘了还回去
-                                writeDestLeafPage.mmapMut.take()
-                            } else {
-                                Some(self.db.allocateNewPage()?)
-                            }
-                        };
-
-                        // 给pageHeader留下位置
-                        curPosInPage = page_header::PAGE_HEADER_SIZE;
-                    }
-
-                    firstPage = false;
-
-                    // 实际写入各个pageElem
-
-                    // page剩下空间不够了
-                    if curPosInPage + pageElem.diskSize() > pageSize {
-                        if pageIsDummy == false {
-                            // 归还原来通过take得到的
-                            writeDestLeafPage.mmapMut = curPageMmapMut;
-                        }
-
-                        curPageMmapMut = None;
-                        curPosInPage = 0;
-
-                        continue;
-                    }
-
-                    let curPageMmapMut = curPageMmapMut.as_mut().unwrap();
-
-                    // 化为指针
-                    let ptr = unsafe { (curPageMmapMut as *mut _ as *mut u8).add(curPosInPage) };
-
-                    let destSlice = unsafe { slice::from_raw_parts_mut(ptr, 1) };
-
-                    pageElem.write2Disk(destSlice);
-
-
-                    curPosInPage += 1;
-                }
-
-                let pageCountNeedAllocate = {
-                    let dbHeader = self.db.getHeader();
-
-                    // 这样是用来计算要占用多少个page大小而不是当前是在哪个page
-                    // 如果pages是dummy的那么要新分配的数量是totalPageCount
-                    // 如果不是的话需要减去原本有的1个,那么是totalPageCount-1
-                    let totalPageCount = (writeDestLeafPage.diskSize() + (dbHeader.pageSize as usize - 1)) / dbHeader.pageSize as usize;
-
-                    if writeDestLeafPage.isDummy() {
-                        totalPageCount
-                    } else {
-                        if totalPageCount > 1 {
-                            totalPageCount - 1
-                        } else {
-                            0
-                        }
-                    }
-                };
-
-                // 确实需要额外分配page
-                if pageCountNeedAllocate > 0 {
-                    for a in writeDestLeafPage.pageElems.iter() {}
-                }
-            }
-        }
 
         Ok(())
     }
@@ -175,9 +83,9 @@ impl<'tx> Cursor<'tx> {
                 pageSize as usize / page::OVERFLOW_DIVIDE
             };
 
-            let (currentPage, currentIndexInPage) = self.stackTopMut();
+            let (currentPage, currentIndexInPage) = self.stack.last_mut().unwrap();
 
-            // 需要clone断离和上边的self.stack的mut引用的关联,惠及下边的currentPageWriteGuard
+            // 需要clone来打断和上边的self.stack的mut引用的关联,惠及下边的currentPageWriteGuard
             let currentPage = currentPage.clone();
             let mut currentPageWriteGuard = currentPage.write().unwrap();
 
@@ -255,7 +163,7 @@ impl<'tx> Cursor<'tx> {
                 }
 
                 // 收集全部收到影响的leaf page
-                self.writeDestLeafPages.push(currentPage.clone());
+                self.writeDestLeafPages.push((currentPage.clone(), *currentIndexInPage));
             } else { // put当前是branch的
                 let indexResult =
                     currentPageWriteGuard.pageElems.binary_search_by(|pageElem| {
@@ -286,6 +194,8 @@ impl<'tx> Cursor<'tx> {
                         index
                     }
                 };
+
+                currentPageWriteGuard.indexInParentPage = Some(index);
 
                 // 最后时候 就当前的情况添加内容到stack的
                 match currentPageWriteGuard.pageElems.get(index).unwrap() {

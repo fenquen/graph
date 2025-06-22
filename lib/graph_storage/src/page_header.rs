@@ -1,5 +1,5 @@
 use std::{mem, ptr, usize};
-use crate::page::PageElem;
+use crate::page_elem::PageElem;
 use crate::types::PageId;
 use anyhow::Result;
 
@@ -123,7 +123,7 @@ pub(crate) struct PageElemMetaLeaf {
 impl PageElemMeta for PageElemMetaLeaf {
     fn readPageElem(&self) -> PageElem {
         unsafe {
-            let ptr = (self as *const _ as *const u8);//.add(self.offset as usize);
+            let ptr = self as *const _ as *const u8;//.add(self.offset as usize);
             let key = ptr::slice_from_raw_parts(ptr, self.keySize as usize);
             let val = ptr::slice_from_raw_parts(ptr.add(self.keySize as usize), self.valueSize as usize);
 
@@ -144,7 +144,7 @@ pub(crate) struct PageElemMetaLeafOverflow {
 impl PageElemMeta for PageElemMetaLeafOverflow {
     fn readPageElem(&self) -> PageElem {
         unsafe {
-            let ptr = (self as *const _ as *const u8);//.add(self.offset as usize);
+            let ptr = self as *const _ as *const u8;//.add(self.offset as usize);
             let key = ptr::slice_from_raw_parts(ptr, self.keySize as usize);
 
             let valPos = {
@@ -170,7 +170,7 @@ pub(crate) struct PageElemMetaBranch {
 impl PageElemMeta for PageElemMetaBranch {
     fn readPageElem(&self) -> PageElem {
         unsafe {
-            let ptr = (self as *const _ as *const u8);//.add(self.offset as usize);
+            let ptr = self as *const _ as *const u8;//.add(self.offset as usize);
             let key = ptr::slice_from_raw_parts(ptr, self.keySize as usize);
 
             let pageId = {

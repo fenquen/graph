@@ -1,16 +1,20 @@
-use crate::tx::{CommitReq, Tx};
-use crate::{tx, utils};
+use crate::tx::{CommitReq};
+use crate::{page_header, tx, utils};
 use anyhow::Result;
 use memmap2::{Advice, MmapMut};
 use std::collections::BTreeMap;
 use std::{fs, mem, ptr};
 use std::fs::{File, OpenOptions};
 use std::mem::forget;
+use std::ops::{DerefMut};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 use crate::cursor::Cursor;
 use crate::db::{DB, MEM_TABLE_FILE_EXTENSION};
+use crate::page::Page;
+use crate::page_elem::PageElem;
+use crate::page_header::PageHeader;
 
 /// memTable 文件结构
 /// | entryCount | keySize | valSize | 实际data | keySize | valSize | 实际data |
@@ -149,7 +153,8 @@ impl MemTable {
             // open a new memTable
             let mut newMemTable = {
                 let mutableMemTableFilePath =
-                    Path::join(db.dbOption.dirPath.as_ref(), format!("{}.{}", oldMemTable.memTableFileNum + 1, MEM_TABLE_FILE_EXTENSION));
+                    Path::join(db.dbOption.dirPath.as_ref(), 
+                               format!("{}.{}", oldMemTable.memTableFileNum + 1, MEM_TABLE_FILE_EXTENSION));
 
                 MemTable::open(mutableMemTableFilePath, newMemTableFileSize)?
             };
@@ -192,9 +197,105 @@ impl MemTable {
 
                 let mut cursor = Cursor::new(db.clone(), None)?;
 
+                // 将变动落地到当前的内存中结构中
                 for (key, val) in changesTotal {
-                    // 将变动落地到当前的内存中结构中
                     cursor.seek(key.as_slice(), true, val)?;
+                }
+
+                {
+                    let mut involvedParentPages = Some(Vec::<Arc<RwLock<Page>>>::new());
+
+                    let writePages =
+                        |writeDestPage2IndexInParentPage: &[(Arc<RwLock<Page>>, usize)],
+                         involvedParentPages: &mut Vec<Arc<RwLock<Page>>>| -> Result<()> {
+                            for (page0, indexInParentPage) in writeDestPage2IndexInParentPage.iter() {
+                                let mut writeDestPage = page0.write().unwrap();
+                                let writeDestPage = writeDestPage.deref_mut();
+
+                                writeDestPage.write(&db)?;
+
+                                // 原来的单个的leaf 现在成了多个 需要原来的那个单个的leaf的parantPage来应对
+                                // 得要知道当前的这个page在父级的那个位置,然后在对应的位置塞入data
+                                // 例如 原来 这个leafPage在它的上级中是对应(700,750]的
+                                // 现在的话(700,750]这段区间又要分裂了
+                                // 原来是单单这1个区间对应1个leaf,现在是分成多个各自对应单个leaf的
+
+                                // 现在要知道各个分裂出来的leafPage的最大的key是多少
+                                // 要现在最底下的writeDestLeafPage层上平坦横向scan掉然后再到上级的
+
+                                // 读取当前的additionalPage的最大的key
+                                let getLargestKeyInPage = |page: &Page| -> Result<Vec<u8>> {
+                                    let lastElemMeta = page.getLastElemMeta()?;
+                                    match lastElemMeta.readPageElem() {
+                                        PageElem::LeafR(k, _) => Ok(k.to_owned()),
+                                        PageElem::Dummy4PutLeaf(k, _) => Ok(k.clone()),
+                                        PageElem::LeafOverflowR(k, _) => Ok(k.to_owned()),
+                                        PageElem::Dummy4PutLeafOverflow(k, _, _) => Ok(k.clone()),
+                                        _ => panic!("impossible")
+                                    }
+                                };
+
+                                let mut indexInParentPage = *indexInParentPage;
+
+                                let largestKeyInPage = getLargestKeyInPage(writeDestPage)?;
+
+                                // 意味着到了rootPage了
+                                if writeDestPage.parentPage.is_none() {
+                                    // 当前的page塞不下了,需要新创建1个顶头的非叶子的root节点
+                                    if writeDestPage.additionalPages.is_empty() == false {
+                                        let mmapMut = db.allocateNewPage()?;
+
+                                        let pageHeader: &mut PageHeader = utils::slice2RefMut(&mmapMut);
+                                        pageHeader.flags = page_header::PAGE_FLAG_BRANCH;
+
+                                        // 因为rootPage变动了,dbHeader的rootPageId也要相应的变化
+                                        db.getHeaderMut().rootPageId = pageHeader.pageId;
+
+                                        writeDestPage.parentPage = Some(Arc::new(RwLock::new(Page::readFromMmap(mmapMut)?)));
+                                    }
+                                }
+
+                                let parentPage = writeDestPage.parentPage.as_ref().unwrap();
+
+                                // 添加之前先瞧瞧是不是已经有了相应的pageId了
+                                involvedParentPages.push(parentPage.clone());
+
+                                let mut parentPage = parentPage.write().unwrap();
+
+                                // 不应该使用insert,而是应直接替换的
+                                parentPage.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(largestKeyInPage, page0.clone());
+
+                                // 如果还有additionalPage的话,就要在indexInParentPage后边不断的塞入的
+                                for additionalPage in writeDestPage.additionalPages.iter() {
+                                    indexInParentPage += 1;
+
+                                    let largestKeyInPage = getLargestKeyInPage(additionalPage)?;
+                                    parentPage.pageElems.insert(indexInParentPage, PageElem::Dummy4PutBranch0(largestKeyInPage, additionalPage.header.pageId))
+                                }
+                            }
+
+                            Ok(())
+                        };
+
+                    writePages(cursor.writeDestLeafPages.as_ref(), involvedParentPages.as_mut().unwrap())?;
+
+                    loop {
+                        let involvedParentPagesPrevRound = involvedParentPages.replace(Vec::new()).unwrap();
+                        if involvedParentPagesPrevRound.is_empty() {
+                            break;
+                        }
+
+                        let page2IndexInParentPage = involvedParentPagesPrevRound.into_iter().map(|page| {
+                            let indexInParentPage = {
+                                let pageReadGuard = page.read().unwrap();
+                                pageReadGuard.indexInParentPage.unwrap()
+                            };
+
+                            (page, indexInParentPage)
+                        }).collect::<Vec<_>>();
+
+                        writePages(&page2IndexInParentPage, involvedParentPages.as_mut().unwrap())?;
+                    }
                 }
             }
 

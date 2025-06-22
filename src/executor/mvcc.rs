@@ -192,7 +192,7 @@ impl<'session> CommandExecutor<'session> {
     }
 
     /// 当前tx上delete时候生成 xmax的 mvccKey
-    pub(super) fn generateDeleteDataXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> anyhow::Result<KV> {
+    pub(super) fn generateDeleteDataXmax(&self, mvccKeyBuffer: &mut BytesMut, dataKey: DataKey) -> Result<KV> {
         mvccKeyBuffer.writeDataMvccXmax(dataKey, self.session.getTxId()?);
         Ok((mvccKeyBuffer.to_vec(), global::EMPTY_BINARY))
     }
@@ -227,7 +227,7 @@ impl<'session> CommandExecutor<'session> {
     pub(super) fn generateDeletePointerXmax(&self,
                                             pointerKeyBuffer: &mut BytesMut,
                                             selfDataKey: DataKey,
-                                            pointerKeyTag: KeyTag, tableId: DBObjectId, targetDatakey: DataKey) -> anyhow::Result<KV> {
+                                            pointerKeyTag: KeyTag, tableId: DBObjectId, targetDatakey: DataKey) -> Result<KV> {
         pointerKeyBuffer.writePointerKeyMvccXmax(selfDataKey, pointerKeyTag, tableId, targetDatakey, self.session.getTxId()?);
         Ok((pointerKeyBuffer.to_vec(), global::EMPTY_BINARY))
     }
@@ -286,7 +286,7 @@ pub trait BytesMutExt {
 
     fn writeDataMvccKeyByRowId(&mut self,
                                rowId: RowId,
-                               mvccKeyTag: KeyTag, txid: TxId) -> anyhow::Result<()>;
+                               mvccKeyTag: KeyTag, txid: TxId) -> Result<()>;
 }
 
 impl BytesMutExt for BytesMut {
@@ -327,7 +327,7 @@ impl BytesMutExt for BytesMut {
 
     fn writeDataMvccKeyByRowId(&mut self,
                                rowId: RowId,
-                               mvccKeyTag: KeyTag, txid: TxId) -> anyhow::Result<()> {
+                               mvccKeyTag: KeyTag, txid: TxId) -> Result<()> {
         self.clear();
 
         match mvccKeyTag {

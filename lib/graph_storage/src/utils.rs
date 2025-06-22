@@ -1,4 +1,4 @@
-use std::{fs, io};
+use std::{fs, io, mem};
 use std::fs::{Metadata};
 use std::ops::{BitAnd, Sub};
 use std::os::fd::{RawFd};

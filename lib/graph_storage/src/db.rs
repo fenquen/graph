@@ -6,7 +6,7 @@ use crate::types::{PageId, TxId};
 use crate::{page_header, utils};
 use anyhow::Result;
 use dashmap::DashMap;
-use memmap2::{Advice, Mmap, MmapMut};
+use memmap2::{Advice, MmapMut};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
@@ -25,8 +25,8 @@ const VERSION: u16 = 1;
 
 pub(crate) const DB_HEADER_SIZE: usize = 100;
 
-pub(crate) const DEFAULT_DIR_PATH: &str = "./graph_storage";
-pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024 * 1;
+pub(crate) const DEFAULT_DIR_PATH: &str = "./data";
+pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024 * 16;
 pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1000;
 pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 16 * 1024 * 1024;
 
@@ -109,8 +109,7 @@ impl DB {
                 immutableMemTables.last().map_or_else(|| 0, |m| m.memTableFileNum + 1);
 
             let mutableMemTableFilePath =
-                Path::join(dbOption.dirPath.as_ref(),
-                           format!("{}.{}", mutableMemTableFileNum, MEM_TABLE_FILE_EXTENSION));
+                Path::join(dbOption.dirPath.as_ref(), format!("{}.{}", mutableMemTableFileNum, MEM_TABLE_FILE_EXTENSION));
 
             MemTable::open(mutableMemTableFilePath, dbOption.memTableMaxSize)?
         };
@@ -223,7 +222,7 @@ impl DB {
         Ok(txId)
     }
 
-    pub(crate) fn allocateNewPage(self: &Arc<Self>) -> Result<MmapMut> {
+    pub(crate) fn allocateNewPage(&self) -> Result<MmapMut> {
         // 需要blockSize 和 pageSize
         let dbHeader = self.getHeader();
 
@@ -239,18 +238,21 @@ impl DB {
             let blockFile = DB::generateBlockFile(&self.dbOption, blockFileNum, self.getHeader())?;
             blockFileFds.push(blockFile.as_raw_fd());
         }
-        
+
         let targetBlockFileFd = blockFileFds.get(blockFileNum).unwrap().clone();
-        
-        let newPageMmap = {
+
+        let mut newPageMmap = {
             let pageHeaderOffsetInBlock = (dbHeader.pageSize as u64 * pageId) % dbHeader.blockSize as u64;
             utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize as usize))?
         };
 
+        let pageHeader: &mut PageHeader = utils::slice2RefMut(&mut newPageMmap);
+        pageHeader.pageId = pageId;
+
         Ok(newPageMmap)
     }
 
-    pub(crate) fn allocatePageId(self: &Arc<Self>) -> Result<PageId> {
+    fn allocatePageId(&self) -> Result<PageId> {
         let pageId = self.pageIdCounter.fetch_add(1, atomic_ordering::SeqCst);
 
         let dbHeader = self.getHeaderMut();

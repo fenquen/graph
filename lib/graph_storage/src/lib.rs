@@ -14,12 +14,12 @@ mod tx;
 mod constant;
 mod cursor;
 mod mem_table;
+mod page_elem;
 
 #[cfg(test)]
 mod tests {
     use crate::db::{DBOption, DB};
-    use std::{fs, thread, time};
-    use std::arch::asm;
+    use std::{fs, thread};
     use std::time::SystemTime;
 
     #[test]

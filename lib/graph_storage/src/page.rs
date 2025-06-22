@@ -1,22 +1,38 @@
-use std::io::Write;
+use std::{hint, mem};
 use crate::page_header::{PageElemMeta, PageHeader};
 use crate::{page_header, utils};
-use memmap2::{MmapMut};
-use std::sync::{Arc, RwLock};
-use crate::types::PageId;
 use anyhow::Result;
+use memmap2::MmapMut;
+use std::sync::{Arc, RwLock};
+use crate::db::DB;
+use crate::page_elem::PageElem;
 
 pub(crate) const OVERFLOW_DIVIDE: usize = 100;
 
 /// page presentation in memory
 pub(crate) struct Page {
     pub(crate) parentPage: Option<Arc<RwLock<Page>>>,
+
+    /// 专门用来traverse tree时候使用的
+    pub(crate) indexInParentPage: Option<usize>,
+
     /// if page is dummy then it is none
     pub(crate) mmapMut: Option<MmapMut>,
-    // 无中生有通过mmap得到的
+
+    /// 无中生有通过mmapMut得到的
     pub(crate) header: &'static PageHeader,
+
     pub(crate) pageElems: Vec<PageElem<'static>>,
+
+    // 以下的两个的赋值应该是以本struct内的mmapMut来源
+    // pub(crate) keyMin: Option<&'static [u8]>,
+    // pub(crate) keyMax: Option<&'static [u8]>,
+
     pub(crate) childPages: Option<Vec<Arc<Page>>>,
+
+    // 用来容纳seek时候落地写的时候本身的1个mmapMut以外多出来的page
+    pub(crate) additionalPages: Vec<Page>,
+
     //pub(crate) dirty: bool,
 }
 
@@ -28,8 +44,8 @@ impl Page {
         let pageElemVec = {
             let mut pageElemVec = Vec::with_capacity(pageHeader.elemCount as usize);
 
-            for a in 0..pageHeader.elemCount as usize {
-                let pageElemMeta = pageHeader.readPageElemMeta(a)?;
+            for index in 0..pageHeader.elemCount as usize {
+                let pageElemMeta = pageHeader.readPageElemMeta(index)?;
                 let pageElem = pageElemMeta.readPageElem();
                 pageElemVec.push(pageElem);
             }
@@ -39,20 +55,28 @@ impl Page {
 
         Ok(Page {
             parentPage: None,
+            indexInParentPage: None,
             mmapMut: Some(mmapMut),
             header: pageHeader,
             pageElems: pageElemVec,
+            //keyMin: Default::default(),
+            //keyMax: Default::default(),
             childPages: None,
+            additionalPages: vec![],
         })
     }
 
     pub(crate) fn buildDummyLeafPage() -> Page {
         Page {
             parentPage: None,
+            indexInParentPage: None,
             mmapMut: None,
             header: &page_header::PAGE_HEADER_DUMMY_LEAF,
             pageElems: vec![],
+            //keyMin: Default::default(),
+            //keyMax: Default::default(),
             childPages: None,
+            additionalPages: vec![],
         }
     }
 
@@ -76,62 +100,104 @@ impl Page {
 
         size
     }
-}
 
-/// table(文件)->block   block(文件)->page
-///
-/// 目前对leaf节点的保存思路如下
-/// 如果value比较小 kv可以1道保存
-/// 如果value比较大(那多少算是大呢,目前暂时定为pageSize的25%) value保存到单独的文件 leaf节点本身保存data的pos的
-pub(crate) enum PageElem<'a> {
-    /// key is with txId
-    LeafR(&'a [u8], &'a [u8]),
-    /// (key, value在文件中的位置的)
-    LeafOverflowR(&'a [u8], usize),
-
-    /// key is with txId
-    BranchR(&'a [u8], PageId),
-
-    Dummy4PutLeaf(Vec<u8>, Vec<u8>),
-    /// (key, pos, val)
-    Dummy4PutLeafOverflow(Vec<u8>, usize, Vec<u8>),
-
-    Dummy4PutBranch(Vec<u8>, Arc<RwLock<Page>>),
-}
-
-impl<'a> PageElem<'a> {
-    pub(crate) fn asBranchR(&self) -> Result<(&'a [u8], PageId)> {
-        if let PageElem::BranchR(keyWithoutTxId, pageId) = self {
-            return Ok((keyWithoutTxId, *pageId));
-        }
-
-        throw!("a")
+    pub(crate) fn get1stElemMeta(&self) -> Result<&dyn PageElemMeta> {
+        let pageHeader = utils::slice2Ref::<PageHeader>(self.mmapMut.as_ref().unwrap());
+        let pageElemMeta = pageHeader.readPageElemMeta(0)?;
+        Ok(pageElemMeta)
     }
 
-    pub(crate) fn write2Disk(&self, dest: &mut [u8]) -> Result<()> {
-        // 变为vec 这样的只要不断的push便可以了
-        let mut vec = unsafe { Vec::from_raw_parts(dest as *const _ as *mut u8, 0, dest.len()) };
+    pub(crate) fn getLastElemMeta(&self) -> Result<&dyn PageElemMeta> {
+        let pageHeader = utils::slice2Ref::<PageHeader>(self.mmapMut.as_ref().unwrap());
+        let pageElemMeta = pageHeader.readPageElemMeta(pageHeader.elemCount as usize - 1)?;
+        Ok(pageElemMeta)
+    }
 
-        match self {
-            PageElem::LeafR(k, v) => {
-                dest.copy_from_slice(k);
+    pub(crate) fn write(&mut self, db: &DB) -> Result<()> {
+        let pageSize = db.getHeader().pageSize as usize;
+        
+        let pageIsDummy = self.isDummy();
+        let pageIsLeaf = self.isLeaf();
+
+        let mut dummyPage = Page::buildDummyLeafPage();
+
+        let mut curPage = &mut dummyPage;
+        let mut firstPage = true;
+        let mut curPosInPage = page_header::PAGE_HEADER_SIZE;;
+        let mut elementCount = 0;
+        let mut firstElemInPage = false;
+
+        let mut writePageHeader = |elementCount: usize, mmapMut: &MmapMut| {
+            let pageHeader: &mut PageHeader = utils::slice2RefMut(mmapMut);
+
+            // 写当前page的header
+            pageHeader.flags = if pageIsLeaf {
+                page_header::PAGE_FLAG_LEAF
+            } else {
+                page_header::PAGE_FLAG_BRANCH
+            };
+            
+            pageHeader.elemCount = elementCount as u16;
+        };
+
+        let a = self as *mut _;
+
+        for pageElem in self.pageElems.iter() {
+            let pageElemDiskSize = pageElem.diskSize();
+
+            // 当前page剩下空间不够了,需要分配1个page
+            if hint::unlikely(curPosInPage + pageElemDiskSize > pageSize) {
+                let curPageNew =
+                    if firstPage {
+                        firstPage = false;
+
+                        if pageIsDummy {
+                            self.mmapMut = Some(db.allocateNewPage()?);
+                        }
+
+                        a
+                    } else {
+                        // 上1个的page写满之后的处理的
+                        writePageHeader(elementCount, curPage.mmapMut.as_ref().unwrap());
+
+                        // 说明原来的leafPage空间不够了,分裂出了又1个leafPage
+                        let mut additionalPage = Page::buildDummyLeafPage();
+                        additionalPage.mmapMut = Some(db.allocateNewPage()?);
+                        additionalPage.header = utils::slice2RefMut(additionalPage.mmapMut.as_ref().unwrap());
+
+                        self.additionalPages.push(additionalPage);
+                        self.additionalPages.last_mut().unwrap() as *mut _
+                    };
+
+                curPage = unsafe { mem::transmute(curPageNew) };
+
+                // 给pageHeader保留
+                curPosInPage = page_header::PAGE_HEADER_SIZE;
+                elementCount = 0;
+                firstElemInPage = true;
             }
-            _ => todo!()
-        }
-        Ok(())
-    }
 
-    /// 含有 pageElemMeta
-    pub(crate) fn diskSize(&self) -> usize {
-        match self {
-            PageElem::LeafR(k, v) => page_header::LEAF_ELEM_META_SIZE + k.len() + v.len(),
-            PageElem::Dummy4PutLeaf(k, v) => page_header::LEAF_ELEM_META_SIZE + k.len() + v.len(),
-            //
-            PageElem::LeafOverflowR(k, _) => page_header::LEAF_ELEM_OVERFLOW_META_SIZE + k.len() + size_of::<usize>(),
-            PageElem::Dummy4PutLeafOverflow(k, _, _) => page_header::LEAF_ELEM_OVERFLOW_META_SIZE + k.len() + size_of::<usize>(),
-            //
-            PageElem::BranchR(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len() + size_of::<PageId>(),
-            PageElem::Dummy4PutBranch(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len() + size_of::<PageId>(),
+            // 实际写入各个pageElem
+            let destSlice = {
+                let curPageMmapMut = curPage.mmapMut.as_mut().unwrap();
+                &mut curPageMmapMut[curPosInPage..curPosInPage + pageElemDiskSize]
+            };
+
+            // 这个引用的源头不是pageElem而是写入目的地的
+            pageElem.write2Disk(destSlice)?;
+
+            // 如果写的是当前page的第1个的elem
+            if firstElemInPage {
+                firstElemInPage = false;
+            }
+
+            curPosInPage += pageElemDiskSize;
+            elementCount += 1;
         }
+
+        // 全部的pageElem写完后的处理的
+        writePageHeader(elementCount, curPage.mmapMut.as_ref().unwrap());
+
+        Ok(())
     }
 }
