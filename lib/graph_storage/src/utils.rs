@@ -123,14 +123,22 @@ pub(crate) fn mmapFdMut(fd: RawFd, offset: Option<u64>, len: Option<usize>) -> R
 pub(crate) fn slice2Ref<'a, T>(slice: impl AsRef<[u8]>) -> &'a T {
     unsafe {
         let slice = slice.as_ref();
-        &*(slice.as_ptr() as *const T)
+
+        // slice对应的指针位置可能不是align的倍数,如果化为引用的话会panic的
+        let actual = alignUp(slice.as_ptr() as usize, align_of::<T>());
+        
+        &*(actual as *const T)
     }
 }
 
 pub(crate) fn slice2RefMut<'a, T>(slice: impl AsRef<[u8]>) -> &'a mut T {
     unsafe {
         let slice = slice.as_ref();
-        &mut *(slice.as_ptr() as *mut T)
+        
+        // slice对应的指针位置可能不是align的倍数,如果化为引用的话会panic的
+        let actual = alignUp(slice.as_ptr() as usize, align_of::<T>());
+
+        &mut *(actual as *mut T)
     }
 }
 
@@ -151,4 +159,9 @@ pub(crate) fn extractFileNum(path: impl AsRef<Path>) -> Option<usize> {
     }
 
     usize::from_str(elemVec.get(0).unwrap()).ok()
+}
+
+#[inline]
+fn alignUp(ptr: usize, align: usize) -> usize {
+    (ptr + align - 1) & !(align - 1)
 }
