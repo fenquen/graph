@@ -26,9 +26,9 @@ const VERSION: u16 = 1;
 pub(crate) const DB_HEADER_SIZE: usize = 100;
 
 pub(crate) const DEFAULT_DIR_PATH: &str = "./data";
-pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024 * 16;
+pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
 pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1000;
-pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 16 * 1024 * 1024;
+pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 1024;
 
 pub(crate) const BLOCK_FILE_EXTENSION: &str = "block";
 pub(crate) const FIRST_BLOCK_FILE_NAME: &str = "0.block";
@@ -235,7 +235,7 @@ impl DB {
         // blockFile尚未创建
         let mut blockFileFds = self.blockFileFds.write().unwrap();
         if blockFileNum >= blockFileFds.len() {
-            let blockFile = DB::generateBlockFile(&self.dbOption, blockFileNum, self.getHeader())?;
+            let blockFile = DB::generateBlockFile(&self.dbOption, blockFileNum, self.getHeader().blockSize)?;
             blockFileFds.push(blockFile.as_raw_fd());
         }
 
@@ -310,10 +310,20 @@ impl DB {
         dbHeader.magic = MAGIC;
         dbHeader.version = VERSION;
         dbHeader.pageSize = utils::getOsPageSize();
-        dbHeader.blockSize = if dbOption.blockSize > 0 {
-            dbOption.blockSize
-        } else {
-            DEFAULT_BLOCK_SIZE
+        dbHeader.blockSize = {
+            let mut blockSize = if dbOption.blockSize > 0 {
+                dbOption.blockSize
+            } else {
+                DEFAULT_BLOCK_SIZE
+            };
+
+            // 如果blockSize不是pageSize整数倍的话,增加到那样大的
+            let a = blockSize % dbHeader.pageSize as u32;
+            if a != 0 {
+                blockSize += (dbHeader.pageSize as u32 - a)
+            }
+
+            blockSize
         };
         dbHeader.lastTxId = 0;
         dbHeader.rootPageId = 1;
@@ -331,11 +341,11 @@ impl DB {
         page1Header.flags = page_header::PAGE_FLAG_LEAF;
 
         // idea from bbolt,用来计算占用的数量而不是对应的block的index的
-        let blockCount = (pageSpace.capacity() + dbHeader.blockSize as usize - 1) / dbHeader.blockSize as usize;
+        let blockCount = ((pageSize * 2) as usize + dbHeader.blockSize as usize - 1) / dbHeader.blockSize as usize;
 
         // 生成各个需要的block对应文件
         for blockFileNum in 0..blockCount {
-            let mut blockFile = DB::generateBlockFile(dbOption, blockFileNum, dbHeader)?;
+            let mut blockFile = DB::generateBlockFile(dbOption, blockFileNum, dbHeader.blockSize)?;
 
             // extend to blockSize
             blockFile.set_len(dbHeader.blockSize as u64)?;
@@ -423,11 +433,11 @@ impl DB {
         }
     }
 
-    fn generateBlockFile(dbOption: &DBOption, blockFileNum: usize, dbHeader: &DBHeader) -> Result<File> {
+    fn generateBlockFile(dbOption: &DBOption, blockFileNum: usize, blockSize: u32) -> Result<File> {
         let blockFilePath = Path::join(dbOption.dirPath.as_ref(), format!("{}.{}", blockFileNum, BLOCK_FILE_EXTENSION));
         let blockFile = OpenOptions::new().read(true).write(true).create_new(true).open(blockFilePath)?;
 
-        blockFile.set_len(dbHeader.blockSize as u64)?;
+        blockFile.set_len(blockSize as u64)?;
         blockFile.sync_all()?;
 
         Ok(blockFile)
@@ -450,7 +460,7 @@ pub(crate) struct DBHeader {
     pub magic: u32,
     pub version: u16,
     /// 等同os的pageSize <br>
-    /// linux 4MB, mac 16MB
+    /// linux 4KB, mac 16KB
     pub pageSize: u16,
     pub blockSize: u32,
     pub lastTxId: TxId,
