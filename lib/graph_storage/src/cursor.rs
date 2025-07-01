@@ -3,7 +3,6 @@ use crate::page::Page;
 use crate::tx::Tx;
 use crate::{page, tx};
 use anyhow::Result;
-use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, RwLock};
 use crate::page_elem::PageElem;
 
@@ -97,27 +96,29 @@ impl<'tx> Cursor<'tx> {
                             PageElem::LeafR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0.as_slice()),
                             PageElem::Dummy4PutLeaf(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0),
                             PageElem::LeafOverflowR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0.as_slice()),
+                            PageElem::Dummy4PutLeafOverflow(keyWithTxIdInElem, _, _) => keyWithTxIdInElem.cmp(&key0),
                             _ => panic!("impossible")
                         }
-                    }).map(|index| { // ok /err value use same process
-                        if index == 0 {
+                    }).map(|index| { // Ok 体系 说明要变动(update/delete)现有
+                        if index == 0 { // Ok(0)
                             0
-                        } else {
-                            index - 1
+                        } else { // Ok(相同的key的index)
+                            // index - 1 // 既然是要变动现有的,是不是应该保留原样
+                            index
                         }
-                    }).map_err(|index| {
-                        if index == 0 {
-                            0
-                        } else {
-                            index - 1
+                    }).map_err(|index| { // Err 体系 说明是要insert了 ,val是None(想要删掉)的话没有意义不用考虑的
+                        if index == 0 { // Err(0)
+                            0 // insert 到 头部
+                        } else { // Err(比它大的最小的元素的index)
+                            // index - 1 // insert 到 前边的1个位置
+                            index
                         }
                     });
 
                 match index {
-                    Ok(index) => { // update/delete 落地到当前现有的page
+                    Ok(index) => { // Ok说明key是有相同的存在的,要变动(update/delete)现有
                         match val {
-                            // 就地更新替换的
-                            Some(val) => {
+                            Some(val) => {  // update
                                 currentPageWriteGuard.pageElems[index] = {
                                     if val.len() >= overflowThreshold {
                                         // pos的位置暂时先写0后边统1应对
@@ -129,8 +130,7 @@ impl<'tx> Cursor<'tx> {
 
                                 *currentIndexInPage = index;
                             }
-                            // 就地 delete的
-                            None => {
+                            None => { // delete
                                 currentPageWriteGuard.pageElems.remove(index);
 
                                 // removed one is the last, index equals with vec current length
@@ -151,7 +151,7 @@ impl<'tx> Cursor<'tx> {
                                 }
                             };
 
-                            // search 1 from empty slice [] get Err(0)
+                            // 说明要加入的key是比pageElems所有元素都大,添加到末尾
                             if index >= currentPageWriteGuard.pageElems.len() {
                                 currentPageWriteGuard.pageElems.push(pageElem);
                             } else {

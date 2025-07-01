@@ -1,4 +1,4 @@
-use std::{mem, ptr, usize};
+use std::{ptr, usize};
 use crate::page_elem::PageElem;
 use crate::types::PageId;
 use anyhow::Result;
@@ -39,7 +39,6 @@ pub(crate) struct PageHeader {
     pub(crate) pageId: PageId,
     pub(crate) flags: u16,
     pub(crate) elemCount: u16,
-    /// exist when larger than 0
     pub(crate) nextOverflowPageId: PageId,
 }
 
@@ -65,49 +64,46 @@ impl PageHeader {
     }
 }
 
+#[macro_export]
+macro_rules! impl_read_page_elem_meta {
+    ($self:ident, $pageElemMetaType:ty, $index:ident) => {
+        {
+            let mut ptr = $self as *const _ as *const u8;
+            ptr = unsafe { ptr.add(PAGE_HEADER_SIZE) };
+
+            for _ in 0..$index {
+                let elem = unsafe { &*(ptr as *const $pageElemMetaType) };
+                ptr = unsafe { ptr.add(elem.diskSize()) };
+            }
+
+            unsafe { &*(ptr as *const $pageElemMetaType) }
+        }
+    };
+}
+
 impl<'a> PageHeader {
     pub(crate) fn readPageElemMeta(&self, index: usize) -> Result<&dyn PageElemMeta> {
         if self.isLeaf() {
-            let leafElemMeta = self.readPageElemMetaLeaf(index);
-            return Ok(leafElemMeta as &dyn PageElemMeta);
+            return Ok(impl_read_page_elem_meta!(self, PageElemMetaLeaf, index));
         }
 
         if self.isLeafOverflow() {
-            let leafOverflowElemMeta = self.readPageElemMetaLeafOverflow(index);
-            return Ok(leafOverflowElemMeta);
+            return Ok(impl_read_page_elem_meta!(self, PageElemMetaLeafOverflow, index));
         }
 
         if self.isBranch() {
-            let branchElemMeta = self.readPageElemMetaBranch(index);
-            return Ok(branchElemMeta);
+            return Ok(impl_read_page_elem_meta!(self, PageElemMetaBranch, index));
         }
 
         throw!("unsupported page header")
     }
-
-    fn readPageElemMetaLeaf(&'a self, index: usize) -> &'a PageElemMetaLeaf {
-        let mut ptr = self as *const _ as *const u8;
-        ptr = unsafe { ptr.add(PAGE_HEADER_SIZE).add(LEAF_ELEM_META_SIZE * index) };
-        unsafe { mem::transmute(ptr) }
-    }
-
-    fn readPageElemMetaLeafOverflow(&'a self, index: usize) -> &'a PageElemMetaLeafOverflow {
-        let mut ptr = self as *const _ as *const u8;
-        ptr = unsafe { ptr.add(PAGE_HEADER_SIZE).add(LEAF_ELEM_OVERFLOW_META_SIZE * index) };
-
-        unsafe { mem::transmute(ptr) }
-    }
-
-    fn readPageElemMetaBranch(&'a self, index: usize) -> &'a PageElemMetaBranch {
-        let mut ptr = self as *const _ as *const u8;
-        ptr = unsafe { ptr.add(PAGE_HEADER_SIZE).add(BRANCH_ELEM_META_SIZE * index) };
-
-        unsafe { mem::transmute(ptr) }
-    }
 }
 
 pub(crate) trait PageElemMeta {
-    fn readPageElem(&self) -> PageElem;
+    fn readPageElem(&'_ self) -> PageElem<'_>;
+
+    /// 整个的pageElem大小
+    fn diskSize(&self) -> usize;
 }
 
 /// 对应 PageElem::Leaf
@@ -115,20 +111,26 @@ pub(crate) trait PageElemMeta {
 #[repr(C)]
 pub(crate) struct PageElemMetaLeaf {
     /// 实际数据离当前的offset
-   // pub(crate) offset: u16,
+    // pub(crate) offset: u16,
     pub(crate) keySize: u16,
     pub(crate) valueSize: u32,
 }
 
 impl PageElemMeta for PageElemMetaLeaf {
-    fn readPageElem(&self) -> PageElem {
+    fn readPageElem(&'_ self) -> PageElem<'_> {
         unsafe {
-            let ptr = self as *const _ as *const u8;//.add(self.offset as usize);
+            //const OFFSET: usize = size_of::<u16>() + size_of::<u32>();
+            let ptr = (self as *const _ as *const u8).add(LEAF_ELEM_META_SIZE);
             let key = ptr::slice_from_raw_parts(ptr, self.keySize as usize);
             let val = ptr::slice_from_raw_parts(ptr.add(self.keySize as usize), self.valueSize as usize);
 
             PageElem::LeafR(&*key, &*val)
         }
+    }
+
+    fn diskSize(&self) -> usize {
+        LEAF_ELEM_META_SIZE +
+            self.keySize as usize + self.valueSize as usize
     }
 }
 
@@ -136,24 +138,24 @@ impl PageElemMeta for PageElemMetaLeaf {
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub(crate) struct PageElemMetaLeafOverflow {
-   // pub(crate) offset: u16,
+    // pub(crate) offset: u16,
     pub(crate) keySize: u16,
     pub(crate) valPos: usize,
 }
 
 impl PageElemMeta for PageElemMetaLeafOverflow {
-    fn readPageElem(&self) -> PageElem {
+    fn readPageElem(&'_ self) -> PageElem<'_> {
         unsafe {
-            let ptr = self as *const _ as *const u8;//.add(self.offset as usize);
+            //const OFFSET: usize = size_of::<u16>() + size_of::<usize>();
+            let ptr = (self as *const _ as *const u8).add(LEAF_ELEM_OVERFLOW_META_SIZE);
             let key = ptr::slice_from_raw_parts(ptr, self.keySize as usize);
 
-            let valPos = {
-                let valPos = ptr::slice_from_raw_parts(ptr.add(self.keySize as usize), size_of::<usize>());
-                usize::from_be_bytes(*(valPos as *const _))
-            };
-
-            PageElem::LeafOverflowR(&*key, valPos)
+            PageElem::LeafOverflowR(&*key, self.valPos)
         }
+    }
+
+    fn diskSize(&self) -> usize {
+        LEAF_ELEM_OVERFLOW_META_SIZE + self.keySize as usize
     }
 }
 
@@ -162,23 +164,23 @@ impl PageElemMeta for PageElemMetaLeafOverflow {
 #[repr(C)]
 pub(crate) struct PageElemMetaBranch {
     /// 实际数据离当前的offset
-   // pub(crate) offset: u16,
+    // pub(crate) offset: u16,
     pub(crate) keySize: u16,
     pub(crate) pageId: PageId,
 }
 
 impl PageElemMeta for PageElemMetaBranch {
-    fn readPageElem(&self) -> PageElem {
+    fn readPageElem(&'_ self) -> PageElem<'_> {
         unsafe {
-            let ptr = self as *const _ as *const u8;//.add(self.offset as usize);
+            // const OFFSET: usize = size_of::<u16>() + size_of::<PageId>();
+            let ptr = (self as *const _ as *const u8).add(BRANCH_ELEM_META_SIZE);
             let key = ptr::slice_from_raw_parts(ptr, self.keySize as usize);
 
-            let pageId = {
-                let pageId = ptr::slice_from_raw_parts(ptr.add(self.keySize as usize), PAGE_ID_SIZE);
-                PageId::from_be_bytes(*(pageId as *const _))
-            };
-
-            PageElem::BranchR(&*key, pageId)
+            PageElem::BranchR(&*key, self.pageId)
         }
+    }
+
+    fn diskSize(&self) -> usize {
+        BRANCH_ELEM_META_SIZE + self.keySize as usize
     }
 }

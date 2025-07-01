@@ -115,19 +115,22 @@ impl Page {
 
     pub(crate) fn write(&mut self, db: &DB) -> Result<()> {
         let pageSize = db.getHeader().pageSize as usize;
-        
-        let pageIsDummy = self.isDummy();
+
+        if self.isDummy() {
+            self.mmapMut = Some(db.allocateNewPage()?);
+        }
+
         let pageIsLeaf = self.isLeaf();
 
         let mut dummyPage = Page::buildDummyLeafPage();
 
         let mut curPage = &mut dummyPage;
         let mut firstPage = true;
-        let mut curPosInPage = page_header::PAGE_HEADER_SIZE;;
+        let mut curPosInPage = page_header::PAGE_HEADER_SIZE;
         let mut elementCount = 0;
         let mut firstElemInPage = false;
 
-        let mut writePageHeader = |elementCount: usize, mmapMut: &MmapMut| {
+        let writePageHeader = |elementCount: usize, mmapMut: &MmapMut| {
             let pageHeader: &mut PageHeader = utils::slice2RefMut(mmapMut);
 
             // 写当前page的header
@@ -136,7 +139,7 @@ impl Page {
             } else {
                 page_header::PAGE_FLAG_BRANCH
             };
-            
+
             pageHeader.elemCount = elementCount as u16;
         };
 
@@ -151,9 +154,9 @@ impl Page {
                     if firstPage {
                         firstPage = false;
 
-                        if pageIsDummy {
-                            self.mmapMut = Some(db.allocateNewPage()?);
-                        }
+                        // if pageIsDummy {
+                        //     self.mmapMut = Some(db.allocateNewPage()?);
+                        // }
 
                         a
                     } else {
@@ -175,6 +178,9 @@ impl Page {
                 curPosInPage = page_header::PAGE_HEADER_SIZE;
                 elementCount = 0;
                 firstElemInPage = true;
+            } else {
+                curPage = unsafe { mem::transmute(a) };
+                firstPage = false;
             }
 
             // 实际写入各个pageElem
@@ -184,6 +190,7 @@ impl Page {
             };
 
             // 这个引用的源头不是pageElem而是写入目的地的
+            // destSlice是包含了pageElemMeta的
             pageElem.write2Disk(destSlice)?;
 
             // 如果写的是当前page的第1个的elem

@@ -1,6 +1,7 @@
 #![feature(btree_cursors)]
 #![feature(likely_unlikely)]
 #![allow(non_snake_case)]
+#![feature(ptr_metadata)]
 //#![allow(unused)]
 
 #[macro_use] // 宏引入到当前mod及其子mod,限当前crate内部使用,需放到打头使用
@@ -18,17 +19,20 @@ mod page_elem;
 
 #[cfg(test)]
 mod tests {
-    use crate::db::{DBOption, DB};
+    use crate::db::{DBHeader, DBOption, DB};
     use std::{fs, thread};
     use std::time::SystemTime;
 
     #[test]
     fn general() {
-        let s: [usize; 0] = [];
-        let seek = 1;
-        println!(" {:?}", s.binary_search_by(|probe| probe.cmp(&seek)));
+        let s: [usize; 1] = [0];
+        let target = 1;
+        // Ok 说明 存在相等的 里边的值v是index
+        // Err 说明 不存在, 里边的值v 是大于它的最小的元素的index 特殊情况 数组是空的返回Err(0); 数组元素都要比它小返回Err(数组长度)
+        println!("{:?}", s.binary_search_by(|probe| probe.cmp(&target)));
         //assert_eq!(s.binary_search_by(|probe| probe.cmp(&seek)), Err(8));
 
+        println!("{},{}", size_of::<DBHeader>(), align_of::<DBHeader>());
         return;
 
         let db = DB::open(None).unwrap();
@@ -54,7 +58,7 @@ mod tests {
 
         let mut tx = db.newTx().unwrap();
 
-        let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+        let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
 
         for a in 0..1024usize {
             let aa = a.to_be_bytes();
@@ -63,8 +67,8 @@ mod tests {
 
         tx.commit().unwrap();
 
-        let end = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-        println!("total time: {} ms", end - start);
+        let end = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
+        println!("total time: {} micro second", end - start);
     }
 
     #[test]

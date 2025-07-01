@@ -144,7 +144,7 @@ impl Tx {}
 
 // fn
 impl Tx {
-    fn createCursor(&self) -> Result<Cursor> {
+    fn createCursor(&'_ self) -> Result<Cursor<'_>> {
         Cursor::new(self.db.clone(), Some(self))
     }
 }

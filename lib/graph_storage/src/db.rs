@@ -11,24 +11,23 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::mem::forget;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
-use std::sync::atomic::Ordering as atomic_ordering;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{Ordering as atomic_ordering, AtomicBool, AtomicU64};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{mpsc, Arc, Mutex, RwLock, Weak};
-use std::{fs, thread, u64, usize};
+use std::{fs, mem, thread, u64, usize};
 
 const MAGIC: u32 = 0xCAFEBABE;
 const VERSION: u16 = 1;
 
-pub(crate) const DB_HEADER_SIZE: usize = 100;
+pub(crate) const DB_HEADER_SIZE: usize = size_of::<DBHeader>();
 
 pub(crate) const DEFAULT_DIR_PATH: &str = "./data";
 pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
 pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1000;
 pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 1024;
+pub(crate) const DEFAULT_IMMUTABLE_MEM_TABLE_COUNT: usize = 1;
 
 pub(crate) const BLOCK_FILE_EXTENSION: &str = "block";
 pub(crate) const FIRST_BLOCK_FILE_NAME: &str = "0.block";
@@ -103,7 +102,7 @@ impl DB {
 
         let (blockFileFds, immutableMemTables) = DB::scanDir(dbHeader, &dbOption)?;
 
-        // db current mutable memTable
+        // 当启动的时候总是会新生成1个作为当前的immutableMemTable
         let memTable = {
             let mutableMemTableFileNum =
                 immutableMemTables.last().map_or_else(|| 0, |m| m.memTableFileNum + 1);
@@ -320,7 +319,7 @@ impl DB {
             // 如果blockSize不是pageSize整数倍的话,增加到那样大的
             let a = blockSize % dbHeader.pageSize as u32;
             if a != 0 {
-                blockSize += (dbHeader.pageSize as u32 - a)
+                blockSize += dbHeader.pageSize as u32 - a
             }
 
             blockSize
@@ -389,7 +388,7 @@ impl DB {
 
                         blockFileFds.push((fileNum, blockFile.as_raw_fd()));
 
-                        forget(blockFile);
+                        mem::forget(blockFile);
                     }
                     MEM_TABLE_FILE_EXTENSION => { // memTable file
                         let memTableFileLen = readDir.metadata()?.len() as usize;
@@ -507,7 +506,7 @@ pub struct DBOption {
 
     pub commitReqChanBufferSize: usize,
 
-    /// the max size in memory
+    /// 单纯的memTable的entry内容的最大多少,不含memTableFileHeader的
     pub memTableMaxSize: usize,
 
     /// how many immutable memTables to hold
@@ -521,7 +520,7 @@ impl Default for DBOption {
             blockSize: DEFAULT_BLOCK_SIZE,
             commitReqChanBufferSize: DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE,
             memTableMaxSize: DEFAULT_MEM_TABLE_MAX_SIZE,
-            immutableMemTableCount: 0,
+            immutableMemTableCount: DEFAULT_IMMUTABLE_MEM_TABLE_COUNT,
         }
     }
 }

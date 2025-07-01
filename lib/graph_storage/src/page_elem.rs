@@ -4,7 +4,8 @@
 
 use std::sync::{Arc, RwLock};
 use crate::page::Page;
-use crate::page_header;
+use crate::{page_header, utils};
+use crate::page_header::{PageElemMetaBranch, PageElemMetaLeaf, PageElemMetaLeafOverflow};
 use crate::types::PageId;
 
 /// table(文件)->block   block(文件)->page
@@ -37,69 +38,95 @@ impl<'a> PageElem<'a> {
         throw!("a")
     }
 
-    /// 传入的dest的len已经是pageElemDiskSize了
+    /// 传入的dest的len已经是pageElemDiskSize了,它是含有pageElemMeta的
     pub(crate) fn write2Disk<'b>(&self, dest: &'b mut [u8]) -> anyhow::Result<&'b [u8]> {
         // 变为vec 这样的只要不断的push便可以了
         match self {
             PageElem::LeafR(k, v) => {
-                let (keySlice, valSlice) = dest.split_at_mut(k.len());
+                let (pageElemMetaSlice, kvSlice) = dest.split_at_mut(page_header::LEAF_ELEM_META_SIZE);
 
+                let pageElemMetaLeaf: &mut PageElemMetaLeaf = utils::slice2RefMut(pageElemMetaSlice);
+                pageElemMetaLeaf.keySize = k.len() as u16;
+                pageElemMetaLeaf.valueSize = v.len() as u32;
+
+                let (keySlice, valSlice) = kvSlice.split_at_mut(k.len());
                 keySlice.copy_from_slice(k);
-
                 // 因为传入的dest的len已经限制为pageElemDiskSize,不需要&mut dest[k.len()..k.len()+v.len()]
                 valSlice.copy_from_slice(v);
 
                 Ok(keySlice)
             }
             PageElem::Dummy4PutLeaf(k, v) => {
-                let (keySlice, valSlice) = dest.split_at_mut(k.len());
+                let (pageElemMetaSlice, kvSlice) = dest.split_at_mut(page_header::LEAF_ELEM_META_SIZE);
 
+                let pageElemMetaLeaf: &mut PageElemMetaLeaf = utils::slice2RefMut(pageElemMetaSlice);
+                pageElemMetaLeaf.keySize = k.len() as u16;
+                pageElemMetaLeaf.valueSize = v.len() as u32;
+
+                let (keySlice, valSlice) = kvSlice.split_at_mut(k.len());
                 keySlice.copy_from_slice(k);
                 valSlice.copy_from_slice(v);
 
                 Ok(keySlice)
             }
-            PageElem::LeafOverflowR(k, pos) => {
-                let (keySlice, valSlice) = dest.split_at_mut(k.len());
+            //---------------------------------------------------------
+            PageElem::LeafOverflowR(k, valPos) => {
+                let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::LEAF_ELEM_OVERFLOW_META_SIZE);
+
+                let pageElemMetaLeafOverflow: &mut PageElemMetaLeafOverflow = utils::slice2RefMut(pageElemMetaSlice);
+                pageElemMetaLeafOverflow.keySize = k.len() as u16;
+                pageElemMetaLeafOverflow.valPos = *valPos;
 
                 keySlice.copy_from_slice(k);
-                valSlice.copy_from_slice(&pos.to_be_bytes());
 
                 Ok(keySlice)
             }
-            PageElem::Dummy4PutLeafOverflow(k, pos, _) => {
-                let (keySlice, valSlice) = dest.split_at_mut(k.len());
+            PageElem::Dummy4PutLeafOverflow(k, valPos, _) => {
+                let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::LEAF_ELEM_OVERFLOW_META_SIZE);
+
+                let pageElemMetaLeafOverflow: &mut PageElemMetaLeafOverflow = utils::slice2RefMut(pageElemMetaSlice);
+                pageElemMetaLeafOverflow.keySize = k.len() as u16;
+                pageElemMetaLeafOverflow.valPos = *valPos;
 
                 keySlice.copy_from_slice(k);
-                valSlice.copy_from_slice(&pos.to_be_bytes());
 
                 Ok(keySlice)
             }
+            //--------------------------------------------------------
             PageElem::BranchR(k, pageId) => {
-                let (keySlice, valSlice) = dest.split_at_mut(k.len());
+                let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::BRANCH_ELEM_META_SIZE);
+
+                let pageElemMetaBranch: &mut PageElemMetaBranch = utils::slice2RefMut(pageElemMetaSlice);
+                pageElemMetaBranch.keySize = k.len() as u16;
+                pageElemMetaBranch.pageId = *pageId;
 
                 keySlice.copy_from_slice(k);
-                valSlice.copy_from_slice(&pageId.to_be_bytes());
 
                 Ok(keySlice)
             }
-            PageElem::Dummy4PutBranch(k, page) => {
-                let (keySlice, valSlice) = dest.split_at_mut(k.len());
+            PageElem::Dummy4PutBranch(k, childPage) => {
+                let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::BRANCH_ELEM_META_SIZE);
+
+                let pageElemMetaBranch: &mut PageElemMetaBranch = utils::slice2RefMut(pageElemMetaSlice);
+                pageElemMetaBranch.keySize = k.len() as u16;
+                {
+                    let childPage = childPage.read().unwrap();
+                    pageElemMetaBranch.pageId = childPage.header.pageId;
+                }
 
                 keySlice.copy_from_slice(k);
 
-                {
-                    let page = page.read().unwrap();
-                    valSlice.copy_from_slice(&page.header.pageId.to_be_bytes())
-                }
 
                 Ok(keySlice)
             }
             PageElem::Dummy4PutBranch0(k, pageId) => {
-                let (keySlice, valSlice) = dest.split_at_mut(k.len());
+                let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::BRANCH_ELEM_META_SIZE);
+
+                let pageElemMetaBranch: &mut PageElemMetaBranch = utils::slice2RefMut(pageElemMetaSlice);
+                pageElemMetaBranch.keySize = k.len() as u16;
+                pageElemMetaBranch.pageId = *pageId;
 
                 keySlice.copy_from_slice(k);
-                valSlice.copy_from_slice(&pageId.to_be_bytes());
 
                 Ok(keySlice)
             }

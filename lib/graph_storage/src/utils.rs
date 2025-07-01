@@ -1,4 +1,4 @@
-use std::{fs, io, mem};
+use std::{fs, io};
 use std::fs::{Metadata};
 use std::ops::{BitAnd, Sub};
 use std::os::fd::{RawFd};
@@ -126,7 +126,7 @@ pub(crate) fn slice2Ref<'a, T>(slice: impl AsRef<[u8]>) -> &'a T {
 
         // slice对应的指针位置可能不是align的倍数,如果化为引用的话会panic的
         let actual = alignUp(slice.as_ptr() as usize, align_of::<T>());
-        
+
         &*(actual as *const T)
     }
 }
@@ -134,7 +134,7 @@ pub(crate) fn slice2Ref<'a, T>(slice: impl AsRef<[u8]>) -> &'a T {
 pub(crate) fn slice2RefMut<'a, T>(slice: impl AsRef<[u8]>) -> &'a mut T {
     unsafe {
         let slice = slice.as_ref();
-        
+
         // slice对应的指针位置可能不是align的倍数,如果化为引用的话会panic的
         let actual = alignUp(slice.as_ptr() as usize, align_of::<T>());
 
@@ -162,6 +162,6 @@ pub(crate) fn extractFileNum(path: impl AsRef<Path>) -> Option<usize> {
 }
 
 #[inline]
-fn alignUp(ptr: usize, align: usize) -> usize {
+pub(crate) const fn alignUp(ptr: usize, align: usize) -> usize {
     (ptr + align - 1) & !(align - 1)
 }
