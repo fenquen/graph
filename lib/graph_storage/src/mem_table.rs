@@ -2,7 +2,7 @@ use crate::tx::{CommitReq};
 use crate::{page_header, tx, utils};
 use anyhow::Result;
 use memmap2::{Advice, MmapMut};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::{fs, mem, ptr};
 use std::fs::{File, OpenOptions};
 use std::mem::forget;
@@ -15,6 +15,7 @@ use crate::db::{DB, MEM_TABLE_FILE_EXTENSION};
 use crate::page::Page;
 use crate::page_elem::PageElem;
 use crate::page_header::PageHeader;
+use crate::types::PageId;
 
 /// memTable 文件结构
 /// | entryCount | keySize | valSize | 实际data | keySize | valSize | 实际data |
@@ -220,16 +221,16 @@ impl MemTable {
                     }
 
                     {
-                        let mut involvedParentPages = Some(Vec::<Arc<RwLock<Page>>>::new());
+                        let mut pageId2InvolvedParentPages = HashMap::<PageId, Arc<RwLock<Page>>>::new();
 
                         let writePages =
-                            |writeDestPage2IndexInParentPage: &[(Arc<RwLock<Page>>, usize)],
-                             involvedParentPages: &mut Vec<Arc<RwLock<Page>>>| -> Result<()> {
-                                for (page0, indexInParentPage) in writeDestPage2IndexInParentPage.iter() {
-                                    let mut writeDestPage = page0.write().unwrap();
+                            |writeDestPage2IndexInParentPage: Vec<(Arc<RwLock<Page>>, Option<usize>)>,
+                             involvedParentPages: &mut HashMap<PageId, Arc<RwLock<Page>>>| -> Result<()> {
+                                for (writeDestPage0, indexInParentPage) in writeDestPage2IndexInParentPage.iter() {
+                                    let mut writeDestPage = writeDestPage0.write().unwrap();
                                     let writeDestPage = writeDestPage.deref_mut();
 
-                                    writeDestPage.write(&db)?;
+                                    writeDestPage.write2Disk(&db)?;
 
                                     // 原来的单个的leaf 现在成了多个 需要原来的那个单个的leaf的parantPage来应对
                                     // 得要知道当前的这个page在父级的那个位置,然后在对应的位置塞入data
@@ -243,51 +244,82 @@ impl MemTable {
                                     // 读取当前的additionalPage的最大的key
                                     let getLargestKeyInPage = |page: &Page| -> Result<Vec<u8>> {
                                         let lastElemMeta = page.getLastElemMeta()?;
+
                                         match lastElemMeta.readPageElem() {
                                             PageElem::LeafR(k, _) => Ok(k.to_owned()),
-                                            PageElem::Dummy4PutLeaf(k, _) => Ok(k.clone()),
+                                            // PageElem::Dummy4PutLeaf(k, _) => Ok(k.clone()),
                                             PageElem::LeafOverflowR(k, _) => Ok(k.to_owned()),
-                                            PageElem::Dummy4PutLeafOverflow(k, _, _) => Ok(k.clone()),
+                                            // PageElem::Dummy4PutLeafOverflow(k, _, _) => Ok(k.clone()),
+                                            PageElem::BranchR(k, _) => Ok(k.to_owned()),
                                             _ => panic!("impossible")
                                         }
                                     };
 
-                                    let mut indexInParentPage = *indexInParentPage;
-
                                     let largestKeyInPage = getLargestKeyInPage(writeDestPage)?;
 
-                                    // 意味着到了rootPage了
-                                    if writeDestPage.parentPage.is_none() {
-                                        // 当前的page塞不下了,需要新创建1个顶头的非叶子的root节点
-                                        // 如果说rootPage还是容纳的下 那么不用去理会了
-                                        if writeDestPage.additionalPages.len() > 0 {
-                                            let mmapMut = db.allocateNewPage()?;
+                                    // 当前的page塞不下了,实际要分裂成多个了,需要再在上头盖1个branch
+                                    // 如果说rootPage还是容纳的下 那么不用去理会了
+                                    if writeDestPage.additionalPages.len() > 0 {
+                                        let needBuildNewParentPage = writeDestPage.parentPage.is_none();
 
-                                            let pageHeader: &mut PageHeader = utils::slice2RefMut(&mmapMut);
-                                            pageHeader.flags = page_header::PAGE_FLAG_BRANCH;
+                                        // 到了顶头没有上级了
+                                        if needBuildNewParentPage {
+                                            let mmapMut = {
+                                                let mmapMut = db.allocateNewPage()?;
 
-                                            // 因为rootPage变动了,dbHeader的rootPageId也要相应的变化
-                                            db.getHeaderMut().rootPageId = pageHeader.pageId;
+                                                let pageHeader: &mut PageHeader = utils::slice2RefMut(&mmapMut);
+                                                pageHeader.flags = page_header::PAGE_FLAG_BRANCH;
+
+                                                // 因为rootPage变动了,dbHeader的rootPageId也要相应的变化
+                                                db.getHeaderMut().rootPageId = pageHeader.pageId;
+
+                                                mmapMut
+                                            };
 
                                             writeDestPage.parentPage = Some(Arc::new(RwLock::new(Page::readFromMmap(mmapMut)?)));
+                                        }
 
-                                            let parentPage = writeDestPage.parentPage.as_ref().unwrap();
+                                        let parentPage = writeDestPage.parentPage.as_ref().unwrap();
 
-                                            // 添加之前先瞧瞧是不是已经有了相应的pageId了
-                                            involvedParentPages.push(parentPage.clone());
+                                        // 添加之前先瞧瞧是不是已经有了相应的pageId了
+                                        let parentPageId = {
+                                            let parentPage = parentPage.read().unwrap();
+                                            parentPage.header.pageId
+                                        };
 
-                                            let mut parentPage = parentPage.write().unwrap();
+                                        if involvedParentPages.contains_key(&parentPageId) == false {
+                                            involvedParentPages.insert(parentPageId, parentPage.clone());
+                                        }
 
-                                            // 不应该使用insert,而是应直接替换的
-                                            parentPage.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(largestKeyInPage, page0.clone());
+                                        let mut parentPage = parentPage.write().unwrap();
 
-                                            // 如果还有additionalPage的话,就要在indexInParentPage后边不断的塞入的
-                                            for additionalPage in writeDestPage.additionalPages.iter() {
-                                                indexInParentPage += 1;
-
-                                                let largestKeyInPage = getLargestKeyInPage(additionalPage)?;
-                                                parentPage.pageElems.insert(indexInParentPage, PageElem::Dummy4PutBranch0(largestKeyInPage, additionalPage.header.pageId))
+                                        // 不应该使用insert,而是应直接替换的
+                                        let mut indexInParentPage = match indexInParentPage {
+                                            Some(indexInParentPage) => {
+                                                if needBuildNewParentPage {
+                                                    parentPage.pageElems.push(PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone()));
+                                                    0
+                                                } else {
+                                                    let indexInParentPage = *indexInParentPage;
+                                                    parentPage.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone());
+                                                    indexInParentPage
+                                                }
                                             }
+                                            None => { // 说明直接到了leafPage未经过branch 要么 这是1个临时新建的bracnh
+                                                parentPage.pageElems.push(PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone()));
+                                                0
+                                            }
+                                        };
+
+                                        // 如果还有additionalPage的话,就要在indexInParentPage后边不断的塞入的
+                                        for additionalPage in writeDestPage.additionalPages.iter() {
+                                            indexInParentPage += 1;
+
+                                            let largestKeyInPage = getLargestKeyInPage(additionalPage)?;
+
+                                            // insert的目标index可以和len相同,塞到最后的和push相同
+                                            parentPage.pageElems.insert(indexInParentPage,
+                                                                        PageElem::Dummy4PutBranch0(largestKeyInPage, additionalPage.header.pageId))
                                         }
                                     }
                                 }
@@ -295,24 +327,30 @@ impl MemTable {
                                 Ok(())
                             };
 
-                        writePages(cursor.writeDestLeafPages.as_ref(), involvedParentPages.as_mut().unwrap())?;
+                        let values: Vec<(Arc<RwLock<Page>>, Option<usize>)> = cursor.pageId2PageAndIndexInParent.into_values().collect();
+                        writePages(values, &mut pageId2InvolvedParentPages)?;
 
                         loop {
-                            let involvedParentPagesPrevRound = involvedParentPages.replace(Vec::new()).unwrap();
+                            let involvedParentPagesPrevRound: Vec<Arc<RwLock<Page>>> = {
+                                let pairs: Vec<(PageId, Arc<RwLock<Page>>)> = pageId2InvolvedParentPages.drain().collect();
+                                pairs.into_iter().map(|(_, involvedParentPage)| involvedParentPage).collect()
+                            };
+
                             if involvedParentPagesPrevRound.is_empty() {
                                 break;
                             }
 
-                            let page2IndexInParentPage = involvedParentPagesPrevRound.into_iter().map(|page| {
-                                let indexInParentPage = {
-                                    let pageReadGuard = page.read().unwrap();
-                                    pageReadGuard.indexInParentPage.unwrap()
-                                };
+                            let page2IndexInParentPage =
+                                involvedParentPagesPrevRound.into_iter().map(|involvedParentPage| {
+                                    let indexInParentPage = {
+                                        let pageReadGuard = involvedParentPage.read().unwrap();
+                                        pageReadGuard.indexInParentPage
+                                    };
 
-                                (page, indexInParentPage)
-                            }).collect::<Vec<_>>();
+                                    (involvedParentPage, indexInParentPage)
+                                }).collect::<Vec<_>>();
 
-                            writePages(&page2IndexInParentPage, involvedParentPages.as_mut().unwrap())?;
+                            writePages(page2IndexInParentPage, &mut pageId2InvolvedParentPages)?;
                         }
                     }
 
@@ -343,7 +381,10 @@ impl MemTable {
 
             // should move the current one to immutableMemTables then build a new one
             if self.posInFile + entryTotalSize >= self.memTableFileMmap.len() {
-                switch2NewMemTable(self, db.dbOption.memTableMaxSize + MEM_TABLE_FILE_HEADER_SIZE + entryTotalSize)?;
+                switch2NewMemTable(self,
+                                   db.dbOption.memTableMaxSize +
+                                       MEM_TABLE_FILE_HEADER_SIZE +
+                                       entryTotalSize)?;
             }
 
             // 当前这个的kv对应的memtableEnrty

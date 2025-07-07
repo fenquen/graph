@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::db::DB;
 use crate::page::Page;
 use crate::tx::Tx;
@@ -5,6 +6,7 @@ use crate::{page, tx};
 use anyhow::Result;
 use std::sync::{Arc, RwLock};
 use crate::page_elem::PageElem;
+use crate::types::PageId;
 
 pub struct Cursor<'tx> {
     db: Arc<DB>,
@@ -13,7 +15,8 @@ pub struct Cursor<'tx> {
     /// currentPage currentIndexInPage
     stack: Vec<(Arc<RwLock<Page>>, usize)>,
 
-    pub(crate) writeDestLeafPages: Vec<(Arc<RwLock<Page>>, usize)>,
+    // 应该更改为 pageId -> (page, indexInParent)
+    pub(crate) pageId2PageAndIndexInParent: HashMap<PageId, (Arc<RwLock<Page>>, Option<usize>)>,
 }
 
 // pub fn
@@ -22,8 +25,8 @@ impl<'tx> Cursor<'tx> {
         Ok(Cursor {
             db,
             tx,
-            stack: vec![],
-            writeDestLeafPages: vec![],
+            stack: Vec::new(),
+            pageId2PageAndIndexInParent: HashMap::new(),
         })
     }
 }
@@ -87,6 +90,8 @@ impl<'tx> Cursor<'tx> {
             // 需要clone来打断和上边的self.stack的mut引用的关联,惠及下边的currentPageWriteGuard
             let currentPage = currentPage.clone();
             let mut currentPageWriteGuard = currentPage.write().unwrap();
+
+            let currentPageId = currentPageWriteGuard.header.pageId;
 
             // put 当前是leaf的
             if currentPageWriteGuard.header.isLeaf() || currentPageWriteGuard.header.isLeafOverflow() {
@@ -164,12 +169,24 @@ impl<'tx> Cursor<'tx> {
                 }
 
                 // 收集全部收到影响的leaf page
-                self.writeDestLeafPages.push((currentPage.clone(), *currentIndexInPage));
+                // 需要知道有没有经历过历经branch的下钻过程,如果上手便是身为leaf的root page 这样是不对的
+                let indexInParentPage =
+                    if self.stack.len() >= 2 {
+                        self.stack.get(self.stack.len() - 2).map(|(_, b)| *b)
+                    } else {
+                        None
+                    };
+
+                if self.pageId2PageAndIndexInParent.contains_key(&currentPageId) == false {
+                    self.pageId2PageAndIndexInParent.insert(currentPageId, (currentPage.clone(), indexInParentPage));
+                }
             } else { // put当前是branch的
                 let indexResult =
                     currentPageWriteGuard.pageElems.binary_search_by(|pageElem| {
                         match pageElem {
-                            PageElem::BranchR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0.as_slice()),
+                            PageElem::BranchR(keyWithTxId, _) => keyWithTxId.cmp(&key0.as_slice()),
+                            PageElem::Dummy4PutBranch(keyWithTxId, _) |
+                            PageElem::Dummy4PutBranch0(keyWithTxId, _) => keyWithTxId.as_slice().cmp(key0.as_slice()),
                             _ => panic!("impossible")
                         }
                     });
@@ -196,11 +213,16 @@ impl<'tx> Cursor<'tx> {
                     }
                 };
 
-                currentPageWriteGuard.indexInParentPage = Some(index);
+                currentPageWriteGuard.indexInParentPage =
+                    if self.stack.len() >= 2 {
+                        self.stack.get(self.stack.len() - 2).map(|(_, b)| *b)
+                    } else {
+                        None
+                    };
 
                 // 最后时候 就当前的情况添加内容到stack的
                 match currentPageWriteGuard.pageElems.get(index).unwrap() {
-                    PageElem::BranchR(_, pageId) => {
+                    PageElem::BranchR(_, pageId) | PageElem::Dummy4PutBranch0(_, pageId) => {
                         let page = db.getPageById(*pageId, Some(currentPage.clone()))?;
                         self.stack.push((page, 0));
                     }

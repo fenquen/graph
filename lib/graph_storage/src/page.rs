@@ -1,4 +1,5 @@
 use std::{hint, mem};
+use std::ptr::NonNull;
 use crate::page_header::{PageElemMeta, PageHeader};
 use crate::{page_header, utils};
 use anyhow::Result;
@@ -113,7 +114,7 @@ impl Page {
         Ok(pageElemMeta)
     }
 
-    pub(crate) fn write(&mut self, db: &DB) -> Result<()> {
+    pub(crate) fn write2Disk(&mut self, db: &DB) -> Result<()> {
         let pageSize = db.getHeader().pageSize as usize;
 
         if self.isDummy() {
@@ -122,13 +123,12 @@ impl Page {
 
         let pageIsLeaf = self.isLeaf();
 
-        let mut dummyPage = Page::buildDummyLeafPage();
-
-        let mut curPage = &mut dummyPage;
-        let mut firstPage = true;
+        let mut curPage: NonNull<Page> = NonNull::new(self as *mut _).unwrap();
         let mut curPosInPage = page_header::PAGE_HEADER_SIZE;
         let mut elementCount = 0;
-        let mut firstElemInPage = false;
+
+        // 如果page的内容太多要写到额外的page,那么pageElems保存的内容是要分派到各个page的
+        let mut splitIndices = Vec::new();
 
         let writePageHeader = |elementCount: usize, mmapMut: &MmapMut| {
             let pageHeader: &mut PageHeader = utils::slice2RefMut(mmapMut);
@@ -143,49 +143,34 @@ impl Page {
             pageHeader.elemCount = elementCount as u16;
         };
 
-        let a = self as *mut _;
-
-        for pageElem in self.pageElems.iter() {
+        for (index, pageElem) in self.pageElems.iter().enumerate() {
             let pageElemDiskSize = pageElem.diskSize();
 
             // 当前page剩下空间不够了,需要分配1个page
-            if hint::unlikely(curPosInPage + pageElemDiskSize > pageSize) {
-                let curPageNew =
-                    if firstPage {
-                        firstPage = false;
+            if curPosInPage + pageElemDiskSize > pageSize {
+                splitIndices.push(index);
 
-                        // if pageIsDummy {
-                        //     self.mmapMut = Some(db.allocateNewPage()?);
-                        // }
+                curPage = {
+                    // 上1个的page写满之后的处理的
+                    writePageHeader(elementCount, unsafe { curPage.as_ref().mmapMut.as_ref().unwrap() });
 
-                        a
-                    } else {
-                        // 上1个的page写满之后的处理的
-                        writePageHeader(elementCount, curPage.mmapMut.as_ref().unwrap());
+                    // 说明原来的leafPage空间不够了,分裂出了又1个leafPage
+                    let mut additionalPage = Page::buildDummyLeafPage();
+                    additionalPage.mmapMut = Some(db.allocateNewPage()?);
+                    additionalPage.header = utils::slice2RefMut(additionalPage.mmapMut.as_ref().unwrap());
 
-                        // 说明原来的leafPage空间不够了,分裂出了又1个leafPage
-                        let mut additionalPage = Page::buildDummyLeafPage();
-                        additionalPage.mmapMut = Some(db.allocateNewPage()?);
-                        additionalPage.header = utils::slice2RefMut(additionalPage.mmapMut.as_ref().unwrap());
-
-                        self.additionalPages.push(additionalPage);
-                        self.additionalPages.last_mut().unwrap() as *mut _
-                    };
-
-                curPage = unsafe { mem::transmute(curPageNew) };
+                    self.additionalPages.push(additionalPage);
+                    NonNull::new(self.additionalPages.last_mut().unwrap() as *mut _).unwrap()
+                };
 
                 // 给pageHeader保留
                 curPosInPage = page_header::PAGE_HEADER_SIZE;
                 elementCount = 0;
-                firstElemInPage = true;
-            } else {
-                curPage = unsafe { mem::transmute(a) };
-                firstPage = false;
             }
 
             // 实际写入各个pageElem
             let destSlice = {
-                let curPageMmapMut = curPage.mmapMut.as_mut().unwrap();
+                let curPageMmapMut = unsafe { curPage.as_mut().mmapMut.as_mut().unwrap() };
                 &mut curPageMmapMut[curPosInPage..curPosInPage + pageElemDiskSize]
             };
 
@@ -193,17 +178,18 @@ impl Page {
             // destSlice是包含了pageElemMeta的
             pageElem.write2Disk(destSlice)?;
 
-            // 如果写的是当前page的第1个的elem
-            if firstElemInPage {
-                firstElemInPage = false;
-            }
-
             curPosInPage += pageElemDiskSize;
             elementCount += 1;
         }
 
         // 全部的pageElem写完后的处理的
-        writePageHeader(elementCount, curPage.mmapMut.as_ref().unwrap());
+        writePageHeader(elementCount, unsafe { curPage.as_ref().mmapMut.as_ref().unwrap() });
+
+        // 使用倒序
+        for (splitIndex, additionalPage) in
+            splitIndices.into_iter().rev().zip(self.additionalPages.iter_mut().rev()) {
+            additionalPage.pageElems = self.pageElems.split_off(splitIndex);
+        }
 
         Ok(())
     }
