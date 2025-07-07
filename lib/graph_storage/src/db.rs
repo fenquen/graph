@@ -241,6 +241,7 @@ impl DB {
         if blockFileNum >= blockFileFds.len() {
             let blockFile = DB::generateBlockFile(&self.dbOption, blockFileNum, self.getHeader().blockSize)?;
             blockFileFds.push(blockFile.as_raw_fd());
+            mem::forget(blockFile);
         }
 
         let targetBlockFileFd = blockFileFds.get(blockFileNum).unwrap().clone();
