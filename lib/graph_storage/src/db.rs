@@ -97,6 +97,11 @@ impl DB {
         let dbHeader = utils::slice2RefMut::<DBHeader>(&dbHeaderMmap);
         dbHeader.verify()?;
 
+        if shouldInit {
+            // init时候会生成pageId是0和1的两个page的
+            dbHeader.lastPageId = 1;
+        }
+
         let (commitReqSender, commitReqReceiver) =
             mpsc::sync_channel::<CommitReq>(dbOption.commitReqChanBufferSize);
 
