@@ -116,7 +116,6 @@ impl<'a> PageElem<'a> {
 
                 keySlice.copy_from_slice(k);
 
-
                 Ok(keySlice)
             }
             PageElem::Dummy4PutBranch0(k, pageId) => {
@@ -142,9 +141,9 @@ impl<'a> PageElem<'a> {
             PageElem::LeafOverflowR(k, _) => page_header::LEAF_ELEM_OVERFLOW_META_SIZE + k.len() + size_of::<usize>(),
             PageElem::Dummy4PutLeafOverflow(k, _, _) => page_header::LEAF_ELEM_OVERFLOW_META_SIZE + k.len() + size_of::<usize>(),
             //
-            PageElem::BranchR(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len() + size_of::<PageId>(),
-            PageElem::Dummy4PutBranch(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len() + size_of::<PageId>(),
-            PageElem::Dummy4PutBranch0(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len() + size_of::<PageId>(),
+            PageElem::BranchR(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(),// + size_of::<PageId>(),
+            PageElem::Dummy4PutBranch(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(),// + size_of::<PageId>(),
+            PageElem::Dummy4PutBranch0(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(),// + size_of::<PageId>(),
         }
     }
 
