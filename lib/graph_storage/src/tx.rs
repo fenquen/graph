@@ -73,7 +73,7 @@ impl Tx {
 
         if let Some((keyWithTxId, val)) = cursor.currentKV() {
             if keyWithTxId.starts_with(keyWithoutTxId) {
-                let keyTxId = extractTxIdFromKeyWithTxId(keyWithTxId.as_slice());
+                let (_, keyTxId) = parseKeyWithTxId(keyWithTxId.as_slice());
                 if self.id >= keyTxId {
                     return Ok(Some(val));
                 }
@@ -139,9 +139,6 @@ impl Tx {
     }
 }
 
-// pub (crate) fn
-impl Tx {}
-
 // fn
 impl Tx {
     fn createCursor(&'_ self) -> Result<Cursor<'_>> {
@@ -149,18 +146,21 @@ impl Tx {
     }
 }
 
-fn parseKeyWithTxId(keyWithTxId: &[u8]) -> (&[u8], TxId) {
+pub(crate) fn parseKeyWithTxId(keyWithTxId: &[u8]) -> (&[u8], TxId) {
     let pos = keyWithTxId.len() - constant::TX_ID_SIZE;
     let originKey = &keyWithTxId[0..pos];
     let txId = utils::slice2ArrayRef(&keyWithTxId[pos..]).unwrap();
     (originKey, TxId::from_be_bytes(*txId))
 }
 
-fn extractTxIdFromKeyWithTxId(keyWithTxId: &[u8]) -> TxId {
-    let pos = keyWithTxId.len() - constant::TX_ID_SIZE;
-    let txId = utils::slice2ArrayRef(&keyWithTxId[pos..]).unwrap();
+pub(crate) fn extractKeyFromKeyWithTxId(keyWithTxId: &[u8]) -> &[u8] {
+    let (key, _) = parseKeyWithTxId(keyWithTxId);
+    key
+}
 
-    TxId::from_be_bytes(*txId)
+fn extractTxIdFromKeyWithTxId(keyWithTxId: &[u8]) -> TxId {
+    let (_, txId) = parseKeyWithTxId(keyWithTxId);
+    txId
 }
 
 pub(crate) fn appendKeyWithTxId(key: &[u8], txId: TxId) -> Vec<u8> {

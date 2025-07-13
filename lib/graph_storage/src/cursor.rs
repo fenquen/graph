@@ -250,10 +250,26 @@ impl<'tx> Cursor<'tx> {
 
                 *currentIndexInPage = index;
             } else { // branch
+                // 读branch的时候key不应还有tx的
                 let index =
                     currentPageReadGuard.pageElems.binary_search_by(|pageElem| {
+                        let key0WithoutTxId = tx::extractKeyFromKeyWithTxId(&key0);
+
                         match pageElem {
-                            PageElem::BranchR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0.as_slice()),
+                            // branch elem中保存的key 要不要含有txId
+                            // 至少在gets时候在branch上的筛选比较key是不能含有txId的
+                            // 碰到某种情况,branchPage中的某个elem的key是250,txId是1
+                            // 然后在txId是2的时候尝试get 250对应的val
+                            // 如果将txId考虑在内进行key的比较的话会得不到value,这是不对的
+                            PageElem::BranchR(keyWithTxIdInElem, _) => {
+                                let keyInElem = tx::extractKeyFromKeyWithTxId(keyWithTxIdInElem);
+                                keyInElem.cmp(key0WithoutTxId)
+                            }
+                            PageElem::Dummy4PutBranch(keyWithTxIdInElem, _) |
+                            PageElem::Dummy4PutBranch0(keyWithTxIdInElem, _) => {
+                                let keyInElem = tx::extractKeyFromKeyWithTxId(keyWithTxIdInElem);
+                                keyInElem.cmp(key0WithoutTxId)
+                            }
                             _ => panic!("impossible")
                         }
                     }).unwrap_or_else(|index| {
