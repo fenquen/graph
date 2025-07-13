@@ -2,6 +2,7 @@
 #![feature(likely_unlikely)]
 #![allow(non_snake_case)]
 #![feature(ptr_metadata)]
+#![feature(rwlock_downgrade)]
 //#![allow(unused)]
 
 #[macro_use] // 宏引入到当前mod及其子mod,限当前crate内部使用,需放到打头使用
@@ -20,7 +21,7 @@ mod page_elem;
 #[cfg(test)]
 mod tests {
     use crate::db::{DBHeader, DBOption, DB};
-    use std::{fs, thread};
+    use std::{fs};
     use std::time::SystemTime;
 
     #[test]
@@ -34,20 +35,6 @@ mod tests {
 
         println!("{},{}", size_of::<DBHeader>(), align_of::<DBHeader>());
         return;
-
-        let db = DB::open(None).unwrap();
-        let dbClone = db.clone();
-
-        let a = thread::spawn(move || {
-            let mut tx = dbClone.newTx().unwrap();
-            assert_eq!(tx.get(&[1]).unwrap(), None);
-
-            tx.set(&[0], &[1]).unwrap();
-
-            tx.commit().unwrap();
-        });
-
-        let _ = a.join();
     }
 
     #[test]
@@ -77,8 +64,35 @@ mod tests {
         let tx = db.newTx().unwrap();
 
         for a in 0..1024usize {
-            let aa = a.to_be_bytes();
-            assert_eq!(tx.get(&aa).unwrap(), Some(aa.to_vec()));
+            let k = a.to_be_bytes();
+            assert_eq!(tx.get(&k).unwrap().as_ref().unwrap().as_slice(), k.as_slice());
+        }
+    }
+
+    #[test]
+    fn testWriteRead() {
+        _ = fs::remove_dir_all(DBOption::default().dirPath);
+
+        let db = DB::open(None).unwrap();
+
+        {
+            let mut tx = db.newTx().unwrap();
+
+            for a in 0..4096usize {
+                let aa = a.to_be_bytes();
+                tx.set(&aa, &aa).unwrap();
+            }
+
+            tx.commit().unwrap();
+        }
+
+        {
+            let tx = db.newTx().unwrap();
+
+            for a in 0..4096usize {
+                let k = a.to_be_bytes();
+                assert_eq!(tx.get(&k).unwrap().as_ref().unwrap().as_slice(), k.as_slice());
+            }
         }
     }
 }
