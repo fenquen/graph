@@ -14,7 +14,6 @@ use crate::cursor::Cursor;
 use crate::db::{DB, MEM_TABLE_FILE_EXTENSION};
 use crate::page::Page;
 use crate::page_elem::PageElem;
-use crate::page_header::PageHeader;
 use crate::types::PageId;
 
 /// memTable 文件结构
@@ -131,19 +130,13 @@ impl MemTable {
         assert_eq!(self.immutable, false);
 
         let process = || {
-            // let changeCount = commitReq.changes.len() as u32;
-
             // 原来的posInFile
             let _ = self.posInFile;
 
-            for (keyWithoutTxId, val) in commitReq.changes {
+            for (keyWithoutTxId, value) in commitReq.changes {
                 let keyWithTxId = tx::appendKeyWithTxId0(keyWithoutTxId, commitReq.txId);
-                self.writeChange(keyWithTxId, val)?;
+                self.writeChange(keyWithTxId, value)?;
             }
-
-            // todo 这里会有问题 当切换了memTable文件后 memTableFileHeader是新文件的entryCount不应该是changeCount的
-            // let memTableFileHeader = self.getMemTableFileHeaderMut();
-            // memTableFileHeader.entryCount += changeCount;
 
             // todo 系统调用msync成本很高
             // 减少调用的趟数 只同步变化部分
@@ -194,7 +187,7 @@ impl MemTable {
 
                     let mut changesTotal = BTreeMap::new();
 
-                    // 遍历各个immutableMemTable 将其changes偷梁换柱替换的
+                    // 遍历各个immutableMemTable 将其changes偷梁换柱替换
                     for immutableMemTable in immutableMemTables.iter() {
                         // here we can not move out changes, because memTable implenments Drop
                         // https://doc.rust-lang.org/error_codes/E0509.html
@@ -215,13 +208,13 @@ impl MemTable {
 
                     let mut cursor = Cursor::new(db.clone(), None)?;
 
-                    // 将变动落地到当前的内存中结构中
+                    // 将变动有序落地到当前的内存中结构中
                     for (key, val) in changesTotal {
                         cursor.seek(key.as_slice(), true, val)?;
                     }
 
                     {
-                        let mut pageId2InvolvedParentPages = HashMap::<PageId, Arc<RwLock<Page>>>::new();
+                        let mut pageId2InvolvedParentPages = HashMap::new();
 
                         let writePages =
                             |writeDestPage2IndexInParentPage: Vec<(Arc<RwLock<Page>>, Option<usize>)>,
@@ -242,18 +235,23 @@ impl MemTable {
                                     // 要现在最底下的writeDestLeafPage层上平坦横向scan掉然后再到上级的
 
                                     // 读取当前的additionalPage的最大的key
-                                    let getLargestKeyInPage = |page: &Page| -> Result<Vec<u8>> {
-                                        let lastElemMeta = page.getLastElemMeta()?;
+                                    // 是否有必要通过读取mmap来知道,能不能通过直接通过pageElems属性得到啊
+                                    let getLargestKeyInPage =
+                                        |page: &Page| -> Result<Vec<u8>> {
+                                            //let lastElemMeta = page.getLastElemMeta()?;
 
-                                        match lastElemMeta.readPageElem() {
-                                            PageElem::LeafR(k, _) => Ok(k.to_owned()),
-                                            // PageElem::Dummy4PutLeaf(k, _) => Ok(k.clone()),
-                                            PageElem::LeafOverflowR(k, _) => Ok(k.to_owned()),
-                                            // PageElem::Dummy4PutLeafOverflow(k, _, _) => Ok(k.clone()),
-                                            PageElem::BranchR(k, _) => Ok(k.to_owned()),
-                                            _ => panic!("impossible")
-                                        }
-                                    };
+                                            match page.pageElems.last().unwrap() {
+                                                PageElem::LeafR(k, _) => Ok(k.to_vec()),
+                                                PageElem::Dummy4PutLeaf(k, _) => Ok(k.clone()),
+                                                //
+                                                PageElem::LeafOverflowR(k, _) => Ok(k.to_vec()),
+                                                PageElem::Dummy4PutLeafOverflow(k, _, _) => Ok(k.clone()),
+                                                //
+                                                PageElem::BranchR(k, _) => Ok(k.to_vec()),
+                                                PageElem::Dummy4PutBranch(k, _) => Ok(k.clone()),
+                                                PageElem::Dummy4PutBranch0(k, _) => Ok(k.clone()),
+                                            }
+                                        };
 
                                     let largestKeyInPage = getLargestKeyInPage(writeDestPage)?;
 
@@ -286,48 +284,43 @@ impl MemTable {
                                             }
                                         };
 
-                                        let parentPage = writeDestPage.parentPage.as_ref().unwrap();
+                                    let parentPage = writeDestPage.parentPage.as_ref().unwrap();
 
-                                        // 添加之前先瞧瞧是不是已经有了相应的pageId了
-                                        let parentPageId = {
-                                            let parentPage = parentPage.read().unwrap();
-                                            parentPage.header.pageId
-                                        };
+                                    // 添加之前先瞧瞧是不是已经有了相应的pageId了
+                                    if involvedParentPages.contains_key(&parentPageId) == false {
+                                        involvedParentPages.insert(parentPageId, parentPage.clone());
+                                    }
 
-                                        if involvedParentPages.contains_key(&parentPageId) == false {
-                                            involvedParentPages.insert(parentPageId, parentPage.clone());
-                                        }
+                                    let mut parentPage = parentPage.write().unwrap();
 
-                                        let mut parentPage = parentPage.write().unwrap();
-
-                                        // 不应该使用insert,而是应直接替换的
-                                        let mut indexInParentPage = match indexInParentPage {
-                                            Some(indexInParentPage) => {
-                                                if needBuildNewParentPage {
-                                                    parentPage.pageElems.push(PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone()));
-                                                    0
-                                                } else {
-                                                    let indexInParentPage = *indexInParentPage;
-                                                    parentPage.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone());
-                                                    indexInParentPage
-                                                }
-                                            }
-                                            None => { // 说明直接到了leafPage未经过branch 要么 这是1个临时新建的bracnh
+                                    // 不应该使用insert,而是应直接替换的
+                                    let mut indexInParentPage = match indexInParentPage {
+                                        Some(indexInParentPage) => {
+                                            if needBuildNewParentPage {
                                                 parentPage.pageElems.push(PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone()));
                                                 0
+                                            } else {
+                                                let indexInParentPage = *indexInParentPage;
+                                                parentPage.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone());
+                                                indexInParentPage
                                             }
-                                        };
-
-                                        // 如果还有additionalPage的话,就要在indexInParentPage后边不断的塞入的
-                                        for additionalPage in writeDestPage.additionalPages.iter() {
-                                            indexInParentPage += 1;
-
-                                            let largestKeyInPage = getLargestKeyInPage(additionalPage)?;
-
-                                            // insert的目标index可以和len相同,塞到最后的和push相同
-                                            parentPage.pageElems.insert(indexInParentPage,
-                                                                        PageElem::Dummy4PutBranch0(largestKeyInPage, additionalPage.header.pageId))
                                         }
+                                        None => { // 说明直接到了leafPage未经过branch 要么 这是1个临时新建的bracnh
+                                            parentPage.pageElems.push(PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone()));
+                                            0
+                                        }
+                                    };
+
+                                    // 如果还有additionalPage的话,就要在indexInParentPage后边不断的塞入的
+                                    // 使用drain是因为原来的测试是put之后重启在测试get,如果不重启直接get需要这样干清理掉的
+                                    for additionalPage in writeDestPage.additionalPages.drain(..) {
+                                        indexInParentPage += 1;
+
+                                        let largestKeyInPage = getLargestKeyInPage(&additionalPage)?;
+
+                                        // insert的目标index可以和len相同,塞到最后的和push相同
+                                        parentPage.pageElems.insert(indexInParentPage,
+                                                                    PageElem::Dummy4PutBranch0(largestKeyInPage, additionalPage.header.id))
                                     }
                                 }
 
@@ -361,7 +354,7 @@ impl MemTable {
                         }
                     }
 
-                    // immutalbleMemTables因为数量满了持久化后需要清理掉对应已经无用的文件的
+                    // immutableMemTables中的元素已经全部落地了,需要清理掉
                     for immutableMemTable in immutableMemTables.drain(..) {
                         let immutableMemTableFilePath = immutableMemTable.memTableFilePath.clone();
                         drop(immutableMemTable);
@@ -390,8 +383,7 @@ impl MemTable {
             if self.posInFile + entryTotalSize >= self.memTableFileMmap.len() {
                 switch2NewMemTable(self,
                                    db.dbOption.memTableMaxSize +
-                                       MEM_TABLE_FILE_HEADER_SIZE +
-                                       entryTotalSize)?;
+                                       MEM_TABLE_FILE_HEADER_SIZE + entryTotalSize)?;
             }
 
             // 当前这个的kv对应的memtableEnrty

@@ -15,7 +15,7 @@ pub struct Cursor<'tx> {
     /// currentPage currentIndexInPage
     stack: Vec<(Arc<RwLock<Page>>, usize)>,
 
-    // 应该更改为 pageId -> (page, indexInParent)
+    /// pageId -> (page, indexInParent)
     pub(crate) pageId2PageAndIndexInParent: HashMap<PageId, (Arc<RwLock<Page>>, Option<usize>)>,
 }
 
@@ -35,6 +35,11 @@ impl<'tx> Cursor<'tx> {
 impl<'tx> Cursor<'tx> {
     pub(crate) fn seek(&mut self, key: &[u8], put: bool, val: Option<Vec<u8>>) -> Result<()> {
         self.move2Root()?;
+
+        //let mut arr = [0; 8];
+        //arr.copy_from_slice(&key[..8]);
+        //let a = usize::from_be_bytes(arr);
+
         self.seek0(key, put, val)?;
 
         Ok(())
@@ -53,12 +58,12 @@ impl<'tx> Cursor<'tx> {
 
         match currentPage.pageElems.get(*currentIndexInPage).unwrap() {
             PageElem::LeafR(keyWithTxId, val) => Some((keyWithTxId.to_vec(), val.to_vec())),
+            PageElem::Dummy4PutLeaf(keyWithTxId, val) => Some((keyWithTxId.to_vec(), val.to_vec())),
             _ => panic!("impossible")
         }
     }
 }
 
-// fn
 impl<'tx> Cursor<'tx> {
     fn move2Root(&mut self) -> Result<()> {
         let dbHeader = self.db.getHeader();
@@ -75,13 +80,15 @@ impl<'tx> Cursor<'tx> {
         let db = self.db.clone();
 
         let key0 = match self.tx {
+            // get读取的时候
             Some(tx) => tx::appendKeyWithTxId(key, tx.id),
+            // 写入落地的时候,key本身是含有txId的
             None => key.to_vec(),
         };
 
         if put {
             let overflowThreshold = {
-                let pageSize = self.db.getHeaderMut().pageSize;
+                let pageSize = db.getHeaderMut().pageSize;
                 pageSize as usize / page::OVERFLOW_DIVIDE
             };
 
@@ -93,7 +100,7 @@ impl<'tx> Cursor<'tx> {
 
             let currentPageId = currentPageWriteGuard.header.id;
 
-            // put 当前是leaf的
+            // put, 当前是leaf的
             if currentPageWriteGuard.header.isLeaf() || currentPageWriteGuard.header.isLeafOverflow() {
                 let index =
                     currentPageWriteGuard.pageElems.binary_search_by(|pageElem| {
@@ -173,7 +180,7 @@ impl<'tx> Cursor<'tx> {
                 if self.pageId2PageAndIndexInParent.contains_key(&currentPageId) == false {
                     self.pageId2PageAndIndexInParent.insert(currentPageId, (currentPage.clone(), self.getIndexInParentPage()));
                 }
-            } else { // put当前是branch的
+            } else { // put, 当前是branch
                 let indexResult =
                     currentPageWriteGuard.pageElems.binary_search_by(|pageElem| {
                         match pageElem {
@@ -188,20 +195,12 @@ impl<'tx> Cursor<'tx> {
                 let index = match indexResult {
                     // 要insert的key大于当前的branch的最大的key的,意味着需要在末尾追加的
                     Err(index) if index >= currentPageWriteGuard.pageElems.len() => {
-                        let mut dummyLeafPage = Page::buildDummyLeafPage();
-                        dummyLeafPage.parentPage = Some(currentPage.clone());
-
-                        // 添加到末尾
-                        currentPageWriteGuard.pageElems.push(PageElem::Dummy4PutBranch(key0, Arc::new(RwLock::new(dummyLeafPage))));
-
-                        *currentIndexInPage = index;
-
-                        index
+                        *currentIndexInPage = index - 1;
+                        index - 1
                     }
                     // use current existing branch page element 说明是相同的契合直接覆盖的
                     Err(index) | Ok(index) => {
                         *currentIndexInPage = index;
-
                         index
                     }
                 };
@@ -220,11 +219,13 @@ impl<'tx> Cursor<'tx> {
                     _ => panic!("impossible")
                 }
 
+                drop(currentPageWriteGuard);
+
                 self.seek0(key, put, val)?;
             }
         } else { // 不是put
-            let (currentPageArc, currentIndexInPage) = self.stackTopMut();
-            let currentPageReadGuard = currentPageArc.read().unwrap();
+            let (currentPage, currentIndexInPage) = self.stackTopMut();
+            let currentPageReadGuard = currentPage.read().unwrap();
 
             // leaf
             // try to locate the index in page
@@ -233,9 +234,14 @@ impl<'tx> Cursor<'tx> {
                 // if there is an equivalent value ,then returns Ok(index) else returns Err(index)
                 let index =
                     currentPageReadGuard.pageElems.binary_search_by(|pageElem| {
+                        let key0 = key0.as_slice();
+
                         match pageElem {
                             PageElem::LeafR(keyWithTxIdInElem, _) |
-                            PageElem::LeafOverflowR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0.as_slice()),
+                            PageElem::LeafOverflowR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0),
+                            PageElem::Dummy4PutLeaf(keyWithTxIdInElem, _) |
+                            PageElem::Dummy4PutLeafOverflow(keyWithTxIdInElem, _, _) => keyWithTxIdInElem.as_slice().cmp(key0),
+
                             _ => panic!("impossible")
                         }
                     }).unwrap_or_else(|index| {
@@ -286,13 +292,21 @@ impl<'tx> Cursor<'tx> {
 
                 let pageId = {
                     let pageElem = currentPageReadGuard.pageElems.get(index).unwrap();
-                    let (_, pageId) = pageElem.asBranchR()?;
-                    pageId
+
+                    match pageElem {
+                        PageElem::BranchR(_, pageId) => *pageId,
+                        PageElem::Dummy4PutBranch(_, page) => {
+                            let page = page.read().unwrap();
+                            page.header.id
+                        }
+                        PageElem::Dummy4PutBranch0(_, pageId) => *pageId,
+                        _ => panic!("impossible")
+                    }
                 };
 
                 drop(currentPageReadGuard);
 
-                let page = db.getPageById(pageId, Some(currentPageArc.clone()))?;
+                let page = db.getPageById(pageId, Some(currentPage.clone()))?;
                 self.stack.push((page, 0));
 
                 self.seek0(key, put, val)?;

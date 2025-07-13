@@ -30,14 +30,6 @@ pub(crate) enum PageElem<'a> {
 }
 
 impl<'a> PageElem<'a> {
-    pub(crate) fn asBranchR(&self) -> anyhow::Result<(&'a [u8], PageId)> {
-        if let PageElem::BranchR(keyWithoutTxId, pageId) = self {
-            return Ok((keyWithoutTxId, *pageId));
-        }
-
-        throw!("a")
-    }
-
     /// 传入的dest的len已经是pageElemDiskSize了,它是含有pageElemMeta的
     pub(crate) fn write2Disk<'b>(&self, dest: &'b mut [u8]) -> anyhow::Result<&'b [u8]> {
         // 变为vec 这样的只要不断的push便可以了
@@ -126,7 +118,7 @@ impl<'a> PageElem<'a> {
                 pageElemMetaBranch.keySize = k.len() as u16;
                 {
                     let childPage = childPage.read().unwrap();
-                    pageElemMetaBranch.pageId = childPage.header.pageId;
+                    pageElemMetaBranch.pageId = childPage.header.id;
                 }
 
                 keySlice.copy_from_slice(k);
@@ -156,9 +148,9 @@ impl<'a> PageElem<'a> {
             PageElem::LeafOverflowR(k, _) => page_header::LEAF_ELEM_OVERFLOW_META_SIZE + k.len() + size_of::<usize>(),
             PageElem::Dummy4PutLeafOverflow(k, _, _) => page_header::LEAF_ELEM_OVERFLOW_META_SIZE + k.len() + size_of::<usize>(),
             //
-            PageElem::BranchR(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(),// + size_of::<PageId>(),
-            PageElem::Dummy4PutBranch(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(),// + size_of::<PageId>(),
-            PageElem::Dummy4PutBranch0(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(),// + size_of::<PageId>(),
+            PageElem::BranchR(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(), // + size_of::<PageId>(),
+            PageElem::Dummy4PutBranch(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(), // + size_of::<PageId>(),
+            PageElem::Dummy4PutBranch0(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(), // + size_of::<PageId>(),
         }
     }
 
