@@ -20,14 +20,14 @@ pub(crate) const LEAF_ELEM_OVERFLOW_META_SIZE: usize = size_of::<PageElemMetaLea
 pub(crate) const BRANCH_ELEM_META_SIZE: usize = size_of::<PageElemMetaBranch>();
 
 pub(crate) static PAGE_HEADER_DUMMY_BRANCH: PageHeader = PageHeader {
-    pageId: 0,
+    id: 0,
     flags: PAGE_FLAG_DUMMY | PAGE_FLAG_BRANCH,
     elemCount: 0,
     nextOverflowPageId: 0,
 };
 
 pub(crate) static PAGE_HEADER_DUMMY_LEAF: PageHeader = PageHeader {
-    pageId: 0,
+    id: 0,
     flags: PAGE_FLAG_DUMMY | PAGE_FLAG_LEAF,
     elemCount: 0,
     nextOverflowPageId: 0,
@@ -36,7 +36,7 @@ pub(crate) static PAGE_HEADER_DUMMY_LEAF: PageHeader = PageHeader {
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub(crate) struct PageHeader {
-    pub(crate) pageId: PageId,
+    pub(crate) id: PageId,
     pub(crate) flags: u16,
     pub(crate) elemCount: u16,
     pub(crate) nextOverflowPageId: PageId,

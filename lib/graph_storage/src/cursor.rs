@@ -91,7 +91,7 @@ impl<'tx> Cursor<'tx> {
             let currentPage = currentPage.clone();
             let mut currentPageWriteGuard = currentPage.write().unwrap();
 
-            let currentPageId = currentPageWriteGuard.header.pageId;
+            let currentPageId = currentPageWriteGuard.header.id;
 
             // put 当前是leaf的
             if currentPageWriteGuard.header.isLeaf() || currentPageWriteGuard.header.isLeafOverflow() {

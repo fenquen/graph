@@ -337,12 +337,12 @@ impl DB {
 
         // transmute as pageHeader in page0
         let page0Header: &mut PageHeader = utils::slice2RefMut(&mut pageSpace[DB_HEADER_SIZE..]);
-        page0Header.pageId = 0;
+        page0Header.id = 0;
         page0Header.flags = page_header::PAGE_FLAG_META;
 
         // transmute as pageHeader in page1
         let page1Header: &mut PageHeader = utils::slice2RefMut(&mut pageSpace[pageSize as usize..]);
-        page1Header.pageId = 1;
+        page1Header.id = 1;
         page1Header.flags = page_header::PAGE_FLAG_LEAF;
 
         // idea from bbolt,用来计算占用的数量而不是对应的block的index的
