@@ -50,6 +50,13 @@ impl<'a> PageElem<'a> {
                 pageElemMetaLeaf.valueSize = v.len() as u32;
 
                 let (keySlice, valSlice) = kvSlice.split_at_mut(k.len());
+
+                // page落地的时候,如果落在了和原来相同的底层的mmap上 且 这个pageElem落在mmap的位置和原来的相同
+                // 那么什么都不用copy了,而且也不能,不然会报错, copy_from_slice 要求两段内存是不能overlap的
+                if keySlice.as_ptr() == (*k).as_ptr() {
+                    return Ok(keySlice);
+                }
+
                 keySlice.copy_from_slice(k);
                 // 因为传入的dest的len已经限制为pageElemDiskSize,不需要&mut dest[k.len()..k.len()+v.len()]
                 valSlice.copy_from_slice(v);
@@ -73,6 +80,10 @@ impl<'a> PageElem<'a> {
             PageElem::LeafOverflowR(k, valPos) => {
                 let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::LEAF_ELEM_OVERFLOW_META_SIZE);
 
+                if keySlice.as_ptr() == (*k).as_ptr() {
+                    return Ok(keySlice);
+                }
+
                 let pageElemMetaLeafOverflow: &mut PageElemMetaLeafOverflow = utils::slice2RefMut(pageElemMetaSlice);
                 pageElemMetaLeafOverflow.keySize = k.len() as u16;
                 pageElemMetaLeafOverflow.valPos = *valPos;
@@ -95,6 +106,10 @@ impl<'a> PageElem<'a> {
             //--------------------------------------------------------
             PageElem::BranchR(k, pageId) => {
                 let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::BRANCH_ELEM_META_SIZE);
+
+                if keySlice.as_ptr() == (*k).as_ptr() {
+                    return Ok(keySlice);
+                }
 
                 let pageElemMetaBranch: &mut PageElemMetaBranch = utils::slice2RefMut(pageElemMetaSlice);
                 pageElemMetaBranch.keySize = k.len() as u16;
