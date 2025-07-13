@@ -1,9 +1,8 @@
-use std::{hint, mem};
 use std::ptr::NonNull;
 use crate::page_header::{PageElemMeta, PageHeader};
 use crate::{page_header, utils};
 use anyhow::Result;
-use memmap2::MmapMut;
+use memmap2::{MmapMut};
 use std::sync::{Arc, RwLock};
 use crate::db::DB;
 use crate::page_elem::PageElem;
@@ -25,62 +24,14 @@ pub(crate) struct Page {
 
     pub(crate) pageElems: Vec<PageElem<'static>>,
 
-    // 以下的两个的赋值应该是以本struct内的mmapMut来源
-    // pub(crate) keyMin: Option<&'static [u8]>,
-    // pub(crate) keyMax: Option<&'static [u8]>,
-
     pub(crate) childPages: Option<Vec<Arc<Page>>>,
 
     // 用来容纳seek时候落地写的时候本身的1个mmapMut以外多出来的page
     pub(crate) additionalPages: Vec<Page>,
-
-    //pub(crate) dirty: bool,
 }
 
 // pub(crate) fn
 impl Page {
-    pub(crate) fn readFromMmap(mmapMut: MmapMut) -> Result<Page> {
-        let pageHeader = utils::slice2Ref::<PageHeader>(&mmapMut);
-
-        let pageElemVec = {
-            let mut pageElemVec = Vec::with_capacity(pageHeader.elemCount as usize);
-
-            for index in 0..pageHeader.elemCount as usize {
-                let pageElemMeta = pageHeader.readPageElemMeta(index)?;
-                let pageElem = pageElemMeta.readPageElem();
-                pageElemVec.push(pageElem);
-            }
-
-            pageElemVec
-        };
-
-        Ok(Page {
-            parentPage: None,
-            indexInParentPage: None,
-            mmapMut: Some(mmapMut),
-            header: pageHeader,
-            pageElems: pageElemVec,
-            //keyMin: Default::default(),
-            //keyMax: Default::default(),
-            childPages: None,
-            additionalPages: vec![],
-        })
-    }
-
-    pub(crate) fn buildDummyLeafPage() -> Page {
-        Page {
-            parentPage: None,
-            indexInParentPage: None,
-            mmapMut: None,
-            header: &page_header::PAGE_HEADER_DUMMY_LEAF,
-            pageElems: vec![],
-            //keyMin: Default::default(),
-            //keyMax: Default::default(),
-            childPages: None,
-            additionalPages: vec![],
-        }
-    }
-
     #[inline]
     pub(crate) fn isLeaf(&self) -> bool {
         self.header.isLeaf()
@@ -117,10 +68,6 @@ impl Page {
     pub(crate) fn write2Disk(&mut self, db: &DB) -> Result<()> {
         let pageSize = db.getHeader().pageSize as usize;
 
-        if self.isDummy() {
-            self.mmapMut = Some(db.allocateNewPage()?);
-        }
-
         let pageIsLeaf = self.isLeaf();
 
         let mut curPage: NonNull<Page> = NonNull::new(self as *mut _).unwrap();
@@ -155,11 +102,9 @@ impl Page {
                     writePageHeader(elementCount, unsafe { curPage.as_ref().mmapMut.as_ref().unwrap() });
 
                     // 说明原来的leafPage空间不够了,分裂出了又1个leafPage
-                    let mut additionalPage = Page::buildDummyLeafPage();
-                    additionalPage.mmapMut = Some(db.allocateNewPage()?);
-                    additionalPage.header = utils::slice2RefMut(additionalPage.mmapMut.as_ref().unwrap());
-
+                    let additionalPage = db.allocateNewPage(page_header::PAGE_FLAG_LEAF)?;
                     self.additionalPages.push(additionalPage);
+
                     NonNull::new(self.additionalPages.last_mut().unwrap() as *mut _).unwrap()
                 };
 

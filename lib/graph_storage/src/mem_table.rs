@@ -259,25 +259,32 @@ impl MemTable {
 
                                     // 当前的page塞不下了,实际要分裂成多个了,需要再在上头盖1个branch
                                     // 如果说rootPage还是容纳的下 那么不用去理会了
-                                    if writeDestPage.additionalPages.len() > 0 {
-                                        let needBuildNewParentPage = writeDestPage.parentPage.is_none();
+                                    let needBuildNewParentPage =
+                                        if writeDestPage.additionalPages.len() > 0 {
+                                            writeDestPage.parentPage.is_none()
+                                        } else {
+                                            false
+                                        };
 
+                                    let parentPageId =
                                         // 到了顶头没有上级了
                                         if needBuildNewParentPage {
-                                            let mmapMut = {
-                                                let mmapMut = db.allocateNewPage()?;
+                                            let newParentPage = db.allocateNewPage(page_header::PAGE_FLAG_BRANCH)?;
 
-                                                let pageHeader: &mut PageHeader = utils::slice2RefMut(&mmapMut);
-                                                pageHeader.flags = page_header::PAGE_FLAG_BRANCH;
+                                            let pageId = newParentPage.header.id;
 
-                                                // 因为rootPage变动了,dbHeader的rootPageId也要相应的变化
-                                                db.getHeaderMut().rootPageId = pageHeader.pageId;
+                                            // 因为rootPage变动了,dbHeader的rootPageId也要相应的变化
+                                            db.getHeaderMut().rootPageId = pageId;
 
-                                                mmapMut
-                                            };
+                                            writeDestPage.parentPage = Some(Arc::new(RwLock::new(newParentPage)));
 
-                                            writeDestPage.parentPage = Some(Arc::new(RwLock::new(Page::readFromMmap(mmapMut)?)));
-                                        }
+                                            pageId
+                                        } else {
+                                            match writeDestPage.parentPage {
+                                                Some(ref parentPage) => parentPage.read().unwrap().header.id,
+                                                None => continue,
+                                            }
+                                        };
 
                                         let parentPage = writeDestPage.parentPage.as_ref().unwrap();
 

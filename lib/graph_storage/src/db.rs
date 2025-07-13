@@ -15,7 +15,7 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::{Ordering as atomic_ordering, AtomicBool, AtomicU64};
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::{mpsc, Arc, Mutex, RwLock, Weak};
+use std::sync::{mpsc, Arc, Mutex, RwLock, RwLockWriteGuard, Weak};
 use std::{fs, mem, thread, u64, usize};
 
 const MAGIC: u32 = 0xCAFEBABE;
@@ -226,7 +226,7 @@ impl DB {
         Ok(txId)
     }
 
-    pub(crate) fn allocateNewPage(&self) -> Result<MmapMut> {
+    pub(crate) fn allocateNewPage(&self, flags: u16) -> Result<Page> {
         // 需要blockSize 和 pageSize
         let dbHeader = self.getHeader();
 
@@ -236,25 +236,38 @@ impl DB {
         // blockFile可能需新建也能依然有了
         let blockFileNum = (dbHeader.pageSize as usize * pageId as usize) / dbHeader.blockSize as usize;
 
-        // blockFile尚未创建
         let mut blockFileFds = self.blockFileFds.write().unwrap();
+
+        // blockFile尚未创建
         if blockFileNum >= blockFileFds.len() {
             let blockFile = DB::generateBlockFile(&self.dbOption, blockFileNum, self.getHeader().blockSize)?;
             blockFileFds.push(blockFile.as_raw_fd());
             mem::forget(blockFile);
         }
 
+        let blockFileFds = RwLockWriteGuard::downgrade(blockFileFds);
         let targetBlockFileFd = blockFileFds.get(blockFileNum).unwrap().clone();
 
-        let mut newPageMmap = {
+        let mut pageMmap = {
             let pageHeaderOffsetInBlock = (dbHeader.pageSize as u64 * pageId) % dbHeader.blockSize as u64;
             utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize as usize))?
         };
 
-        let pageHeader: &mut PageHeader = utils::slice2RefMut(&mut newPageMmap);
-        pageHeader.pageId = pageId;
+        let pageHeader: &mut PageHeader = utils::slice2RefMut(&mut pageMmap);
+        pageHeader.id = pageId;
+        pageHeader.flags = flags;
 
-        Ok(newPageMmap)
+        Ok(Page {
+            parentPage: None,
+            indexInParentPage: None,
+            mmapMut: Some(pageMmap),
+            header: pageHeader,
+            pageElems: vec![],
+            //keyMin: Default::default(),
+            //keyMax: Default::default(),
+            childPages: None,
+            additionalPages: vec![],
+        })
     }
 
     fn allocatePageId(&self) -> Result<PageId> {
@@ -439,7 +452,11 @@ impl DB {
     }
 
     fn generateBlockFile(dbOption: &DBOption, blockFileNum: usize, blockSize: u32) -> Result<File> {
-        let blockFilePath = Path::join(dbOption.dirPath.as_ref(), format!("{}.{}", blockFileNum, BLOCK_FILE_EXTENSION));
+        let blockFilePath = Path::join(
+            dbOption.dirPath.as_ref(),
+            format!("{}.{}", blockFileNum, BLOCK_FILE_EXTENSION),
+        );
+
         let blockFile = OpenOptions::new().read(true).write(true).create_new(true).open(blockFilePath)?;
 
         blockFile.set_len(blockSize as u64)?;
