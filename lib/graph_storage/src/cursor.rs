@@ -170,15 +170,8 @@ impl<'tx> Cursor<'tx> {
 
                 // 收集全部收到影响的leaf page
                 // 需要知道有没有经历过历经branch的下钻过程,如果上手便是身为leaf的root page 这样是不对的
-                let indexInParentPage =
-                    if self.stack.len() >= 2 {
-                        self.stack.get(self.stack.len() - 2).map(|(_, b)| *b)
-                    } else {
-                        None
-                    };
-
                 if self.pageId2PageAndIndexInParent.contains_key(&currentPageId) == false {
-                    self.pageId2PageAndIndexInParent.insert(currentPageId, (currentPage.clone(), indexInParentPage));
+                    self.pageId2PageAndIndexInParent.insert(currentPageId, (currentPage.clone(), self.getIndexInParentPage()));
                 }
             } else { // put当前是branch的
                 let indexResult =
@@ -213,12 +206,7 @@ impl<'tx> Cursor<'tx> {
                     }
                 };
 
-                currentPageWriteGuard.indexInParentPage =
-                    if self.stack.len() >= 2 {
-                        self.stack.get(self.stack.len() - 2).map(|(_, b)| *b)
-                    } else {
-                        None
-                    };
+                currentPageWriteGuard.indexInParentPage = self.getIndexInParentPage();
 
                 // 最后时候 就当前的情况添加内容到stack的
                 match currentPageWriteGuard.pageElems.get(index).unwrap() {
@@ -304,5 +292,13 @@ impl<'tx> Cursor<'tx> {
 
     fn stackTopMut(&mut self) -> &mut (Arc<RwLock<Page>>, usize) {
         self.stack.last_mut().unwrap()
+    }
+
+    fn getIndexInParentPage(&self) -> Option<usize> {
+        if self.stack.len() >= 2 {
+            self.stack.get(self.stack.len() - 2).map(|(_, indexInPage)| *indexInPage)
+        } else {
+            None
+        }
     }
 }
