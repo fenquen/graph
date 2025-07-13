@@ -202,7 +202,7 @@ impl DB {
             utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize as usize))?
         };
 
-        let mut page = Page::readFromMmap(pageMmapMut)?;
+        let mut page = Page::try_from(pageMmapMut)?;
         page.parentPage = parentPage;
 
         let page = Arc::new(RwLock::new(page));

@@ -194,3 +194,33 @@ impl Page {
         Ok(())
     }
 }
+
+impl TryFrom<MmapMut> for Page {
+    type Error = anyhow::Error;
+
+    fn try_from(mmapMut: MmapMut) -> Result<Self, Self::Error> {
+        let pageHeader = utils::slice2Ref::<PageHeader>(&mmapMut);
+
+        let pageElemVec = {
+            let mut pageElemVec = Vec::with_capacity(pageHeader.elemCount as usize);
+
+            for index in 0..pageHeader.elemCount as usize {
+                let pageElemMeta = pageHeader.readPageElemMeta(index)?;
+                let pageElem = pageElemMeta.readPageElem();
+                pageElemVec.push(pageElem);
+            }
+
+            pageElemVec
+        };
+
+        Ok(Page {
+            parentPage: None,
+            indexInParentPage: None,
+            mmapMut: Some(mmapMut),
+            header: pageHeader,
+            pageElems: pageElemVec,
+            childPages: None,
+            additionalPages: vec![],
+        })
+    }
+}
