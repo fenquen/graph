@@ -1,26 +1,25 @@
 use crate::cursor::Cursor;
 use crate::db::DB;
+use crate::mem_table::MemTable;
 use crate::types::TxId;
 use crate::{constant, utils};
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::ops::Bound;
-use std::sync::{mpsc, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
-use crate::mem_table::MemTable;
+use std::sync::mpsc;
 
-pub struct Tx {
+pub struct Tx<'db> {
     pub(crate) id: TxId,
-    pub(crate) db: Arc<DB>,
+    pub(crate) db: &'db DB,
     /// key without txId tail,no need <br>
     /// if val is None, means deletion
     pub(crate) changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     pub(crate) committed: AtomicBool,
 }
 
-// pub fn
-impl Tx {
+impl<'db> Tx<'db> {
     pub fn get(&self, keyWithoutTxId: &[u8]) -> Result<Option<Vec<u8>>> {
         // find in tx local changes
         if let Some(val) = self.changes.get(keyWithoutTxId) {
@@ -33,12 +32,12 @@ impl Tx {
             |memTable: &MemTable| -> Option<Vec<u8>> {
                 let memTableCursor = memTable.changes.upper_bound(Bound::Included(&keyWithTxId));
 
-                if let Some((keyWithTxId0, val)) = memTableCursor.peek_prev() {
+                if let Some((keyWithTxId0, value)) = memTableCursor.peek_prev() {
                     let (originKey, txId) = parseKeyWithTxId(keyWithTxId0);
 
                     if keyWithoutTxId == originKey {
                         if txId <= self.id {
-                            return val.clone();
+                            return value.clone();
                         }
                     }
                 }
@@ -50,8 +49,8 @@ impl Tx {
         {
             let memTable = self.db.memTable.read().unwrap();
 
-            if let Some(val) = scanMemTable(&*memTable) {
-                return Ok(Some(val));
+            if let Some(value) = scanMemTable(&*memTable) {
+                return Ok(Some(value));
             }
         }
 
@@ -60,8 +59,8 @@ impl Tx {
             let immutableMemTables = self.db.immutableMemTables.read().unwrap();
 
             for immutableMemTable in immutableMemTables.iter().rev() {
-                if let Some(val) = scanMemTable(immutableMemTable) {
-                    return Ok(Some(val));
+                if let Some(value) = scanMemTable(immutableMemTable) {
+                    return Ok(Some(value));
                 }
             }
         }
@@ -118,8 +117,6 @@ impl Tx {
             return Ok(());
         }
 
-        let commitReqSender = self.db.commitReqSender.clone();
-
         let (commitResultSender, commitResultReceiver) =
             mpsc::sync_channel::<Result<()>>(1);
 
@@ -129,7 +126,7 @@ impl Tx {
             commitResultSender,
         };
 
-        commitReqSender.send(commitReq)?;
+        self.db.commitReqSender.send(commitReq)?;
 
         for commitResult in commitResultReceiver {
             commitResult?;
@@ -137,12 +134,9 @@ impl Tx {
 
         Ok(())
     }
-}
 
-// fn
-impl Tx {
-    fn createCursor(&'_ self) -> Result<Cursor<'_>> {
-        Cursor::new(self.db.clone(), Some(self))
+    fn createCursor(&'_ self) -> Result<Cursor<'_, '_>> {
+        Cursor::new(&*self.db, Some(self))
     }
 }
 

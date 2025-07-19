@@ -17,7 +17,7 @@ pub(crate) struct Page {
     pub(crate) indexInParentPage: Option<usize>,
 
     /// if page is dummy then it is none
-    pub(crate) mmapMut: Option<MmapMut>,
+    pub(crate) mmapMut: MmapMut,
 
     /// 无中生有通过mmapMut得到的
     pub(crate) header: &'static PageHeader,
@@ -54,13 +54,13 @@ impl Page {
     }
 
     pub(crate) fn get1stElemMeta(&self) -> Result<&dyn PageElemMeta> {
-        let pageHeader = utils::slice2Ref::<PageHeader>(self.mmapMut.as_ref().unwrap());
+        let pageHeader = utils::slice2Ref::<PageHeader>(self.mmapMut.as_ref());
         let pageElemMeta = pageHeader.readPageElemMeta(0)?;
         Ok(pageElemMeta)
     }
 
     pub(crate) fn getLastElemMeta(&self) -> Result<&dyn PageElemMeta> {
-        let pageHeader = utils::slice2Ref::<PageHeader>(self.mmapMut.as_ref().unwrap());
+        let pageHeader = utils::slice2Ref::<PageHeader>(self.mmapMut.as_ref());
         let pageElemMeta = pageHeader.readPageElemMeta(pageHeader.elemCount as usize - 1)?;
         Ok(pageElemMeta)
     }
@@ -99,7 +99,7 @@ impl Page {
 
                 curPage = {
                     // 上1个的page写满之后的处理的
-                    writePageHeader(elementCount, unsafe { curPage.as_ref().mmapMut.as_ref().unwrap() });
+                    writePageHeader(elementCount, unsafe { &curPage.as_ref().mmapMut });
 
                     // 说明原来的leafPage空间不够了,分裂出了又1个leafPage
                     let additionalPage = db.allocateNewPage(page_header::PAGE_FLAG_LEAF)?;
@@ -115,7 +115,7 @@ impl Page {
 
             // 实际写入各个pageElem
             let destSlice = {
-                let curPageMmapMut = unsafe { curPage.as_mut().mmapMut.as_mut().unwrap() };
+                let curPageMmapMut = unsafe { curPage.as_mut().mmapMut.as_mut() };
                 &mut curPageMmapMut[curPosInPage..curPosInPage + pageElemDiskSize]
             };
 
@@ -128,7 +128,7 @@ impl Page {
         }
 
         // 全部的pageElem写完后的处理的
-        writePageHeader(elementCount, unsafe { curPage.as_ref().mmapMut.as_ref().unwrap() });
+        writePageHeader(elementCount, unsafe { &curPage.as_ref().mmapMut });
 
         // 使用倒序
         for (splitIndex, additionalPage) in
@@ -136,6 +136,14 @@ impl Page {
             additionalPage.pageElems = self.pageElems.split_off(splitIndex);
         }
 
+        self.msync()?;
+
+        Ok(())
+    }
+
+    #[inline]
+    fn msync(&self) -> Result<()> {
+        self.mmapMut.flush()?;
         Ok(())
     }
 }
@@ -161,7 +169,7 @@ impl TryFrom<MmapMut> for Page {
         Ok(Page {
             parentPage: None,
             indexInParentPage: None,
-            mmapMut: Some(mmapMut),
+            mmapMut,
             header: pageHeader,
             pageElems: pageElemVec,
             childPages: None,

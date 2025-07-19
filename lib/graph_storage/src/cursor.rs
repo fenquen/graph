@@ -8,9 +8,9 @@ use std::sync::{Arc, RwLock};
 use crate::page_elem::PageElem;
 use crate::types::PageId;
 
-pub struct Cursor<'tx> {
-    db: Arc<DB>,
-    tx: Option<&'tx Tx>,
+pub struct Cursor<'db, 'tx> {
+    db: &'db DB,
+    tx: Option<&'tx Tx<'db>>,
 
     /// currentPage currentIndexInPage
     stack: Vec<(Arc<RwLock<Page>>, usize)>,
@@ -20,8 +20,8 @@ pub struct Cursor<'tx> {
 }
 
 // pub fn
-impl<'tx> Cursor<'tx> {
-    pub fn new(db: Arc<DB>, tx: Option<&'tx Tx>) -> Result<Cursor<'tx>> {
+impl<'db, 'tx> Cursor<'db, 'tx> {
+    pub fn new(db: &'db DB, tx: Option<&'tx Tx<'db>>) -> Result<Cursor<'db, 'tx>> {
         Ok(Cursor {
             db,
             tx,
@@ -29,18 +29,15 @@ impl<'tx> Cursor<'tx> {
             pageId2PageAndIndexInParent: HashMap::new(),
         })
     }
-}
 
-// pub (crate) fn
-impl<'tx> Cursor<'tx> {
-    pub(crate) fn seek(&mut self, key: &[u8], put: bool, val: Option<Vec<u8>>) -> Result<()> {
+    pub(crate) fn seek(&mut self, key: &[u8], put: bool, value: Option<&[u8]>) -> Result<()> {
         self.move2Root()?;
 
         //let mut arr = [0; 8];
         //arr.copy_from_slice(&key[..8]);
         //let a = usize::from_be_bytes(arr);
 
-        self.seek0(key, put, val)?;
+        self.seek0(key, put, value)?;
 
         Ok(())
     }
@@ -62,9 +59,7 @@ impl<'tx> Cursor<'tx> {
             _ => panic!("impossible")
         }
     }
-}
 
-impl<'tx> Cursor<'tx> {
     fn move2Root(&mut self) -> Result<()> {
         let dbHeader = self.db.getHeader();
         let rootPage = self.db.getPageById(dbHeader.rootPageId, None)?;
@@ -76,8 +71,8 @@ impl<'tx> Cursor<'tx> {
     }
 
     /// 当insert时候会将元素临时的放到node上 先不着急分裂的
-    fn seek0(&mut self, key: &[u8], put: bool, val: Option<Vec<u8>>) -> Result<()> {
-        let db = self.db.clone();
+    fn seek0(&mut self, key: &[u8], put: bool, value: Option<&[u8]>) -> Result<()> {
+        let db = self.db;
 
         let key0 = match self.tx {
             // get读取的时候
@@ -129,14 +124,14 @@ impl<'tx> Cursor<'tx> {
 
                 match index {
                     Ok(index) => { // Ok说明key是有相同的存在的,要变动(update/delete)现有
-                        match val {
-                            Some(val) => {  // update
+                        match value {
+                            Some(value) => {  // update
                                 currentPageWriteGuard.pageElems[index] = {
-                                    if val.len() >= overflowThreshold {
+                                    if value.len() >= overflowThreshold {
                                         // pos的位置暂时先写0后边统1应对
-                                        PageElem::Dummy4PutLeafOverflow(key0, 0, val)
+                                        PageElem::Dummy4PutLeafOverflow(key0, 0, value.to_vec())
                                     } else {
-                                        PageElem::Dummy4PutLeaf(key0, val)
+                                        PageElem::Dummy4PutLeaf(key0, value.to_vec())
                                     }
                                 };
 
@@ -153,13 +148,13 @@ impl<'tx> Cursor<'tx> {
                         }
                     }
                     Err(index) => { // new one to insert 需要落地的1个新的page上的
-                        if let Some(val) = val {
+                        if let Some(value) = value {
                             let pageElem = {
-                                if val.len() >= overflowThreshold {
+                                if value.len() >= overflowThreshold {
                                     // pos的位置暂时先写0后边统1应对
-                                    PageElem::Dummy4PutLeafOverflow(key0, 0, val)
+                                    PageElem::Dummy4PutLeafOverflow(key0, 0, value.to_vec())
                                 } else {
-                                    PageElem::Dummy4PutLeaf(key0, val)
+                                    PageElem::Dummy4PutLeaf(key0, value.to_vec())
                                 }
                             };
 
@@ -221,7 +216,7 @@ impl<'tx> Cursor<'tx> {
 
                 drop(currentPageWriteGuard);
 
-                self.seek0(key, put, val)?;
+                self.seek0(key, put, value)?;
             }
         } else { // 不是put
             let (currentPage, currentIndexInPage) = self.stackTopMut();
@@ -309,7 +304,7 @@ impl<'tx> Cursor<'tx> {
                 let page = db.getPageById(pageId, Some(currentPage.clone()))?;
                 self.stack.push((page, 0));
 
-                self.seek0(key, put, val)?;
+                self.seek0(key, put, value)?;
             }
         }
 

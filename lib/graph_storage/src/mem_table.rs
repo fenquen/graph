@@ -1,20 +1,15 @@
-use crate::tx::{CommitReq};
-use crate::{page_header, tx, utils};
+use crate::tx::CommitReq;
+use crate::{tx, utils};
 use anyhow::Result;
 use memmap2::{Advice, MmapMut};
-use std::collections::{BTreeMap, HashMap};
-use std::{fs, mem, ptr};
+use std::collections::{BTreeMap};
+use std::{fs, mem};
 use std::fs::{File, OpenOptions};
-use std::mem::forget;
-use std::ops::{DerefMut};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock, Weak};
-use crate::cursor::Cursor;
+use std::sync::{Arc, Weak};
 use crate::db::{DB, MEM_TABLE_FILE_EXTENSION};
-use crate::page::Page;
-use crate::page_elem::PageElem;
-use crate::types::PageId;
+use crate::mem_table_r::MemTableR;
 
 /// memTable 文件结构
 /// | entryCount | keySize | valSize | 实际data | keySize | valSize | 实际data |
@@ -25,12 +20,21 @@ pub(crate) struct MemTable {
     memTableFilePath: PathBuf,
 
     /// underlying data file fd
-    memTableFileFd: RawFd,
+    pub(crate) memTableFileFd: RawFd,
 
-    /// map whole data file
     memTableFileMmap: MmapMut,
 
+    /// 不变
+    maxFileSizeBeforeSwitch: usize,
+
     posInFile: usize,
+
+    /// 会随着1个新的tx清零
+    writtenEntryCountInTx: usize,
+
+    #[cfg(target_os = "macos")]
+    currentFileSize: usize,
+
     pub(crate) changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
     /// db本身会持有MemTable,需要使用weak的
@@ -53,16 +57,32 @@ impl MemTable {
 
         let memTableFile = openOptions.open(&memTableFilePath)?;
 
-        // created a new onw
         if alreadyExisted == false {
             memTableFile.set_len(newMemTableFileSize as u64)?;
-            memTableFile.sync_all()?;
+
+            // 整个函数的消耗约4ms,单单它的耗时占到99%以上的
+            // 而且1直在纠结到底有没有必要使用sync_all()
+            // memTableFile.sync_all()?;
         }
 
-        let memTableFileFd = memTableFile.as_raw_fd();
-        forget(memTableFile);
+        let memTableFileFd = {
+            let memTableFileFd = memTableFile.as_raw_fd();
+            mem::forget(memTableFile);
+            memTableFileFd
+        };
 
-        let memTableFileMmap = utils::mmapFdMut(memTableFileFd, None, None)?;
+        // 文件如果是writable的且mmap不是私有映射,mmap超出了文件会扩展文件
+        // 这样的话应该就不用上边的sync_all(),因为后续写完tx的changes还是会调用msyc()的
+        let memTableFileMmap = utils::mmapFdMut(memTableFileFd, None, Some(1024 * 1024 * 1024))?;
+
+        // macos特殊点
+        // macOS 对 MADV_WILLNEED 有严格限制,要求操作的内存范围必须对应文件中已存在的数据块（即不超过文件当前大小）
+        // 若范围包含超出文件大小的部分（即使 mmap 预留了更大的虚拟地址),操作系统会认为该请求无效返回EINVAL(Invalid argument)
+        //
+        // Linux 对 MADV_WILLNEED 更宽松，允许对超出文件大小的映射区域调用(但预读无效仅忽略超出部分),而macos直接报错的
+        #[cfg(target_os = "macos")]
+        memTableFileMmap.advise_range(Advice::WillNeed, 0, newMemTableFileSize)?;
+        #[cfg(target_os = "linux")]
         memTableFileMmap.advise(Advice::WillNeed)?;
 
         let header = utils::slice2RefMut(&memTableFileMmap);
@@ -72,7 +92,11 @@ impl MemTable {
             memTableFilePath: memTableFilePath.as_ref().to_owned(),
             memTableFileFd,
             memTableFileMmap,
+            maxFileSizeBeforeSwitch: newMemTableFileSize,
             posInFile: MEM_TABLE_FILE_HEADER_SIZE,
+            writtenEntryCountInTx: 0,
+            #[cfg(target_os = "macos")]
+            currentFileSize: newMemTableFileSize,
             changes: BTreeMap::new(),
             db: Weak::new(),
             // if the file already exist, then it is immutable
@@ -80,6 +104,7 @@ impl MemTable {
             header,
         };
 
+        // 说明是新创建的,不用replay
         if alreadyExisted == false {
             return Ok(memTable);
         }
@@ -94,32 +119,20 @@ impl MemTable {
     pub(crate) fn replay(&mut self) -> Result<()> {
         assert!(self.immutable);
 
-        let memTableFileHeader: &MemTableFileHeader = self.getMemTableFileHeader();
+        for _ in 0..self.header.entryCount as usize {
+            let (key, value, entrySize) = {
+                let (key, value, entrySize) =
+                    readEntry(&self.memTableFileMmap[self.posInFile..]);
 
-        for _ in 0..memTableFileHeader.entryCount as usize {
-            let memTableFileEntryHeader: &MemTableFileEntryHeader = utils::slice2Ref(&self.memTableFileMmap[self.posInFile..]);
-
-            // keySize should greater than 0, valSize can be 0
-            assert!(memTableFileEntryHeader.keySize > 0);
-
-            let key = {
-                let start = self.posInFile + MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
-                let end = start + memTableFileEntryHeader.keySize as usize;
-                (&self.memTableFileMmap[start..end]).to_vec()
+                (
+                    key.to_vec(),
+                    value.map(|value| value.to_vec()),
+                    entrySize
+                )
             };
 
-            let val =
-                if memTableFileEntryHeader.valSize > 0 {
-                    let start = self.posInFile + MEM_TABLE_FILE_ENTRY_HEADER_SIZE + memTableFileEntryHeader.keySize as usize;
-                    let end = start + memTableFileEntryHeader.valSize as usize;
-                    Some((&self.memTableFileMmap[start..end]).to_vec())
-                } else {
-                    None
-                };
-
-            self.changes.insert(key, val);
-
-            self.posInFile += memTableFileEntryHeader.entrySize();
+            self.changes.insert(key, value);
+            self.posInFile += entrySize;
         }
 
         Ok(())
@@ -138,8 +151,16 @@ impl MemTable {
                 self.writeChange(keyWithTxId, value)?;
             }
 
-            // todo 系统调用msync成本很高
-            // 减少调用的趟数 只同步变化部分
+            // 说明当前的这个memTable已经写满了,要换新的了
+            // switch2NewMemTable现在是整个事务级别的触发
+            // 原来是事务中的单个kv的写入来触发,这是不对的因为事务是个整体,不能细化到其中的某kv
+            if self.posInFile >= self.maxFileSizeBeforeSwitch {
+                self.switch2NewMemTable(None)?;
+            } else {
+                self.refreshEntryCount();
+            }
+
+            // todo 系统调用msync成本很高 减少调用的趟数 只同步变化部分
             self.msync()?;
 
             anyhow::Ok(())
@@ -149,299 +170,146 @@ impl MemTable {
     }
 
     /// protected by write mutex
-    fn writeChange(self: &mut MemTable,
-                   keyWithTxId: Vec<u8>, val: Option<Vec<u8>>) -> Result<()> {
+    fn writeChange(&mut self, keyWithTxId: Vec<u8>, value: Option<Vec<u8>>) -> Result<()> {
         assert_eq!(self.immutable, false);
 
-        let db = self.db.upgrade().unwrap();
+        // write to memTable file
+        let entryTotalSize = {
+            let mut totalSize = MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
 
-        let switch2NewMemTable =
-            |oldMemTable: &mut MemTable, newMemTableFileSize: usize| {
-                // open a new memTable
-                let mut newMemTable = {
-                    let mutableMemTableFilePath =
-                        Path::join(db.dbOption.dirPath.as_ref(),
-                                   format!("{}.{}", oldMemTable.memTableFileNum + 1, MEM_TABLE_FILE_EXTENSION));
+            totalSize += keyWithTxId.len();
 
-                    MemTable::open(mutableMemTableFilePath, newMemTableFileSize)?
-                };
-
-                newMemTable.db = Arc::downgrade(&db);
-
-                // 使用新的替换旧的memeTable,换下来的旧的变为immutableMemTable收集
-                // see RWLock::replace
-                let memTableOld = mem::replace(oldMemTable, newMemTable);
-
-                // 原来的oldMemTable被替换后 有必要msync的
-                // 只mysnc必要的部分
-                memTableOld.msync()?;
-
-                // move the old memTable to immutableMemTables
-                let mut immutableMemTables = db.immutableMemTables.write().unwrap();
-                immutableMemTables.push(memTableOld);
-
-                // 如果落地的memTable文件达到数量了,需要将现有的全部memTable文件内容落地到db的数据文件的
-                if immutableMemTables.len() > db.dbOption.immutableMemTableCount {
-                    // immutableMemTables are in order from the oldest to the latest
-                    // merge changes across immutableMemTables
-
-                    let mut changesTotal = BTreeMap::new();
-
-                    // 遍历各个immutableMemTable 将其changes偷梁换柱替换
-                    for immutableMemTable in immutableMemTables.iter() {
-                        // here we can not move out changes, because memTable implenments Drop
-                        // https://doc.rust-lang.org/error_codes/E0509.html
-                        /*for (key, val) in immutableMemTable.changes {
-                            cursor.put(key, val)?;
-                        }*/
-
-                        // 使用replace偷换出需要的内容,减少不必要的clone的
-                        let changes: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
-                            unsafe {
-                                ptr::replace(&immutableMemTable.changes as *const BTreeMap<_, _> as _, BTreeMap::<_, _>::new())
-                            };
-
-                        for (key, val) in changes {
-                            changesTotal.insert(key, val);
-                        }
-                    }
-
-                    let mut cursor = Cursor::new(db.clone(), None)?;
-
-                    // 将变动有序落地到当前的内存中结构中
-                    for (key, val) in changesTotal {
-                        cursor.seek(key.as_slice(), true, val)?;
-                    }
-
-                    {
-                        let mut pageId2InvolvedParentPages = HashMap::new();
-
-                        let writePages =
-                            |writeDestPage2IndexInParentPage: Vec<(Arc<RwLock<Page>>, Option<usize>)>,
-                             involvedParentPages: &mut HashMap<PageId, Arc<RwLock<Page>>>| -> Result<()> {
-                                for (writeDestPage0, indexInParentPage) in writeDestPage2IndexInParentPage.iter() {
-                                    let mut writeDestPage = writeDestPage0.write().unwrap();
-                                    let writeDestPage = writeDestPage.deref_mut();
-
-                                    writeDestPage.write2Disk(&db)?;
-
-                                    // 原来的单个的leaf 现在成了多个 需要原来的那个单个的leaf的parantPage来应对
-                                    // 得要知道当前的这个page在父级的那个位置,然后在对应的位置塞入data
-                                    // 例如 原来 这个leafPage在它的上级中是对应(700,750]的
-                                    // 现在的话(700,750]这段区间又要分裂了
-                                    // 原来是单单这1个区间对应1个leaf,现在是分成多个各自对应单个leaf的
-
-                                    // 现在要知道各个分裂出来的leafPage的最大的key是多少
-                                    // 要现在最底下的writeDestLeafPage层上平坦横向scan掉然后再到上级的
-
-                                    // 读取当前的additionalPage的最大的key
-                                    // 是否有必要通过读取mmap来知道,能不能通过直接通过pageElems属性得到啊
-                                    let getLargestKeyInPage =
-                                        |page: &Page| -> Result<Vec<u8>> {
-                                            //let lastElemMeta = page.getLastElemMeta()?;
-
-                                            match page.pageElems.last().unwrap() {
-                                                PageElem::LeafR(k, _) => Ok(k.to_vec()),
-                                                PageElem::Dummy4PutLeaf(k, _) => Ok(k.clone()),
-                                                //
-                                                PageElem::LeafOverflowR(k, _) => Ok(k.to_vec()),
-                                                PageElem::Dummy4PutLeafOverflow(k, _, _) => Ok(k.clone()),
-                                                //
-                                                PageElem::BranchR(k, _) => Ok(k.to_vec()),
-                                                PageElem::Dummy4PutBranch(k, _) => Ok(k.clone()),
-                                                PageElem::Dummy4PutBranch0(k, _) => Ok(k.clone()),
-                                            }
-                                        };
-
-                                    let largestKeyInPage = getLargestKeyInPage(writeDestPage)?;
-
-                                    // 当前的page塞不下了,实际要分裂成多个了,需要再在上头盖1个branch
-                                    // 如果说rootPage还是容纳的下 那么不用去理会了
-                                    let needBuildNewParentPage =
-                                        if writeDestPage.additionalPages.len() > 0 {
-                                            writeDestPage.parentPage.is_none()
-                                        } else {
-                                            false
-                                        };
-
-                                    let parentPageId =
-                                        // 到了顶头没有上级了
-                                        if needBuildNewParentPage {
-                                            let newParentPage = db.allocateNewPage(page_header::PAGE_FLAG_BRANCH)?;
-
-                                            let pageId = newParentPage.header.id;
-
-                                            // 因为rootPage变动了,dbHeader的rootPageId也要相应的变化
-                                            db.getHeaderMut().rootPageId = pageId;
-
-                                            writeDestPage.parentPage = Some(Arc::new(RwLock::new(newParentPage)));
-
-                                            pageId
-                                        } else {
-                                            match writeDestPage.parentPage {
-                                                Some(ref parentPage) => parentPage.read().unwrap().header.id,
-                                                None => continue,
-                                            }
-                                        };
-
-                                    let parentPage = writeDestPage.parentPage.as_ref().unwrap();
-
-                                    // 添加之前先瞧瞧是不是已经有了相应的pageId了
-                                    if involvedParentPages.contains_key(&parentPageId) == false {
-                                        involvedParentPages.insert(parentPageId, parentPage.clone());
-                                    }
-
-                                    let mut parentPage = parentPage.write().unwrap();
-
-                                    // 不应该使用insert,而是应直接替换的
-                                    let mut indexInParentPage = match indexInParentPage {
-                                        Some(indexInParentPage) => {
-                                            if needBuildNewParentPage {
-                                                parentPage.pageElems.push(PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone()));
-                                                0
-                                            } else {
-                                                let indexInParentPage = *indexInParentPage;
-                                                parentPage.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone());
-                                                indexInParentPage
-                                            }
-                                        }
-                                        None => { // 说明直接到了leafPage未经过branch 要么 这是1个临时新建的bracnh
-                                            parentPage.pageElems.push(PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone()));
-                                            0
-                                        }
-                                    };
-
-                                    // 如果还有additionalPage的话,就要在indexInParentPage后边不断的塞入的
-                                    // 使用drain是因为原来的测试是put之后重启在测试get,如果不重启直接get需要这样干清理掉的
-                                    for additionalPage in writeDestPage.additionalPages.drain(..) {
-                                        indexInParentPage += 1;
-
-                                        let largestKeyInPage = getLargestKeyInPage(&additionalPage)?;
-
-                                        // insert的目标index可以和len相同,塞到最后的和push相同
-                                        parentPage.pageElems.insert(indexInParentPage,
-                                                                    PageElem::Dummy4PutBranch0(largestKeyInPage, additionalPage.header.id))
-                                    }
-                                }
-
-                                Ok(())
-                            };
-
-                        let values: Vec<(Arc<RwLock<Page>>, Option<usize>)> = cursor.pageId2PageAndIndexInParent.into_values().collect();
-                        writePages(values, &mut pageId2InvolvedParentPages)?;
-
-                        loop {
-                            let involvedParentPagesPrevRound: Vec<Arc<RwLock<Page>>> = {
-                                let pairs: Vec<(PageId, Arc<RwLock<Page>>)> = pageId2InvolvedParentPages.drain().collect();
-                                pairs.into_iter().map(|(_, involvedParentPage)| involvedParentPage).collect()
-                            };
-
-                            if involvedParentPagesPrevRound.is_empty() {
-                                break;
-                            }
-
-                            let page2IndexInParentPage =
-                                involvedParentPagesPrevRound.into_iter().map(|involvedParentPage| {
-                                    let indexInParentPage = {
-                                        let pageReadGuard = involvedParentPage.read().unwrap();
-                                        pageReadGuard.indexInParentPage
-                                    };
-
-                                    (involvedParentPage, indexInParentPage)
-                                }).collect::<Vec<_>>();
-
-                            writePages(page2IndexInParentPage, &mut pageId2InvolvedParentPages)?;
-                        }
-                    }
-
-                    // immutableMemTables中的元素已经全部落地了,需要清理掉
-                    for immutableMemTable in immutableMemTables.drain(..) {
-                        let immutableMemTableFilePath = immutableMemTable.memTableFilePath.clone();
-                        drop(immutableMemTable);
-                        fs::remove_file(&immutableMemTableFilePath)?;
-                    }
-                }
-
-                anyhow::Ok(())
-            };
-
-        // write to file
-        {
-            let entryTotalSize = {
-                let mut totalSize = MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
-
-                totalSize += keyWithTxId.len();
-
-                if let Some(ref val) = val {
-                    totalSize += val.len();
-                }
-
-                totalSize
-            };
-
-            // should move the current one to immutableMemTables then build a new one
-            if self.posInFile + entryTotalSize >= self.memTableFileMmap.len() {
-                switch2NewMemTable(self,
-                                   db.dbOption.memTableMaxSize +
-                                       MEM_TABLE_FILE_HEADER_SIZE + entryTotalSize)?;
+            if let Some(ref value) = value {
+                totalSize += value.len();
             }
 
-            // 当前这个的kv对应的memtableEnrty
-            let memTableFileEntryHeader = {
-                let memTableFileEntryHeader: &mut MemTableFileEntryHeader =
-                    utils::slice2RefMut(&self.memTableFileMmap[self.posInFile..]);
+            totalSize
+        };
 
-                memTableFileEntryHeader.keySize = keyWithTxId.len() as u16;
+        // should move the current one to immutableMemTables then build a new one
+        // if self.posInFile + entryTotalSize >= self.memTableFileMmap.len() {
+        //     self.switch2NewMemTable(Some(entryTotalSize))?;
+        // }
 
-                if let Some(ref val) = val {
-                    memTableFileEntryHeader.valSize = val.len() as u32;
-                }
+        // 当前这个的kv对应的memtableEnrty
+        let memTableFileEntryHeader = {
+            let memTableFileEntryHeader: &mut MemTableFileEntryHeader =
+                utils::slice2RefMut(&self.memTableFileMmap[self.posInFile..]);
 
-                memTableFileEntryHeader
-            };
+            memTableFileEntryHeader.keySize = keyWithTxId.len() as u16;
 
-            let entryContentMmap = {
-                let start = self.posInFile + MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
-                let end = self.posInFile + memTableFileEntryHeader.entrySize();
-
-                &mut self.memTableFileMmap[start..end]
-            };
-
-            // 落地 key 到memtable对应的文件
-            entryContentMmap[..keyWithTxId.len()].copy_from_slice(keyWithTxId.as_slice());
-
-            // 落地 val 到memtable对应的文件
-            if let Some(ref val) = val {
-                entryContentMmap[keyWithTxId.len()..].copy_from_slice(val);
+            if let Some(ref val) = value {
+                memTableFileEntryHeader.valSize = val.len() as u32;
             }
 
-            self.header.entryCount += 1;
+            memTableFileEntryHeader
+        };
 
-            self.posInFile += memTableFileEntryHeader.entrySize();
+        let entryContentMmap = {
+            let start = self.posInFile + MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
+            let end = self.posInFile + memTableFileEntryHeader.entrySize();
+
+            // macos特殊点
+            // 在mmap长度大于文件大小的情况下,在超出文件原始大小的区域追加写入时,若写入位置超过一定程度后会出现BadAccess(通常是SIGBUS)
+            // 核心原因与 macOS 对文件映射扩展的严格限制和内存页对齐管理机制
+            // macos
+            // 仅允许对超出文件大小的区域进行有限的隐式扩展（通常限制在单个内存页内）
+            // 若写入位置超出这个范围(例如跨越多个内存页),macOS 不会自动扩展文件,而是直接触发SIGBUS,必须提前通过ftruncate显式扩展文件
+            // linux 宽松许多
+            // 对MAP_SHARED映射,写入超出文件大小的区域时,会自动隐式扩展文件(通过ftruncate),即使跨多个内存页也不会报错
+            #[cfg(target_os = "macos")]
+            if end >= self.currentFileSize {
+                let memTableFile = unsafe { File::from_raw_fd(self.memTableFileFd) };
+                let db = self.db.upgrade().unwrap();
+
+                // 额外再增加1个os内存页大小,以防止频繁的干这个
+                self.currentFileSize = end + db.getHeader().pageSize as usize;
+                memTableFile.set_len(self.currentFileSize as u64)?;
+
+                mem::forget(memTableFile);
+            }
+
+            &mut self.memTableFileMmap[start..end]
+        };
+
+        // 落地 key 到memtable对应的文件
+        entryContentMmap[..keyWithTxId.len()].copy_from_slice(keyWithTxId.as_slice());
+
+        // 落地 val 到memtable对应的文件
+        if let Some(ref value) = value {
+            entryContentMmap[keyWithTxId.len()..].copy_from_slice(value);
         }
 
+        // entryCount不应1个个递增,应该以tx的entryCount为单位来更新的
+        // 可能会涉及到多个memTable,如果切换了新的,原来的旧的需要设置entryCount的
+        //self.header.entryCount += 1;
+        self.writtenEntryCountInTx += 1;
+        self.posInFile += memTableFileEntryHeader.entrySize();
+
         // 变量体系中同步记录
-        self.changes.insert(keyWithTxId, val);
+        self.changes.insert(keyWithTxId, value);
 
         Ok(())
     }
 
-    #[inline]
-    fn getMemTableFileHeader(&self) -> &MemTableFileHeader {
-        utils::slice2Ref(&self.memTableFileMmap)
+    // 如果memTable大小设置的比较小,1个tx写入的过程会涉及到多趟切换到新的memTable
+    // 是不是可以单个tx内容写入的过程中不会切换到newMemTable,等到全部写完了再看是不是超过大小了来确定要不要切换的
+    fn switch2NewMemTable(&mut self, curEntrySize: Option<usize>) -> Result<()> {
+        let db = self.db.upgrade().unwrap();
+
+        let mut newMemTableFileSize = db.dbOption.memTableMaxSize + MEM_TABLE_FILE_HEADER_SIZE;
+
+        if let Some(curEntrySize) = curEntrySize {
+            newMemTableFileSize += curEntrySize;
+        }
+
+        // open a new memTable
+        // 测试得知当设置memTable大小为1024byte时候,以下的action要消耗4ms的
+        let mut newMemTable = {
+            let mutableMemTableFilePath =
+                Path::join(db.dbOption.dirPath.as_ref(),
+                           format!("{}.{}", self.memTableFileNum + 1, MEM_TABLE_FILE_EXTENSION));
+
+            MemTable::open(mutableMemTableFilePath, newMemTableFileSize)?
+        };
+
+        newMemTable.db = Arc::downgrade(&db);
+
+        // 使用新的替换旧的memeTable,换下来的旧的变为immutableMemTable收集
+        // see RWLock::replace
+        let mut memTableOld = mem::replace(self, newMemTable);
+        memTableOld.immutable = true;
+
+        memTableOld.refreshEntryCount();
+
+        // 原来的oldMemTable被替换后 有必要msync的
+        // 只mysnc必要的部分
+        memTableOld.msync()?;
+
+        // memTableOld当前已封版,变化为MemTableR发送到另外的thread
+        let memTableR = MemTableR::try_from(&memTableOld)?;
+        db.memTableRSender.send(memTableR)?;
+
+        let mut immutableMemTables = db.immutableMemTables.write().unwrap();
+
+        // 趁着获取write锁的时候,筛选和清理掉需要保留的immutableMemTable
+        for immutableMemTable in immutableMemTables.drain(..).collect::<Vec<_>>() {
+            if immutableMemTable.header.written2Disk {
+                let _ = immutableMemTable.destory();
+            } else {
+                immutableMemTables.push(immutableMemTable);
+            }
+        }
+
+        immutableMemTables.push(memTableOld);
+
+        Ok(())
     }
 
-    #[inline]
-    fn getMemTableFileHeaderMut(&self) -> &mut MemTableFileHeader {
-        utils::slice2RefMut(&self.memTableFileMmap)
-    }
-
-    fn destory(self) -> Result<()> {
+    pub(crate) fn destory(self) -> Result<()> {
         let memTableFilePath = self.memTableFilePath.clone();
-
         drop(self);
         fs::remove_file(memTableFilePath)?;
-
         Ok(())
     }
 
@@ -450,21 +318,55 @@ impl MemTable {
         self.memTableFileMmap.flush_range(0, self.posInFile)?;
         Ok(())
     }
+
+    fn refreshEntryCount(&mut self) {
+        self.header.entryCount += self.writtenEntryCountInTx as u32;
+        self.writtenEntryCountInTx = 0;
+    }
 }
 
 impl Drop for MemTable {
     fn drop(&mut self) {
         // close fd before munmap not wrong
-        let file = unsafe { File::from_raw_fd(self.memTableFileFd) };
-        drop(file);
+        drop(unsafe { File::from_raw_fd(self.memTableFileFd) });
     }
+}
+
+pub(crate) fn readEntry(entryData: &[u8]) -> (&[u8], Option<&[u8]>, usize) {
+    let memTableFileEntryHeader: &MemTableFileEntryHeader = utils::slice2Ref(entryData);
+
+    // keySize should greater than 0, valSize can be 0
+    assert!(memTableFileEntryHeader.keySize > 0);
+
+    let key = {
+        let start = MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
+        let end = start + memTableFileEntryHeader.keySize as usize;
+
+        &entryData[start..end]
+    };
+
+    let value =
+        if memTableFileEntryHeader.valSize > 0 {
+            let start = MEM_TABLE_FILE_ENTRY_HEADER_SIZE + memTableFileEntryHeader.keySize as usize;
+            let end = start + memTableFileEntryHeader.valSize as usize;
+
+            Some(&entryData[start..end])
+        } else {
+            None
+        };
+
+    (key, value, memTableFileEntryHeader.entrySize())
 }
 
 pub(crate) const MEM_TABLE_FILE_HEADER_SIZE: usize = size_of::<MemTableFileHeader>();
 
 #[repr(C)]
 pub(crate) struct MemTableFileHeader {
+    /// 当它是mutable时候 不断写入的时候递增
     pub(crate) entryCount: u32,
+
+    /// 由对应的memTableR写入,当true时候当前这个memTable就可删掉了
+    pub(crate) written2Disk: bool,
 }
 
 pub(crate) const MEM_TABLE_FILE_ENTRY_HEADER_SIZE: usize = size_of::<MemTableFileEntryHeader>();

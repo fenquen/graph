@@ -3,7 +3,7 @@ use crate::page::Page;
 use crate::page_header::PageHeader;
 use crate::tx::{CommitReq, Tx};
 use crate::types::{PageId, TxId};
-use crate::{page_header, utils};
+use crate::{mem_table_r, page_header, utils};
 use anyhow::Result;
 use dashmap::DashMap;
 use memmap2::{Advice, MmapMut};
@@ -13,10 +13,13 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
-use std::sync::atomic::{Ordering as atomic_ordering, AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as atomic_ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{mpsc, Arc, Mutex, RwLock, RwLockWriteGuard, Weak};
 use std::{fs, mem, thread, u64, usize};
+use std::mem::MaybeUninit;
+use std::thread::JoinHandle;
+use crate::mem_table_r::MemTableR;
 
 const MAGIC: u32 = 0xCAFEBABE;
 const VERSION: u16 = 1;
@@ -25,7 +28,8 @@ pub(crate) const DB_HEADER_SIZE: usize = size_of::<DBHeader>();
 
 pub(crate) const DEFAULT_DIR_PATH: &str = "./data";
 pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
-pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1000;
+pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1024;
+pub(crate) const DEFAULT_MEM_TABLE_R_CHAN_BUFFER_SIZE: usize = 1024;
 pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 1024;
 pub(crate) const DEFAULT_IMMUTABLE_MEM_TABLE_COUNT: usize = 1;
 
@@ -35,6 +39,7 @@ pub(crate) const MEM_TABLE_FILE_EXTENSION: &str = "mem";
 
 pub struct DB {
     pub(crate) dbOption: DBOption,
+
     dbHeaderMmap: MmapMut,
     lock: Mutex<()>,
     txIdCounter: AtomicU64,
@@ -49,9 +54,12 @@ pub struct DB {
     pub(crate) immutableMemTables: RwLock<Vec<MemTable>>,
 
     pub(crate) commitReqSender: SyncSender<CommitReq>,
+    pub(crate) memTableRSender: SyncSender<MemTableR>,
+
+    pub(crate) joinHandleCommitReqs: MaybeUninit<JoinHandle<()>>,
+    pub(crate) joinHandleMemTableRs: MaybeUninit<JoinHandle<()>>,
 }
 
-// pub fn
 impl DB {
     pub fn open(dbOption: Option<DBOption>) -> Result<Arc<DB>> {
         let dbOption = dbOption.unwrap_or(DBOption::default());
@@ -97,14 +105,11 @@ impl DB {
         let dbHeader = utils::slice2RefMut::<DBHeader>(&dbHeaderMmap);
         dbHeader.verify()?;
 
-        if shouldInit {
-            // init时候会生成pageId是0和1的两个page的
+        if shouldInit { // init时候会生成pageId是0和1的两个page的
             dbHeader.lastPageId = 1;
         }
 
-        let (commitReqSender, commitReqReceiver) =
-            mpsc::sync_channel::<CommitReq>(dbOption.commitReqChanBufferSize);
-
+        // 启动的时候将已经存在的memTable文件都视为immutable的
         let (blockFileFds, immutableMemTables) = DB::scanDir(dbHeader, &dbOption)?;
 
         // 当启动的时候总是会新生成1个作为当前的immutableMemTable
@@ -118,19 +123,31 @@ impl DB {
             MemTable::open(mutableMemTableFilePath, dbOption.memTableMaxSize)?
         };
 
-        let db = Arc::new(DB {
-            dbOption,
-            dbHeaderMmap,
-            lock: Mutex::new(()),
-            // 接着原来的保存在dbHeader的txId
-            txIdCounter: AtomicU64::new(dbHeader.lastTxId + 1),
-            pageIdCounter: AtomicU64::new(dbHeader.lastPageId + 1),
-            blockFileFds: RwLock::new(blockFileFds),
-            pageId2Page: DashMap::new(),
-            memTable: RwLock::new(memTable),
-            immutableMemTables: RwLock::new(immutableMemTables),
-            commitReqSender,
-        });
+        let (commitReqSender, commitReqReceiver) =
+            mpsc::sync_channel::<CommitReq>(dbOption.commitReqChanBufSize);
+
+        let (memTableRSender, memTableRReceiver) =
+            mpsc::sync_channel::<MemTableR>(dbOption.commitReqChanBufSize);
+
+        let db =
+            Arc::new(
+                DB {
+                    dbOption,
+                    dbHeaderMmap,
+                    lock: Mutex::new(()),
+                    // 接着原来的保存在dbHeader的txId
+                    txIdCounter: AtomicU64::new(dbHeader.lastTxId + 1),
+                    pageIdCounter: AtomicU64::new(dbHeader.lastPageId + 1),
+                    blockFileFds: RwLock::new(blockFileFds),
+                    pageId2Page: DashMap::new(),
+                    memTable: RwLock::new(memTable),
+                    immutableMemTables: RwLock::new(immutableMemTables),
+                    commitReqSender,
+                    memTableRSender,
+                    joinHandleCommitReqs: MaybeUninit::<JoinHandle<()>>::uninit(),
+                    joinHandleMemTableRs: MaybeUninit::<JoinHandle<()>>::uninit(),
+                }
+            );
 
         // set reference to db
         {
@@ -147,25 +164,55 @@ impl DB {
             }
         }
 
-        let dbWeak = Arc::downgrade(&db);
-        let _ = thread::Builder::new().name("thread_process_commit_reqs".to_string()).spawn(move || {
-            DB::processCommitReqs(dbWeak, commitReqReceiver);
-        });
+        // 事务提交处理的thread
+        let dbClone = Arc::downgrade(&db);
+        let joinHandleCommitReqs =
+            thread::Builder::new().name("thread_process_commit_reqs".to_string()).spawn(move || {
+                DB::processCommitReqs(dbClone, commitReqReceiver);
+            })?;
+
+        // 落地immutableMemTable的thread
+        let dbClone = Arc::downgrade(&db);
+        let a = db.dbOption.immutableMemTableCount;
+        let joinHandleMemTableRs =
+            thread::Builder::new().name("thread_process_mem_table_rs".to_string()).spawn(move || {
+                DB::processMemTableRs(dbClone, memTableRReceiver, a);
+            })?;
+
+        // 使用非正常的手段设置
+        {
+            let db = unsafe { &mut *{ Arc::as_ptr(&db) as *mut DB } };
+            db.joinHandleCommitReqs.write(joinHandleCommitReqs);
+            db.joinHandleMemTableRs.write(joinHandleMemTableRs);
+        }
+
+        // 当前的这些immutableMemTables需要发送到对应的处理线程去落地
+        {
+            let immutableMemTables = db.immutableMemTables.read().unwrap();
+            immutableMemTables.iter().for_each(|immutableMemTable| {
+                let memTableR = MemTableR::try_from(immutableMemTable).unwrap();
+                db.memTableRSender.send(memTableR).unwrap();
+            });
+        }
 
         Ok(db)
     }
 
-    pub fn newTx(self: &Arc<Self>) -> Result<Tx> {
+    pub fn newTx(&self) -> Result<Tx> {
         let txId = self.allocateTxId()?;
 
         let tx = Tx {
             id: txId,
-            db: self.clone(),
+            db: self,
             changes: BTreeMap::new(),
             committed: AtomicBool::new(false),
         };
 
         Ok(tx)
+    }
+
+    pub fn close(self: &Arc<Self>) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -211,7 +258,7 @@ impl DB {
         Ok(page)
     }
 
-    pub(crate) fn allocateTxId(self: &Arc<Self>) -> Result<TxId> {
+    pub(crate) fn allocateTxId(&self) -> Result<TxId> {
         let txId = self.txIdCounter.fetch_add(1, atomic_ordering::SeqCst);
 
         let dbHeader = self.getHeaderMut();
@@ -260,7 +307,7 @@ impl DB {
         Ok(Page {
             parentPage: None,
             indexInParentPage: None,
-            mmapMut: Some(pageMmap),
+            mmapMut: pageMmap,
             header: pageHeader,
             pageElems: vec![],
             //keyMin: Default::default(),
@@ -409,15 +456,14 @@ impl DB {
 
                         mem::forget(blockFile);
                     }
-                    MEM_TABLE_FILE_EXTENSION => { // memTable file
+                    MEM_TABLE_FILE_EXTENSION => { // memTable file 启动的时候已经存在的视为immutable的
                         let memTableFileLen = readDir.metadata()?.len() as usize;
 
                         let memTable = MemTable::open(&path, memTableFileLen)?;
 
                         // empty
-                        if memTable.changes.is_empty() {
-                            drop(memTable);
-                            fs::remove_file(path)?;
+                        if memTable.changes.is_empty() || memTable.header.written2Disk {
+                            _ = memTable.destory();
                             continue;
                         }
 
@@ -433,7 +479,7 @@ impl DB {
         // sort by block num asc
         let blockFileFds = {
             blockFileFds.sort_by(|a, b| a.0.cmp(&b.0));
-            blockFileFds.into_iter().map(|x| x.1).collect::<Vec<_>>()
+            blockFileFds.into_iter().map(|(_, fd)| fd).collect::<Vec<_>>()
         };
 
         // sort by memTable file num asc
@@ -442,12 +488,35 @@ impl DB {
         Ok((blockFileFds, immutableMemTables))
     }
 
-    fn processCommitReqs(dbWeak: Weak<DB>, commitReqReceiver: Receiver<CommitReq>) {
+    fn processCommitReqs(db: Weak<Self>, commitReqReceiver: Receiver<CommitReq>) {
         // write changes in commitReq into memTable
         for commitReq in commitReqReceiver {
-            let db = dbWeak.upgrade().unwrap();
-            let mut memTable = db.memTable.write().unwrap();
-            memTable.processCommitReq(commitReq);
+            match db.upgrade() {
+                Some(db) => {
+                    let mut memTable = db.memTable.write().unwrap();
+                    memTable.processCommitReq(commitReq);
+                }
+                None => break,
+            }
+        }
+    }
+
+    fn processMemTableRs(db: Weak<Self>, memTableRReceiver: Receiver<MemTableR>, countThreshold: usize) {
+        let mut vec: Vec<MemTableR> = Vec::with_capacity(countThreshold);
+
+        // 收取了某些数量后再落地
+        for memTableR in memTableRReceiver {
+            match db.upgrade() {
+                Some(db) => {
+                    vec.push(memTableR);
+
+                    if vec.len() >= countThreshold {
+                        let batch = vec.drain(..).collect();
+                        mem_table_r::processMemTableRs(&*db, batch);
+                    }
+                }
+                None => break,
+            }
         }
     }
 
@@ -527,7 +596,7 @@ pub struct DBOption {
     /// used only when init
     pub blockSize: u32,
 
-    pub commitReqChanBufferSize: usize,
+    pub commitReqChanBufSize: usize,
 
     /// 单纯的memTable的entry内容的最大多少,不含memTableFileHeader的
     pub memTableMaxSize: usize,
@@ -541,7 +610,7 @@ impl Default for DBOption {
         DBOption {
             dirPath: DEFAULT_DIR_PATH.to_string(),
             blockSize: DEFAULT_BLOCK_SIZE,
-            commitReqChanBufferSize: DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE,
+            commitReqChanBufSize: DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE,
             memTableMaxSize: DEFAULT_MEM_TABLE_MAX_SIZE,
             immutableMemTableCount: DEFAULT_IMMUTABLE_MEM_TABLE_COUNT,
         }

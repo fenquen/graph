@@ -17,6 +17,7 @@ mod constant;
 mod cursor;
 mod mem_table;
 mod page_elem;
+mod mem_table_r;
 
 #[cfg(test)]
 mod tests {
@@ -56,6 +57,12 @@ mod tests {
 
         let end = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
         println!("total time: {} micro second", end - start);
+
+        let a = unsafe { db.joinHandleMemTableRs.assume_init_read() };
+
+        drop(db);
+
+        a.join().unwrap();
     }
 
     #[test]
