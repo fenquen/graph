@@ -258,7 +258,7 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
 
                         match pageElem {
                             // branch elem中保存的key 要不要含有txId
-                            // 至少在gets时候在branch上的筛选比较key是不能含有txId的
+                            // 至少在get时候在branch上的筛选比较key是不能含有txId的
                             // 碰到某种情况,branchPage中的某个elem的key是250,txId是1
                             // 然后在txId是2的时候尝试get 250对应的val
                             // 如果将txId考虑在内进行key的比较的话会得不到value,这是不对的

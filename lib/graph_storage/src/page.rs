@@ -90,6 +90,29 @@ impl Page {
             pageHeader.elemCount = elementCount as u16;
         };
 
+        // 需提前知道会不会分裂,以确定真正的pageSize大小
+        let pageSize = {
+            let mut curPosInPage = curPosInPage;
+
+            let mut needSplitPage = false;
+
+            for pageElem in &self.pageElems {
+                curPosInPage += pageElem.diskSize();
+
+                if curPosInPage > pageSize {
+                    needSplitPage = true;
+                    break;
+                }
+            }
+
+            // 如果会分裂的话,需要对分裂出来的page的填充率进行限制的
+            if needSplitPage {
+                f64::ceil(pageSize as f64 * db.dbOption.pageFillPercentAfterSplit) as usize
+            } else {
+                pageSize
+            }
+        };
+
         for (index, pageElem) in self.pageElems.iter().enumerate() {
             let pageElemDiskSize = pageElem.diskSize();
 
@@ -133,6 +156,7 @@ impl Page {
         // 使用倒序
         for (splitIndex, additionalPage) in
             splitIndices.into_iter().rev().zip(self.additionalPages.iter_mut().rev()) {
+            // split_off() 返回的是后半部分
             additionalPage.pageElems = self.pageElems.split_off(splitIndex);
         }
 

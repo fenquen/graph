@@ -37,6 +37,43 @@ pub(crate) const BLOCK_FILE_EXTENSION: &str = "block";
 pub(crate) const FIRST_BLOCK_FILE_NAME: &str = "0.block";
 pub(crate) const MEM_TABLE_FILE_EXTENSION: &str = "mem";
 
+pub struct DBOption {
+    pub dirPath: String,
+
+    /// used only when init
+    pub blockSize: u32,
+
+    pub commitReqChanBufSize: usize,
+
+    pub memTableRChanBufSize: usize,
+
+    /// 单纯的memTable的entry内容的最大多少,不含memTableFileHeader的
+    pub memTableMaxSize: usize,
+
+    /// how many immutable memTables to hold
+    pub immutableMemTableCount: usize,
+
+    /// once exceeded, combine
+    pub pageMaxFreePercent: f64,
+
+    pub pageFillPercentAfterSplit: f64,
+}
+
+impl Default for DBOption {
+    fn default() -> DBOption {
+        DBOption {
+            dirPath: DEFAULT_DIR_PATH.to_string(),
+            blockSize: DEFAULT_BLOCK_SIZE,
+            commitReqChanBufSize: DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE,
+            memTableRChanBufSize: DEFAULT_MEM_TABLE_R_CHAN_BUFFER_SIZE,
+            memTableMaxSize: DEFAULT_MEM_TABLE_MAX_SIZE,
+            immutableMemTableCount: DEFAULT_IMMUTABLE_MEM_TABLE_COUNT,
+            pageMaxFreePercent: 0.0,
+            pageFillPercentAfterSplit: 0.7,
+        }
+    }
+}
+
 pub struct DB {
     pub(crate) dbOption: DBOption,
 
@@ -127,7 +164,7 @@ impl DB {
             mpsc::sync_channel::<CommitReq>(dbOption.commitReqChanBufSize);
 
         let (memTableRSender, memTableRReceiver) =
-            mpsc::sync_channel::<MemTableR>(dbOption.commitReqChanBufSize);
+            mpsc::sync_channel::<MemTableR>(dbOption.memTableRChanBufSize);
 
         let db =
             Arc::new(
@@ -376,19 +413,14 @@ impl DB {
         dbHeader.version = VERSION;
         dbHeader.pageSize = utils::getOsPageSize();
         dbHeader.blockSize = {
-            let mut blockSize = if dbOption.blockSize > 0 {
+            let blockSize = if dbOption.blockSize > 0 {
                 dbOption.blockSize
             } else {
                 DEFAULT_BLOCK_SIZE
             };
 
             // 如果blockSize不是pageSize整数倍的话,增加到那样大的
-            let a = blockSize % dbHeader.pageSize as u32;
-            if a != 0 {
-                blockSize += dbHeader.pageSize as u32 - a
-            }
-
-            blockSize
+            utils::roundUp2Multiple(blockSize, dbHeader.pageSize as u32)
         };
         dbHeader.lastTxId = 0;
         dbHeader.rootPageId = 1;
@@ -589,30 +621,3 @@ impl DBHeader {
 #[derive(Default, Clone, Copy)]
 #[repr(C)]
 pub(crate) struct BlockHeader;
-
-pub struct DBOption {
-    pub dirPath: String,
-
-    /// used only when init
-    pub blockSize: u32,
-
-    pub commitReqChanBufSize: usize,
-
-    /// 单纯的memTable的entry内容的最大多少,不含memTableFileHeader的
-    pub memTableMaxSize: usize,
-
-    /// how many immutable memTables to hold
-    pub immutableMemTableCount: usize,
-}
-
-impl Default for DBOption {
-    fn default() -> Self {
-        DBOption {
-            dirPath: DEFAULT_DIR_PATH.to_string(),
-            blockSize: DEFAULT_BLOCK_SIZE,
-            commitReqChanBufSize: DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE,
-            memTableMaxSize: DEFAULT_MEM_TABLE_MAX_SIZE,
-            immutableMemTableCount: DEFAULT_IMMUTABLE_MEM_TABLE_COUNT,
-        }
-    }
-}

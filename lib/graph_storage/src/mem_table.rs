@@ -173,19 +173,6 @@ impl MemTable {
     fn writeChange(&mut self, keyWithTxId: Vec<u8>, value: Option<Vec<u8>>) -> Result<()> {
         assert_eq!(self.immutable, false);
 
-        // write to memTable file
-        let entryTotalSize = {
-            let mut totalSize = MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
-
-            totalSize += keyWithTxId.len();
-
-            if let Some(ref value) = value {
-                totalSize += value.len();
-            }
-
-            totalSize
-        };
-
         // should move the current one to immutableMemTables then build a new one
         // if self.posInFile + entryTotalSize >= self.memTableFileMmap.len() {
         //     self.switch2NewMemTable(Some(entryTotalSize))?;
@@ -223,7 +210,7 @@ impl MemTable {
                 let db = self.db.upgrade().unwrap();
 
                 // 额外再增加1个os内存页大小,以防止频繁的干这个
-                self.currentFileSize = end + db.getHeader().pageSize as usize;
+                self.currentFileSize = end + db.getHeader().pageSize as usize * 128;
                 memTableFile.set_len(self.currentFileSize as u64)?;
 
                 mem::forget(memTableFile);

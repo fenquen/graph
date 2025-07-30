@@ -25,6 +25,8 @@ mod tests {
     use std::{fs};
     use std::time::SystemTime;
 
+    const ELEM_COUNT: usize = 4096;
+
     #[test]
     fn general() {
         let s: [usize; 1] = [0];
@@ -48,7 +50,7 @@ mod tests {
 
         let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
 
-        for a in 0..1024usize {
+        for a in 0..ELEM_COUNT {
             let aa = a.to_be_bytes();
             tx.set(&aa, &aa).unwrap();
         }
@@ -59,9 +61,7 @@ mod tests {
         println!("total time: {} micro second", end - start);
 
         let a = unsafe { db.joinHandleMemTableRs.assume_init_read() };
-
         drop(db);
-
         a.join().unwrap();
     }
 
@@ -70,22 +70,23 @@ mod tests {
         let db = DB::open(None).unwrap();
         let tx = db.newTx().unwrap();
 
-        for a in 0..1024usize {
+        for a in 0..ELEM_COUNT {
             let k = a.to_be_bytes();
             assert_eq!(tx.get(&k).unwrap().as_ref().unwrap().as_slice(), k.as_slice());
         }
     }
 
     #[test]
-    fn testWriteRead() {
+    fn testWriteReadDeleteRead() {
         _ = fs::remove_dir_all(DBOption::default().dirPath);
 
         let db = DB::open(None).unwrap();
 
+        // write
         {
             let mut tx = db.newTx().unwrap();
 
-            for a in 0..4096usize {
+            for a in 0..ELEM_COUNT {
                 let aa = a.to_be_bytes();
                 tx.set(&aa, &aa).unwrap();
             }
@@ -93,13 +94,38 @@ mod tests {
             tx.commit().unwrap();
         }
 
+        // read
         {
             let tx = db.newTx().unwrap();
 
-            for a in 0..4096usize {
+            for a in 0..ELEM_COUNT {
                 let k = a.to_be_bytes();
                 assert_eq!(tx.get(&k).unwrap().as_ref().unwrap().as_slice(), k.as_slice());
             }
         }
+
+        // delete
+        {
+            let mut tx = db.newTx().unwrap();
+            for a in 0..ELEM_COUNT {
+                let aa = a.to_be_bytes();
+                tx.delete(&aa).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // read
+        {
+            let tx = db.newTx().unwrap();
+
+            for a in 0..ELEM_COUNT {
+                let k = a.to_be_bytes();
+                //assert_eq!(tx.get(&k).unwrap(), None);
+            }
+        }
+
+        let a = unsafe { db.joinHandleMemTableRs.assume_init_read() };
+        drop(db);
+        a.join().unwrap();
     }
 }

@@ -117,12 +117,6 @@ pub(crate) fn processMemTableRs(db: &DB, memTableRs: Vec<MemTableR>) -> Result<(
         header.written2Disk = true
     }
 
-    /*for immutableMemTable in immutableMemTables.drain(..) {
-        let immutableMemTableFilePath = immutableMemTable.memTableFilePath.clone();
-        drop(immutableMemTable);
-        fs::remove_file(&immutableMemTableFilePath)?;
-    }*/
-
     Ok(())
 }
 
