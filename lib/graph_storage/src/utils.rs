@@ -1,6 +1,6 @@
 use std::{fs, io};
 use std::fs::{Metadata};
-use std::ops::{BitAnd, Sub};
+use std::ops::{Add, BitAnd, Rem, Sub};
 use std::os::fd::{RawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
@@ -164,4 +164,17 @@ pub(crate) fn extractFileNum(path: impl AsRef<Path>) -> Option<usize> {
 #[inline]
 pub(crate) const fn alignUp(ptr: usize, align: usize) -> usize {
     (ptr + align - 1) & !(align - 1)
+}
+
+pub(crate) fn roundUp2Multiple<T>(value: T, multipule: T) -> T
+where
+    T: Rem<Output=T> + Add<Output=T> + Sub<Output=T> + Default + Copy + PartialEq,
+{
+    let remainder = value.rem(multipule);
+
+    if remainder != T::default() {
+        value + (multipule - remainder)
+    } else {
+        value
+    }
 }
