@@ -24,7 +24,7 @@ pub(crate) struct Page {
 
     pub(crate) pageElems: Vec<PageElem<'static>>,
 
-    pub(crate) childPages: Option<Vec<Arc<Page>>>,
+    //pub(crate) childPages: Option<Vec<Arc<Page>>>,
 
     // 用来容纳seek时候落地写的时候本身的1个mmapMut以外多出来的page
     pub(crate) additionalPages: Vec<Page>,
@@ -196,7 +196,7 @@ impl TryFrom<MmapMut> for Page {
             mmapMut,
             header: pageHeader,
             pageElems: pageElemVec,
-            childPages: None,
+            //childPages: None,
             additionalPages: vec![],
         })
     }

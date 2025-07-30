@@ -20,14 +20,15 @@ use std::{fs, mem, thread, u64, usize};
 use std::mem::MaybeUninit;
 use std::thread::JoinHandle;
 use crate::mem_table_r::MemTableR;
+use crate::utils::DEFAULT_PAGE_SIZE;
 
-const MAGIC: u32 = 0xCAFEBABE;
-const VERSION: u16 = 1;
+const MAGIC: usize = 0xCAFEBABE;
+const VERSION: usize = 1;
 
 pub(crate) const DB_HEADER_SIZE: usize = size_of::<DBHeader>();
 
 pub(crate) const DEFAULT_DIR_PATH: &str = "./data";
-pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
+pub(crate) const DEFAULT_BLOCK_SIZE: usize = 1024 * 1024;
 pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1024;
 pub(crate) const DEFAULT_MEM_TABLE_R_CHAN_BUFFER_SIZE: usize = 1024;
 pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 1024;
@@ -39,9 +40,6 @@ pub(crate) const MEM_TABLE_FILE_EXTENSION: &str = "mem";
 
 pub struct DBOption {
     pub dirPath: String,
-
-    /// used only when init
-    pub blockSize: u32,
 
     pub commitReqChanBufSize: usize,
 
@@ -57,19 +55,26 @@ pub struct DBOption {
     pub pageMaxFreePercent: f64,
 
     pub pageFillPercentAfterSplit: f64,
+
+    /// 和blockSize相同,只有初始化db时候有用,初始化之后db的pageSize是变不了的
+    pub pageSize: usize,
+
+    /// used only when init
+    pub blockSize: usize,
 }
 
 impl Default for DBOption {
     fn default() -> DBOption {
         DBOption {
             dirPath: DEFAULT_DIR_PATH.to_string(),
-            blockSize: DEFAULT_BLOCK_SIZE,
             commitReqChanBufSize: DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE,
             memTableRChanBufSize: DEFAULT_MEM_TABLE_R_CHAN_BUFFER_SIZE,
             memTableMaxSize: DEFAULT_MEM_TABLE_MAX_SIZE,
             immutableMemTableCount: DEFAULT_IMMUTABLE_MEM_TABLE_COUNT,
             pageMaxFreePercent: 0.0,
             pageFillPercentAfterSplit: 0.7,
+            pageSize: DEFAULT_PAGE_SIZE,
+            blockSize: DEFAULT_BLOCK_SIZE,
         }
     }
 }
@@ -99,7 +104,7 @@ pub struct DB {
 
 impl DB {
     pub fn open(dbOption: Option<DBOption>) -> Result<Arc<DB>> {
-        let dbOption = dbOption.unwrap_or(DBOption::default());
+        let mut dbOption = dbOption.unwrap_or(DBOption::default());
 
         DB::verifyDirPath(&dbOption.dirPath)?;
 
@@ -145,6 +150,9 @@ impl DB {
         if shouldInit { // init时候会生成pageId是0和1的两个page的
             dbHeader.lastPageId = 1;
         }
+
+        // memTableMaxSize要是实际的pageSize整数
+        dbOption.memTableMaxSize = utils::roundUp2Multiple(dbOption.memTableMaxSize,dbHeader.pageSize);
 
         // 启动的时候将已经存在的memTable文件都视为immutable的
         let (blockFileFds, immutableMemTables) = DB::scanDir(dbHeader, &dbOption)?;
@@ -251,10 +259,7 @@ impl DB {
     pub fn close(self: &Arc<Self>) -> Result<()> {
         Ok(())
     }
-}
 
-// pub (crate) fn
-impl DB {
     #[inline]
     pub(crate) fn getHeader(&self) -> &DBHeader {
         utils::slice2Ref(&self.dbHeaderMmap)
@@ -349,7 +354,7 @@ impl DB {
             pageElems: vec![],
             //keyMin: Default::default(),
             //keyMax: Default::default(),
-            childPages: None,
+            //childPages: None,
             additionalPages: vec![],
         })
     }
@@ -368,10 +373,7 @@ impl DB {
 
         Ok(pageId)
     }
-}
 
-// fn
-impl DB {
     fn verifyDirPath(dirPath: impl AsRef<Path> + Display) -> Result<()> {
         if Path::exists(&dirPath.as_ref()) == false {
             fs::create_dir_all(&dirPath)?;
@@ -403,37 +405,32 @@ impl DB {
     }
 
     fn init(dbOption: &DBOption) -> Result<()> {
+        // 确保用户自定义的pageSize是os的pageSize整数
+        let pageSize = utils::roundUp2Multiple(dbOption.pageSize, utils::getOsPageSize());
+
         // allocate space for 2 init pages in memory
-        let pageSize = utils::getOsPageSize();
-        let mut pageSpace = vec![0; pageSize as usize * 2];
+        // 分别是容纳dbHeader的以及第1个leafPage
+        let mut first2PageSpace = vec![0; pageSize * 2];
 
         // transmute as dbHeader in page0, write dbHeader field values
-        let dbHeader: &mut DBHeader = utils::slice2RefMut(&mut pageSpace);
+        let dbHeader: &mut DBHeader = utils::slice2RefMut(&mut first2PageSpace);
         dbHeader.magic = MAGIC;
         dbHeader.version = VERSION;
-        dbHeader.pageSize = utils::getOsPageSize();
-        dbHeader.blockSize = {
-            let blockSize = if dbOption.blockSize > 0 {
-                dbOption.blockSize
-            } else {
-                DEFAULT_BLOCK_SIZE
-            };
-
-            // 如果blockSize不是pageSize整数倍的话,增加到那样大的
-            utils::roundUp2Multiple(blockSize, dbHeader.pageSize as u32)
-        };
+        dbHeader.pageSize = pageSize;
+        // 如果blockSize不是pageSize整数倍的话,增加到那样大的
+        dbHeader.blockSize = utils::roundUp2Multiple(dbOption.blockSize, dbHeader.pageSize);
         dbHeader.lastTxId = 0;
         dbHeader.rootPageId = 1;
 
         dbHeader.verify()?;
 
         // transmute as pageHeader in page0
-        let page0Header: &mut PageHeader = utils::slice2RefMut(&mut pageSpace[DB_HEADER_SIZE..]);
+        let page0Header: &mut PageHeader = utils::slice2RefMut(&mut first2PageSpace[DB_HEADER_SIZE..]);
         page0Header.id = 0;
         page0Header.flags = page_header::PAGE_FLAG_META;
 
         // transmute as pageHeader in page1
-        let page1Header: &mut PageHeader = utils::slice2RefMut(&mut pageSpace[pageSize as usize..]);
+        let page1Header: &mut PageHeader = utils::slice2RefMut(&mut first2PageSpace[pageSize as usize..]);
         page1Header.id = 1;
         page1Header.flags = page_header::PAGE_FLAG_LEAF;
 
@@ -450,9 +447,9 @@ impl DB {
             let data2Write =
                 // last part
                 if blockFileNum == blockCount - 1 {
-                    &pageSpace[blockFileNum * dbHeader.blockSize as usize..]
+                    &first2PageSpace[blockFileNum * dbHeader.blockSize as usize..]
                 } else {
-                    &pageSpace[blockFileNum * dbHeader.blockSize as usize..(blockFileNum + 1) * dbHeader.blockSize as usize]
+                    &first2PageSpace[blockFileNum * dbHeader.blockSize as usize..(blockFileNum + 1) * dbHeader.blockSize as usize]
                 };
 
             let writtenSize = blockFile.write(data2Write)?;
@@ -552,7 +549,7 @@ impl DB {
         }
     }
 
-    fn generateBlockFile(dbOption: &DBOption, blockFileNum: usize, blockSize: u32) -> Result<File> {
+    fn generateBlockFile(dbOption: &DBOption, blockFileNum: usize, blockSize: usize) -> Result<File> {
         let blockFilePath = Path::join(
             dbOption.dirPath.as_ref(),
             format!("{}.{}", blockFileNum, BLOCK_FILE_EXTENSION),
@@ -580,12 +577,12 @@ impl Drop for DB {
 #[derive(Default, Clone, Copy)]
 #[repr(C)]
 pub(crate) struct DBHeader {
-    pub magic: u32,
-    pub version: u16,
+    pub magic: usize,
+    pub version: usize,
     /// 等同os的pageSize <br>
     /// linux 4KB, mac 16KB
-    pub pageSize: u16,
-    pub blockSize: u32,
+    pub pageSize: usize,
+    pub blockSize: usize,
     pub lastTxId: TxId,
     pub lastPageId: PageId,
     pub rootPageId: PageId,
@@ -610,7 +607,7 @@ impl DBHeader {
             throw!("mmap unit size must be a power of two");
         }
 
-        if self.pageSize as u32 > self.blockSize {
+        if self.pageSize > self.blockSize {
             throw!("page size should not exceed mmapUnitSize");
         }
 

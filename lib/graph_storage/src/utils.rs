@@ -10,12 +10,12 @@ use memmap2::{Mmap, MmapMut, MmapOptions};
 use crate::constant;
 
 pub(crate) const EMPTY_STR: &str = "";
-pub(crate) const DEFAULT_PAGE_SIZE: u16 = 4096;
+pub(crate) const DEFAULT_PAGE_SIZE: usize = 4096;
 
-pub(crate) fn getOsPageSize() -> u16 {
+pub(crate) fn getOsPageSize() -> usize {
     invokeLibcFn(|| { unsafe { libc::sysconf(libc::_SC_PAGESIZE) } }).map_or_else(
         |_| { DEFAULT_PAGE_SIZE },
-        |pageSize| { pageSize as u16 },
+        |pageSize| { pageSize as usize },
     )
 }
 
@@ -166,14 +166,14 @@ pub(crate) const fn alignUp(ptr: usize, align: usize) -> usize {
     (ptr + align - 1) & !(align - 1)
 }
 
-pub(crate) fn roundUp2Multiple<T>(value: T, multipule: T) -> T
+pub(crate) fn roundUp2Multiple<T>(value: T, multiple: T) -> T
 where
     T: Rem<Output=T> + Add<Output=T> + Sub<Output=T> + Default + Copy + PartialEq,
 {
-    let remainder = value.rem(multipule);
+    let remainder = value.rem(multiple);
 
     if remainder != T::default() {
-        value + (multipule - remainder)
+        value + (multiple - remainder)
     } else {
         value
     }
