@@ -32,7 +32,7 @@ pub(crate) struct MemTable {
     /// 会随着1个新的tx清零
     writtenEntryCountInTx: usize,
 
-    #[cfg(target_os = "macos")]
+    //#[cfg(target_os = "macos")]
     currentFileSize: usize,
 
     pub(crate) changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
@@ -95,7 +95,7 @@ impl MemTable {
             maxFileSizeBeforeSwitch: newMemTableFileSize,
             posInFile: MEM_TABLE_FILE_HEADER_SIZE,
             writtenEntryCountInTx: 0,
-            #[cfg(target_os = "macos")]
+            //#[cfg(target_os = "macos")]
             currentFileSize: newMemTableFileSize,
             changes: BTreeMap::new(),
             db: Weak::new(),
@@ -204,15 +204,18 @@ impl MemTable {
             // 若写入位置超出这个范围(例如跨越多个内存页),macOS 不会自动扩展文件,而是直接触发SIGBUS,必须提前通过ftruncate显式扩展文件
             // linux 宽松许多
             // 对MAP_SHARED映射,写入超出文件大小的区域时,会自动隐式扩展文件(通过ftruncate),即使跨多个内存页也不会报错
-            #[cfg(target_os = "macos")]
-            if end >= self.currentFileSize {
-                let memTableFile = unsafe { File::from_raw_fd(self.memTableFileFd) };
+            //#[cfg(target_os = "macos")]
+            {
                 let db = self.db.upgrade().unwrap();
+                let pageSize = db.getHeader().pageSize;
 
-                // 额外再增加1个os内存页大小,以防止频繁的干这个
-                self.currentFileSize = end + db.getHeader().pageSize as usize * 128;
+                while end >= self.currentFileSize {
+                    // 额外再增加1个os内存页大小,以防止频繁的干这个
+                    self.currentFileSize = end + pageSize * 16;
+                }
+
+                let memTableFile = unsafe { File::from_raw_fd(self.memTableFileFd) };
                 memTableFile.set_len(self.currentFileSize as u64)?;
-
                 mem::forget(memTableFile);
             }
 
