@@ -30,20 +30,28 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
         })
     }
 
-    pub(crate) fn seek(&mut self, key: &[u8], put: bool, value: Option<&[u8]>) -> Result<()> {
+    pub(crate) fn seek(&mut self, targetKey: &[u8], put: bool, value: Option<&[u8]>) -> Result<()> {
         self.move2Root()?;
 
         //let mut arr = [0; 8];
         //arr.copy_from_slice(&key[..8]);
         //let a = usize::from_be_bytes(arr);
 
-        self.seek0(key, put, value)?;
+        let targetKeyWithTxId =
+            match self.tx {
+                // get读取的时候
+                Some(tx) => tx::appendKeyWithTxId(targetKey, tx.id),
+                // 写入落地的时候,key本身是含有txId的
+                None => targetKey.to_vec(),
+            };
+
+        self.seek0(targetKeyWithTxId.as_slice(), put, value)?;
 
         Ok(())
     }
 
     /// must on leaf
-    pub(crate) fn currentKV(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+    pub(crate) fn currentKV(&self) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
         let (currentPage, currentIndexInPage) = self.stackTop();
 
         let currentPage = currentPage.read().unwrap();
@@ -54,8 +62,8 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
         }
 
         match currentPage.pageElems.get(*currentIndexInPage).unwrap() {
-            PageElem::LeafR(keyWithTxId, val) => Some((keyWithTxId.to_vec(), val.to_vec())),
-            PageElem::Dummy4PutLeaf(keyWithTxId, val) => Some((keyWithTxId.to_vec(), val.to_vec())),
+            PageElem::LeafR(keyWithTxId, value) => Some((keyWithTxId.to_vec(), value.as_ref().map(|v| v.to_vec()))),
+            PageElem::Dummy4PutLeaf(keyWithTxId, value) => Some((keyWithTxId.to_vec(), value.as_ref().map(|v| v.to_vec()))),
             _ => panic!("impossible")
         }
     }
@@ -71,20 +79,13 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
     }
 
     /// 当insert时候会将元素临时的放到node上 先不着急分裂的
-    fn seek0(&mut self, key: &[u8], put: bool, value: Option<&[u8]>) -> Result<()> {
+    fn seek0(&mut self, targetKeyWithTxId: &[u8], put: bool, value: Option<&[u8]>) -> Result<()> {
         let db = self.db;
-
-        let key0 = match self.tx {
-            // get读取的时候
-            Some(tx) => tx::appendKeyWithTxId(key, tx.id),
-            // 写入落地的时候,key本身是含有txId的
-            None => key.to_vec(),
-        };
 
         if put {
             let overflowThreshold = {
                 let pageSize = db.getHeaderMut().pageSize;
-                pageSize as usize / page::OVERFLOW_DIVIDE
+                pageSize / page::OVERFLOW_DIVIDE
             };
 
             let (currentPage, currentIndexInPage) = self.stack.last_mut().unwrap();
@@ -100,10 +101,10 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                 let index =
                     currentPageWriteGuard.pageElems.binary_search_by(|pageElem| {
                         match pageElem {
-                            PageElem::LeafR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0.as_slice()),
-                            PageElem::Dummy4PutLeaf(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0),
-                            PageElem::LeafOverflowR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0.as_slice()),
-                            PageElem::Dummy4PutLeafOverflow(keyWithTxIdInElem, _, _) => keyWithTxIdInElem.cmp(&key0),
+                            PageElem::LeafR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&targetKeyWithTxId),
+                            PageElem::Dummy4PutLeaf(keyWithTxIdInElem, _) => keyWithTxIdInElem.as_slice().cmp(targetKeyWithTxId),
+                            PageElem::LeafOverflowR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&targetKeyWithTxId),
+                            PageElem::Dummy4PutLeafOverflow(keyWithTxIdInElem, _, _) => keyWithTxIdInElem.as_slice().cmp(targetKeyWithTxId),
                             _ => panic!("impossible")
                         }
                     }).map(|index| { // Ok 体系 说明要变动(update/delete)现有
@@ -129,9 +130,9 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                                 currentPageWriteGuard.pageElems[index] = {
                                     if value.len() >= overflowThreshold {
                                         // pos的位置暂时先写0后边统1应对
-                                        PageElem::Dummy4PutLeafOverflow(key0, 0, value.to_vec())
+                                        PageElem::Dummy4PutLeafOverflow(targetKeyWithTxId.to_vec(), 0, value.to_vec())
                                     } else {
-                                        PageElem::Dummy4PutLeaf(key0, value.to_vec())
+                                        PageElem::Dummy4PutLeaf(targetKeyWithTxId.to_vec(), Some(value.to_vec()))
                                     }
                                 };
 
@@ -148,23 +149,25 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                         }
                     }
                     Err(index) => { // new one to insert 需要落地的1个新的page上的
-                        if let Some(value) = value {
-                            let pageElem = {
+                        let pageElem =
+                            if let Some(value) = value {
                                 if value.len() >= overflowThreshold {
                                     // pos的位置暂时先写0后边统1应对
-                                    PageElem::Dummy4PutLeafOverflow(key0, 0, value.to_vec())
+                                    PageElem::Dummy4PutLeafOverflow(targetKeyWithTxId.to_vec(), 0, value.to_vec())
                                 } else {
-                                    PageElem::Dummy4PutLeaf(key0, value.to_vec())
+                                    PageElem::Dummy4PutLeaf(targetKeyWithTxId.to_vec(), Some(value.to_vec()))
                                 }
+                            } else { // 即使是delete,value要是要用none占位
+                                PageElem::Dummy4PutLeaf(targetKeyWithTxId.to_vec(), None)
                             };
 
-                            // 说明要加入的key是比pageElems所有元素都大,添加到末尾
-                            if index >= currentPageWriteGuard.pageElems.len() {
-                                currentPageWriteGuard.pageElems.push(pageElem);
-                            } else {
-                                currentPageWriteGuard.pageElems.insert(index, pageElem);
-                            }
+                        // 说明要加入的key是比pageElems所有元素都大,添加到末尾
+                        if index >= currentPageWriteGuard.pageElems.len() {
+                            currentPageWriteGuard.pageElems.push(pageElem);
+                        } else {
+                            currentPageWriteGuard.pageElems.insert(index, pageElem);
                         }
+
 
                         *currentIndexInPage = index;
                     }
@@ -179,26 +182,27 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                 let indexResult =
                     currentPageWriteGuard.pageElems.binary_search_by(|pageElem| {
                         match pageElem {
-                            PageElem::BranchR(keyWithTxId, _) => keyWithTxId.cmp(&key0.as_slice()),
+                            PageElem::BranchR(keyWithTxId, _) => keyWithTxId.cmp(&targetKeyWithTxId),
                             PageElem::Dummy4PutBranch(keyWithTxId, _) |
-                            PageElem::Dummy4PutBranch0(keyWithTxId, _) => keyWithTxId.as_slice().cmp(key0.as_slice()),
+                            PageElem::Dummy4PutBranch0(keyWithTxId, _) => keyWithTxId.as_slice().cmp(targetKeyWithTxId),
                             _ => panic!("impossible")
                         }
                     });
 
                 // 
-                let index = match indexResult {
-                    // 要insert的key大于当前的branch的最大的key的,意味着需要在末尾追加的
-                    Err(index) if index >= currentPageWriteGuard.pageElems.len() => {
-                        *currentIndexInPage = index - 1;
-                        index - 1
-                    }
-                    // use current existing branch page element 说明是相同的契合直接覆盖的
-                    Err(index) | Ok(index) => {
-                        *currentIndexInPage = index;
-                        index
-                    }
-                };
+                let index =
+                    match indexResult {
+                        // 要insert的key大于当前的branch的最大的key的,意味着需要在末尾追加的
+                        Err(index) if index >= currentPageWriteGuard.pageElems.len() => {
+                            *currentIndexInPage = index - 1;
+                            index - 1
+                        }
+                        // use current existing branch page element 说明是相同的契合直接覆盖的
+                        Err(index) | Ok(index) => {
+                            *currentIndexInPage = index;
+                            index
+                        }
+                    };
 
                 currentPageWriteGuard.indexInParentPage = self.getIndexInParentPage();
 
@@ -216,7 +220,7 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
 
                 drop(currentPageWriteGuard);
 
-                self.seek0(key, put, value)?;
+                self.seek0(targetKeyWithTxId, put, value)?;
             }
         } else { // 不是put
             let (currentPage, currentIndexInPage) = self.stackTopMut();
@@ -229,14 +233,11 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                 // if there is an equivalent value ,then returns Ok(index) else returns Err(index)
                 let index =
                     currentPageReadGuard.pageElems.binary_search_by(|pageElem| {
-                        let key0 = key0.as_slice();
-
                         match pageElem {
                             PageElem::LeafR(keyWithTxIdInElem, _) |
-                            PageElem::LeafOverflowR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&key0),
+                            PageElem::LeafOverflowR(keyWithTxIdInElem, _) => keyWithTxIdInElem.cmp(&targetKeyWithTxId),
                             PageElem::Dummy4PutLeaf(keyWithTxIdInElem, _) |
-                            PageElem::Dummy4PutLeafOverflow(keyWithTxIdInElem, _, _) => keyWithTxIdInElem.as_slice().cmp(key0),
-
+                            PageElem::Dummy4PutLeafOverflow(keyWithTxIdInElem, _, _) => keyWithTxIdInElem.as_slice().cmp(targetKeyWithTxId),
                             _ => panic!("impossible")
                         }
                     }).unwrap_or_else(|index| {
@@ -254,32 +255,47 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                 // 读branch的时候key不应还有tx的
                 let index =
                     currentPageReadGuard.pageElems.binary_search_by(|pageElem| {
-                        let key0WithoutTxId = tx::extractKeyFromKeyWithTxId(&key0);
-
                         match pageElem {
-                            // branch elem中保存的key 要不要含有txId
-                            // 至少在get时候在branch上的筛选比较key是不能含有txId的
-                            // 碰到某种情况,branchPage中的某个elem的key是250,txId是1
-                            // 然后在txId是2的时候尝试get 250对应的val
-                            // 如果将txId考虑在内进行key的比较的话会得不到value,这是不对的
-                            PageElem::BranchR(keyWithTxIdInElem, _) => {
-                                let keyInElem = tx::extractKeyFromKeyWithTxId(keyWithTxIdInElem);
-                                keyInElem.cmp(key0WithoutTxId)
-                            }
+                            PageElem::BranchR(keyWithTxIdInElem, _) => (*keyWithTxIdInElem).cmp(&targetKeyWithTxId),
                             PageElem::Dummy4PutBranch(keyWithTxIdInElem, _) |
-                            PageElem::Dummy4PutBranch0(keyWithTxIdInElem, _) => {
-                                let keyInElem = tx::extractKeyFromKeyWithTxId(keyWithTxIdInElem);
-                                keyInElem.cmp(key0WithoutTxId)
-                            }
+                            PageElem::Dummy4PutBranch0(keyWithTxIdInElem, _) => keyWithTxIdInElem.as_slice().cmp(targetKeyWithTxId),
                             _ => panic!("impossible")
                         }
                     }).unwrap_or_else(|index| {
-                        // none, the target has no possibility in the descendant
-                        // even thought ,we still need to go on
-                        if index >= currentPageReadGuard.pageElems.len() {
-                            index - 1
-                        } else {
-                            index
+                        // Err说明不存在相等的key
+                        // index是大于它的最小元素的index
+                        // 特殊情况 数组是空的返回Err(0); 数组元素都要比它小返回Err(数组长度)
+                        //
+                        // 以下的逻辑的原因:
+                        // 假设branchElem的key是这些: 250+txId:1 270+txId:2
+                        // 当前要搜索的key是250+txId:7,如果以普通逻辑那么会选中270+txId:2 即大于它的最小元素
+                        // 这样是不对的,显然要找的value是在250+txId:1那里
+                        // 250+txId:1和270+txId:2 分别是小于它的最大元素和大于它的最小元素,它们是相邻的
+                        // 在代码中需要向前瞧瞧index-1那的不含txId的key是否和当前的keyWithoutTxId相同
+                        // 根本的原因是250+txId:1成为了branchElem的key且和需要搜索的相同
+                        // 如果要搜索的key的纯粹部分未出现在branchElem的key中,例如要搜索的是251+tx:7
+                        // 那么普通逻辑返回的大于它的最小值270+txId:2是正确的的
+                        if index > 0 {
+                            // index -1 是 小于自己的最大元素的index
+                            let prevPageElem = currentPageReadGuard.pageElems.get(index - 1).unwrap();
+
+                            let prevKeyWithoutTxId = tx::extractKeyFromKeyWithTxId(prevPageElem.getKey());
+                            let key0WithoutTxId = tx::extractKeyFromKeyWithTxId(&targetKeyWithTxId);
+
+                            // 前边(小于自己的最大元素)的key不含txId和自己不含txId相同
+                            // 同时意味着prevKey的txId小于key0的txId
+                            if prevKeyWithoutTxId == key0WithoutTxId {
+                                index - 1
+                            } else {
+                                // 数组元素都要比它小返回Err(数组长度)
+                                if index >= currentPageReadGuard.pageElems.len() {
+                                    index - 1
+                                } else {
+                                    index
+                                }
+                            }
+                        } else { // 数组是空的
+                            0
                         }
                     });
 
@@ -304,7 +320,7 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                 let page = db.getPageById(pageId, Some(currentPage.clone()))?;
                 self.stack.push((page, 0));
 
-                self.seek0(key, put, value)?;
+                self.seek0(targetKeyWithTxId, put, value)?;
             }
         }
 

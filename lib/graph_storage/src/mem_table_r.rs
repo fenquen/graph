@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::ops::DerefMut;
+use std::os::fd::RawFd;
 use std::sync::{Arc, RwLock};
 use memmap2::{Advice, MmapMut};
 use crate::mem_table::{MemTable, MemTableFileHeader};
@@ -19,12 +20,12 @@ pub(crate) struct MemTableR {
     memTableFileMmap: MmapMut,
 }
 
-impl TryFrom<&MemTable> for MemTableR {
+impl TryFrom<RawFd> for MemTableR {
     type Error = anyhow::Error;
 
-    fn try_from(memTable: &MemTable) -> Result<Self, Self::Error> {
+    fn try_from(fd: RawFd) -> Result<Self, Self::Error> {
         let memTableFileMmap = {
-            let memTableFileMmap = utils::mmapFdMut(memTable.memTableFileFd, None, None)?;
+            let memTableFileMmap = utils::mmapFdMut(fd, None, None)?;
             memTableFileMmap.advise(Advice::WillNeed)?;
             memTableFileMmap
         };
@@ -77,6 +78,8 @@ impl<'a> Iterator for MemTableRIter<'a> {
 pub(crate) fn processMemTableRs(db: &DB, memTableRs: Vec<MemTableR>) -> Result<()> {
     let mut cursor = Cursor::new(db, None)?;
 
+    // 如果某个key对应的txId a 不在infightingTxIds中 且 对应的value是None
+    // 那么这个key的全部小于等于a体系的都可以干掉了
     for memTableR in memTableRs.iter() {
         for (key, value) in memTableR.iter() {
             cursor.seek(key, true, value)?;
@@ -140,24 +143,25 @@ fn writePages(db: &DB,
 
         // 读取当前的additionalPage的最大的key
         // 是否有必要通过读取mmap来知道,能不能通过直接通过pageElems属性得到啊
-        let getLargestKeyInPage =
+
+        // 对branch来说相当重要的是key不能含有txId
+        let getLastKeyInPage =
             |page: &Page| -> Result<Vec<u8>> {
-                //let lastElemMeta = page.getLastElemMeta()?;
+                let last = match page.pageElems.last().unwrap() {
+                    PageElem::LeafR(k, _) => *k,
+                    PageElem::Dummy4PutLeaf(k, _) => k.as_slice(),
+                    //
+                    PageElem::LeafOverflowR(k, _) => *k,
+                    PageElem::Dummy4PutLeafOverflow(k, _, _) => k.as_slice(),
+                    //
+                    PageElem::BranchR(k, _) => *k,
+                    PageElem::Dummy4PutBranch(k, _) => k.as_slice(),
+                    PageElem::Dummy4PutBranch0(k, _) => k.as_slice(),
+                };
 
-                match page.pageElems.last().unwrap() {
-                    PageElem::LeafR(k, _) => Ok(k.to_vec()),
-                    PageElem::Dummy4PutLeaf(k, _) => Ok(k.clone()),
-                    //
-                    PageElem::LeafOverflowR(k, _) => Ok(k.to_vec()),
-                    PageElem::Dummy4PutLeafOverflow(k, _, _) => Ok(k.clone()),
-                    //
-                    PageElem::BranchR(k, _) => Ok(k.to_vec()),
-                    PageElem::Dummy4PutBranch(k, _) => Ok(k.clone()),
-                    PageElem::Dummy4PutBranch0(k, _) => Ok(k.clone()),
-                }
+                //Ok(tx::extractKeyFromKeyWithTxId(last).to_vec())
+                Ok(last.to_vec())
             };
-
-        let largestKeyInPage = getLargestKeyInPage(writeDestPage)?;
 
         // 当前的page塞不下了,实际要分裂成多个了,需要再在上头盖1个branch
         // 如果说rootPage还是容纳的下 那么不用去理会了
@@ -198,33 +202,37 @@ fn writePages(db: &DB,
         let mut parentPage = parentPage.write().unwrap();
 
         // 不应该使用insert,而是应直接替换的
-        let mut indexInParentPage = match indexInParentPage {
-            Some(indexInParentPage) => {
-                if needBuildNewParentPage {
-                    parentPage.pageElems.push(PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone()));
-                    0
-                } else {
-                    let indexInParentPage = *indexInParentPage;
-                    parentPage.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone());
-                    indexInParentPage
+        let mut indexInParentPage =
+            {
+                let lastKeyInPage = getLastKeyInPage(writeDestPage)?;
+
+                match indexInParentPage {
+                    Some(indexInParentPage) => {
+                        if needBuildNewParentPage {
+                            parentPage.pageElems.push(PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPage0.clone()));
+                            0
+                        } else {
+                            let indexInParentPage = *indexInParentPage;
+                            parentPage.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPage0.clone());
+                            indexInParentPage
+                        }
+                    }
+                    None => { // 说明直接到了leafPage未经过branch 要么 这是1个临时新建的branch
+                        parentPage.pageElems.push(PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPage0.clone()));
+                        0
+                    }
                 }
-            }
-            None => { // 说明直接到了leafPage未经过branch 要么 这是1个临时新建的bracnh
-                parentPage.pageElems.push(PageElem::Dummy4PutBranch(largestKeyInPage, writeDestPage0.clone()));
-                0
-            }
-        };
+            };
 
         // 如果还有additionalPage的话,就要在indexInParentPage后边不断的塞入的
         // 使用drain是因为原来的测试是put之后重启在测试get,如果不重启直接get需要这样干清理掉的
         for additionalPage in writeDestPage.additionalPages.drain(..) {
             indexInParentPage += 1;
 
-            let largestKeyInPage = getLargestKeyInPage(&additionalPage)?;
+            let lastKeyInPage = getLastKeyInPage(&additionalPage)?;
 
             // insert的目标index可以和len相同,塞到最后的和push相同
-            parentPage.pageElems.insert(indexInParentPage,
-                                        PageElem::Dummy4PutBranch0(largestKeyInPage, additionalPage.header.id))
+            parentPage.pageElems.insert(indexInParentPage, PageElem::Dummy4PutBranch0(lastKeyInPage, additionalPage.header.id))
         }
     }
 

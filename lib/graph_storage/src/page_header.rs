@@ -113,6 +113,7 @@ pub(crate) struct PageElemMetaLeaf {
     /// 实际数据离当前的offset
     // pub(crate) offset: u16,
     pub(crate) keySize: u16,
+
     pub(crate) valueSize: u32,
 }
 
@@ -122,9 +123,16 @@ impl PageElemMeta for PageElemMetaLeaf {
             //const OFFSET: usize = size_of::<u16>() + size_of::<u32>();
             let ptr = (self as *const _ as *const u8).add(LEAF_ELEM_META_SIZE);
             let key = ptr::slice_from_raw_parts(ptr, self.keySize as usize);
-            let val = ptr::slice_from_raw_parts(ptr.add(self.keySize as usize), self.valueSize as usize);
 
-            PageElem::LeafR(&*key, &*val)
+            let value =
+                if self.valueSize > 0 {
+                    let value = ptr::slice_from_raw_parts(ptr.add(self.keySize as usize), self.valueSize as usize);
+                    Some(&*value)
+                } else {
+                    None
+                };
+
+            PageElem::LeafR(&*key, value)
         }
     }
 

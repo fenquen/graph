@@ -20,13 +20,13 @@ pub struct Tx<'db> {
 }
 
 impl<'db> Tx<'db> {
-    pub fn get(&self, keyWithoutTxId: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub fn get(&self, targetKeyWithoutTxId: &[u8]) -> Result<Option<Vec<u8>>> {
         // find in tx local changes
-        if let Some(val) = self.changes.get(keyWithoutTxId) {
+        if let Some(val) = self.changes.get(targetKeyWithoutTxId) {
             return Ok(val.as_ref().map(|val| (&*val).clone()));
         }
 
-        let keyWithTxId = appendKeyWithTxId(keyWithoutTxId, self.id);
+        let keyWithTxId = appendKeyWithTxId(targetKeyWithoutTxId, self.id);
 
         let scanMemTable =
             |memTable: &MemTable| -> Option<Vec<u8>> {
@@ -35,7 +35,7 @@ impl<'db> Tx<'db> {
                 if let Some((keyWithTxId0, value)) = memTableCursor.peek_prev() {
                     let (originKey, txId) = parseKeyWithTxId(keyWithTxId0);
 
-                    if keyWithoutTxId == originKey {
+                    if targetKeyWithoutTxId == originKey {
                         if txId <= self.id {
                             return value.clone();
                         }
@@ -68,13 +68,16 @@ impl<'db> Tx<'db> {
         // find in lower level
         let mut cursor = self.createCursor()?;
 
-        cursor.seek(keyWithoutTxId, false, None)?;
+        cursor.seek(targetKeyWithoutTxId, false, None)?;
 
-        if let Some((keyWithTxId, val)) = cursor.currentKV() {
-            if keyWithTxId.starts_with(keyWithoutTxId) {
+        if let Some((keyWithTxId, value)) = cursor.currentKV() {
+            let (keyWithoutTxId, keyTxId) = parseKeyWithTxId(keyWithTxId.as_slice());
+
+            if keyWithoutTxId == targetKeyWithoutTxId {
                 let (_, keyTxId) = parseKeyWithTxId(keyWithTxId.as_slice());
+
                 if self.id >= keyTxId {
-                    return Ok(Some(val));
+                    return Ok(value);
                 }
             }
         }
@@ -150,11 +153,6 @@ pub(crate) fn parseKeyWithTxId(keyWithTxId: &[u8]) -> (&[u8], TxId) {
 pub(crate) fn extractKeyFromKeyWithTxId(keyWithTxId: &[u8]) -> &[u8] {
     let (key, _) = parseKeyWithTxId(keyWithTxId);
     key
-}
-
-fn extractTxIdFromKeyWithTxId(keyWithTxId: &[u8]) -> TxId {
-    let (_, txId) = parseKeyWithTxId(keyWithTxId);
-    txId
 }
 
 pub(crate) fn appendKeyWithTxId(key: &[u8], txId: TxId) -> Vec<u8> {

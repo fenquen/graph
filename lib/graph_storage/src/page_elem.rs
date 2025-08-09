@@ -15,15 +15,15 @@ use crate::types::PageId;
 /// 如果value比较大(那多少算是大呢,目前暂时定为pageSize的25%) value保存到单独的文件 leaf节点本身保存data的pos的
 pub(crate) enum PageElem<'a> {
     /// key is with txId
-    LeafR(&'a [u8], &'a [u8]),
-    Dummy4PutLeaf(Vec<u8>, Vec<u8>),
+    LeafR(&'a [u8], Option<&'a [u8]>),
+    Dummy4PutLeaf(Vec<u8>, Option<Vec<u8>>),
 
     /// (key, value在文件中的位置的)
     LeafOverflowR(&'a [u8], usize),
     /// (key, pos, val)
     Dummy4PutLeafOverflow(Vec<u8>, usize, Vec<u8>),
 
-    /// key is with txId
+    /// branch体系的key不应含有txId
     BranchR(&'a [u8], PageId),
     Dummy4PutBranch(Vec<u8>, Arc<RwLock<Page>>),
     Dummy4PutBranch0(Vec<u8>, PageId),
@@ -39,7 +39,7 @@ impl<'a> PageElem<'a> {
 
                 let pageElemMetaLeaf: &mut PageElemMetaLeaf = utils::slice2RefMut(pageElemMetaSlice);
                 pageElemMetaLeaf.keySize = k.len() as u16;
-                pageElemMetaLeaf.valueSize = v.len() as u32;
+                pageElemMetaLeaf.valueSize = v.map_or_else(|| { 0 }, |v| v.len()) as u32;
 
                 let (keySlice, valSlice) = kvSlice.split_at_mut(k.len());
 
@@ -50,8 +50,11 @@ impl<'a> PageElem<'a> {
                 }
 
                 keySlice.copy_from_slice(k);
+
                 // 因为传入的dest的len已经限制为pageElemDiskSize,不需要&mut dest[k.len()..k.len()+v.len()]
-                valSlice.copy_from_slice(v);
+                if let Some(v) = v {
+                    valSlice.copy_from_slice(v);
+                }
 
                 Ok(keySlice)
             }
@@ -60,11 +63,15 @@ impl<'a> PageElem<'a> {
 
                 let pageElemMetaLeaf: &mut PageElemMetaLeaf = utils::slice2RefMut(pageElemMetaSlice);
                 pageElemMetaLeaf.keySize = k.len() as u16;
-                pageElemMetaLeaf.valueSize = v.len() as u32;
+                pageElemMetaLeaf.valueSize = v.as_ref().map_or_else(|| { 0 }, |v| v.len()) as u32;
 
                 let (keySlice, valSlice) = kvSlice.split_at_mut(k.len());
+
                 keySlice.copy_from_slice(k);
-                valSlice.copy_from_slice(v);
+
+                if let Some(v) = v {
+                    valSlice.copy_from_slice(v);
+                }
 
                 Ok(keySlice)
             }
@@ -142,8 +149,20 @@ impl<'a> PageElem<'a> {
     /// 含有 pageElemMeta
     pub(crate) fn diskSize(&self) -> usize {
         match self {
-            PageElem::LeafR(k, v) => page_header::LEAF_ELEM_META_SIZE + k.len() + v.len(),
-            PageElem::Dummy4PutLeaf(k, v) => page_header::LEAF_ELEM_META_SIZE + k.len() + v.len(),
+            PageElem::LeafR(k, v) => {
+                page_header::LEAF_ELEM_META_SIZE +
+                    k.len() +
+                    v.map_or_else(|| { 0 }, |v| v.len())
+            }
+            PageElem::Dummy4PutLeaf(k, v) => {
+                page_header::LEAF_ELEM_META_SIZE +
+                    k.len() +
+                    if let Some(v) = v {
+                        v.len()
+                    } else {
+                        0
+                    }
+            }
             //
             PageElem::LeafOverflowR(k, _) => page_header::LEAF_ELEM_OVERFLOW_META_SIZE + k.len() + size_of::<usize>(),
             PageElem::Dummy4PutLeafOverflow(k, _, _) => page_header::LEAF_ELEM_OVERFLOW_META_SIZE + k.len() + size_of::<usize>(),

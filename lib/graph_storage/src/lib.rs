@@ -23,9 +23,9 @@ mod mem_table_r;
 mod tests {
     use crate::db::{DBHeader, DBOption, DB};
     use std::{fs};
-    use std::time::SystemTime;
+    use std::time::{Instant, SystemTime};
 
-    const ELEM_COUNT: usize = 4096;
+    const ELEM_COUNT: usize = 1000000;
 
     #[test]
     fn general() {
@@ -50,10 +50,12 @@ mod tests {
 
         let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
 
+        let a = Instant::now();
         for a in 0..ELEM_COUNT {
             let aa = a.to_be_bytes();
             tx.set(&aa, &aa).unwrap();
         }
+        println!("set time: {} micro second",a.elapsed().as_micros());
 
         tx.commit().unwrap();
 
@@ -120,7 +122,7 @@ mod tests {
 
             for a in 0..ELEM_COUNT {
                 let k = a.to_be_bytes();
-                //assert_eq!(tx.get(&k).unwrap(), None);
+                assert_eq!(tx.get(&k).unwrap(), None);
             }
         }
 

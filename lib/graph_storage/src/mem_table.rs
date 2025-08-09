@@ -155,13 +155,13 @@ impl MemTable {
             // switch2NewMemTable现在是整个事务级别的触发
             // 原来是事务中的单个kv的写入来触发,这是不对的因为事务是个整体,不能细化到其中的某kv
             if self.posInFile >= self.maxFileSizeBeforeSwitch {
-                self.switch2NewMemTable(None)?;
+                self.switch2NewMemTable()?;
             } else {
                 self.refreshEntryCount();
-            }
 
-            // todo 系统调用msync成本很高 减少调用的趟数 只同步变化部分
-            self.msync()?;
+                // todo 系统调用msync成本很高 减少调用的趟数 只同步变化部分
+                self.msync()?;
+            }
 
             anyhow::Ok(())
         };
@@ -206,17 +206,19 @@ impl MemTable {
             // 对MAP_SHARED映射,写入超出文件大小的区域时,会自动隐式扩展文件(通过ftruncate),即使跨多个内存页也不会报错
             //#[cfg(target_os = "macos")]
             {
-                let db = self.db.upgrade().unwrap();
-                let pageSize = db.getHeader().pageSize;
+                if end >= self.currentFileSize {
+                    let db = self.db.upgrade().unwrap();
+                    let pageSize = db.getHeader().pageSize;
 
-                while end >= self.currentFileSize {
-                    // 额外再增加1个os内存页大小,以防止频繁的干这个
-                    self.currentFileSize = end + pageSize * 16;
+                    while end >= self.currentFileSize {
+                        // 额外再增加1个os内存页大小,以防止频繁的干这个
+                        self.currentFileSize = end + pageSize * 16;
+                    }
+
+                    let memTableFile = unsafe { File::from_raw_fd(self.memTableFileFd) };
+                    memTableFile.set_len(self.currentFileSize as u64)?;
+                    mem::forget(memTableFile);
                 }
-
-                let memTableFile = unsafe { File::from_raw_fd(self.memTableFileFd) };
-                memTableFile.set_len(self.currentFileSize as u64)?;
-                mem::forget(memTableFile);
             }
 
             &mut self.memTableFileMmap[start..end]
@@ -244,54 +246,57 @@ impl MemTable {
 
     // 如果memTable大小设置的比较小,1个tx写入的过程会涉及到多趟切换到新的memTable
     // 是不是可以单个tx内容写入的过程中不会切换到newMemTable,等到全部写完了再看是不是超过大小了来确定要不要切换的
-    fn switch2NewMemTable(&mut self, curEntrySize: Option<usize>) -> Result<()> {
+    fn switch2NewMemTable(&mut self) -> Result<()> {
         let db = self.db.upgrade().unwrap();
 
-        let mut newMemTableFileSize = db.dbOption.memTableMaxSize + MEM_TABLE_FILE_HEADER_SIZE;
+        self.refreshEntryCount();
+        self.msync()?;
 
-        if let Some(curEntrySize) = curEntrySize {
-            newMemTableFileSize += curEntrySize;
-        }
+        let newMemTableFileSize = db.dbOption.memTableMaxSize + MEM_TABLE_FILE_HEADER_SIZE;
 
         // open a new memTable
         // 测试得知当设置memTable大小为1024byte时候,以下的action要消耗4ms的
-        let mut newMemTable = {
+        let newMemTable = {
             let mutableMemTableFilePath =
                 Path::join(db.dbOption.dirPath.as_ref(),
                            format!("{}.{}", self.memTableFileNum + 1, MEM_TABLE_FILE_EXTENSION));
 
-            MemTable::open(mutableMemTableFilePath, newMemTableFileSize)?
-        };
+            let mut newMemTable = MemTable::open(mutableMemTableFilePath, newMemTableFileSize)?;
+            newMemTable.db = Arc::downgrade(&db);
 
-        newMemTable.db = Arc::downgrade(&db);
+            newMemTable
+        };
 
         // 使用新的替换旧的memeTable,换下来的旧的变为immutableMemTable收集
         // see RWLock::replace
+        // 目前memTableOld是孤魂野鬼状态,既不是唯一的那个mutableMemTable,也不是immutableMemTable
+        // 如果在添加到immutableMemTables之前发生了故障应该如何应对?
+        // 问题的核心是文件中还有别的tx的内容
+        // 应该先早点将memTableOld添加到immutableMemTables的
         let mut memTableOld = mem::replace(self, newMemTable);
         memTableOld.immutable = true;
 
-        memTableOld.refreshEntryCount();
-
-        // 原来的oldMemTable被替换后 有必要msync的
-        // 只mysnc必要的部分
-        memTableOld.msync()?;
-
         // memTableOld当前已封版,变化为MemTableR发送到另外的thread
-        let memTableR = MemTableR::try_from(&memTableOld)?;
-        db.memTableRSender.send(memTableR)?;
+        let fd = memTableOld.memTableFileFd;
 
-        let mut immutableMemTables = db.immutableMemTables.write().unwrap();
+        // memTableOld添加到immutableMemTables中
+        {
+            let mut immutableMemTables = db.immutableMemTables.write().unwrap();
 
-        // 趁着获取write锁的时候,筛选和清理掉需要保留的immutableMemTable
-        for immutableMemTable in immutableMemTables.drain(..).collect::<Vec<_>>() {
-            if immutableMemTable.header.written2Disk {
-                let _ = immutableMemTable.destory();
-            } else {
-                immutableMemTables.push(immutableMemTable);
+            // 趁着获取write锁的时候,筛选和清理掉需要保留的immutableMemTable
+            for immutableMemTable in immutableMemTables.drain(..).collect::<Vec<_>>() {
+                if immutableMemTable.header.written2Disk {
+                    let _ = immutableMemTable.destory();
+                } else {
+                    immutableMemTables.push(immutableMemTable);
+                }
             }
+
+            immutableMemTables.push(memTableOld);
         }
 
-        immutableMemTables.push(memTableOld);
+        let memTableR = MemTableR::try_from(fd)?;
+        db.memTableRSender.send(memTableR)?;
 
         Ok(())
     }

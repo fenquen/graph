@@ -178,16 +178,16 @@ impl TryFrom<MmapMut> for Page {
     fn try_from(mmapMut: MmapMut) -> Result<Self, Self::Error> {
         let pageHeader = utils::slice2Ref::<PageHeader>(&mmapMut);
 
-        let pageElemVec = {
-            let mut pageElemVec = Vec::with_capacity(pageHeader.elemCount as usize);
+        let pageElems = {
+            let mut pageElems = Vec::with_capacity(pageHeader.elemCount as usize);
 
             for index in 0..pageHeader.elemCount as usize {
                 let pageElemMeta = pageHeader.readPageElemMeta(index)?;
                 let pageElem = pageElemMeta.readPageElem();
-                pageElemVec.push(pageElem);
+                pageElems.push(pageElem);
             }
 
-            pageElemVec
+            pageElems
         };
 
         Ok(Page {
@@ -195,7 +195,7 @@ impl TryFrom<MmapMut> for Page {
             indexInParentPage: None,
             mmapMut,
             header: pageHeader,
-            pageElems: pageElemVec,
+            pageElems,
             //childPages: None,
             additionalPages: vec![],
         })

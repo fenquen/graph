@@ -7,7 +7,7 @@ use crate::{mem_table_r, page_header, utils};
 use anyhow::Result;
 use dashmap::DashMap;
 use memmap2::{Advice, MmapMut};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -28,10 +28,10 @@ const VERSION: usize = 1;
 pub(crate) const DB_HEADER_SIZE: usize = size_of::<DBHeader>();
 
 pub(crate) const DEFAULT_DIR_PATH: &str = "./data";
-pub(crate) const DEFAULT_BLOCK_SIZE: usize = 1024 * 1024;
+pub(crate) const DEFAULT_BLOCK_SIZE: usize = 1024 * 1024 * 16;
 pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1024;
 pub(crate) const DEFAULT_MEM_TABLE_R_CHAN_BUFFER_SIZE: usize = 1024;
-pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 1024;
+pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 1024 * 1024;
 pub(crate) const DEFAULT_IMMUTABLE_MEM_TABLE_COUNT: usize = 1;
 
 pub(crate) const BLOCK_FILE_EXTENSION: &str = "block";
@@ -100,6 +100,8 @@ pub struct DB {
 
     pub(crate) joinHandleCommitReqs: MaybeUninit<JoinHandle<()>>,
     pub(crate) joinHandleMemTableRs: MaybeUninit<JoinHandle<()>>,
+
+    pub(crate) infightingTxIds: RwLock<BTreeSet<TxId>>,
 }
 
 impl DB {
@@ -152,7 +154,7 @@ impl DB {
         }
 
         // memTableMaxSize要是实际的pageSize整数
-        dbOption.memTableMaxSize = utils::roundUp2Multiple(dbOption.memTableMaxSize,dbHeader.pageSize);
+        dbOption.memTableMaxSize = utils::roundUp2Multiple(dbOption.memTableMaxSize, dbHeader.pageSize);
 
         // 启动的时候将已经存在的memTable文件都视为immutable的
         let (blockFileFds, immutableMemTables) = DB::scanDir(dbHeader, &dbOption)?;
@@ -191,6 +193,7 @@ impl DB {
                     memTableRSender,
                     joinHandleCommitReqs: MaybeUninit::<JoinHandle<()>>::uninit(),
                     joinHandleMemTableRs: MaybeUninit::<JoinHandle<()>>::uninit(),
+                    infightingTxIds: Default::default(),
                 }
             );
 
@@ -235,7 +238,7 @@ impl DB {
         {
             let immutableMemTables = db.immutableMemTables.read().unwrap();
             immutableMemTables.iter().for_each(|immutableMemTable| {
-                let memTableR = MemTableR::try_from(immutableMemTable).unwrap();
+                let memTableR = MemTableR::try_from(immutableMemTable.memTableFileFd).unwrap();
                 db.memTableRSender.send(memTableR).unwrap();
             });
         }
@@ -243,8 +246,13 @@ impl DB {
         Ok(db)
     }
 
-    pub fn newTx(&self) -> Result<Tx> {
+    pub fn newTx(&'_ self) -> Result<Tx<'_>> {
         let txId = self.allocateTxId()?;
+
+        {
+            let mut infightingTxIds = self.infightingTxIds.write().unwrap();
+            infightingTxIds.insert(txId);
+        }
 
         let tx = Tx {
             id: txId,
@@ -288,7 +296,7 @@ impl DB {
 
         let pageMmapMut = {
             let pageHeaderOffsetInBlock = (dbHeader.pageSize as u64 * pageId) % dbHeader.blockSize as u64;
-            utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize as usize))?
+            utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize))?
         };
 
         let mut page = Page::try_from(pageMmapMut)?;
@@ -541,7 +549,7 @@ impl DB {
 
                     if vec.len() >= countThreshold {
                         let batch = vec.drain(..).collect();
-                        mem_table_r::processMemTableRs(&*db, batch);
+                        _ = mem_table_r::processMemTableRs(&*db, batch);
                     }
                 }
                 None => break,
