@@ -5,6 +5,8 @@
 #![feature(rwlock_downgrade)]
 //#![allow(unused)]
 
+extern crate core;
+
 #[macro_use] // 宏引入到当前mod及其子mod,限当前crate内部使用,需放到打头使用
 mod macros;
 pub mod db;
@@ -22,10 +24,10 @@ mod mem_table_r;
 #[cfg(test)]
 mod tests {
     use crate::db::{DBHeader, DBOption, DB};
-    use std::{fs};
-    use std::time::{Instant, SystemTime};
+    use std::{fs, thread};
+    use std::time::{Duration, Instant, SystemTime};
 
-    const ELEM_COUNT: usize = 1000000;
+    const ELEM_COUNT: usize = 1024;
 
     #[test]
     fn general() {
@@ -55,13 +57,14 @@ mod tests {
             let aa = a.to_be_bytes();
             tx.set(&aa, &aa).unwrap();
         }
-        println!("set time: {} micro second",a.elapsed().as_micros());
+        println!("set time: {} micro second", a.elapsed().as_micros());
 
         tx.commit().unwrap();
 
         let end = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
         println!("total time: {} micro second", end - start);
 
+        thread::sleep(Duration::from_secs(10));
         let a = unsafe { db.joinHandleMemTableRs.assume_init_read() };
         drop(db);
         a.join().unwrap();
@@ -73,9 +76,69 @@ mod tests {
         let tx = db.newTx().unwrap();
 
         for a in 0..ELEM_COUNT {
-            let k = a.to_be_bytes();
-            assert_eq!(tx.get(&k).unwrap().as_ref().unwrap().as_slice(), k.as_slice());
+            let key = a.to_be_bytes();
+            assert_eq!(tx.get(&key).unwrap().as_ref().unwrap().as_slice(), key.as_slice());
         }
+    }
+
+    #[test]
+    fn testContinueWrite() {
+        let db = DB::open(None).unwrap();
+
+        let mut tx = db.newTx().unwrap();
+
+        for a in 0..ELEM_COUNT {
+            let key = a.to_be_bytes();
+            let value = (a * 2).to_be_bytes();
+            tx.set(&key, &value).unwrap();
+        }
+
+        tx.commit().unwrap();
+
+        thread::sleep(Duration::from_secs(10));
+        let a = unsafe { db.joinHandleMemTableRs.assume_init_read() };
+        drop(db);
+        a.join().unwrap();
+    }
+
+    #[test]
+    fn testContinueRead() {
+        let db = DB::open(None).unwrap();
+        let tx = db.newTx().unwrap();
+
+        for a in 0..ELEM_COUNT {
+            let key = a.to_be_bytes();
+            let value = (a * 2).to_be_bytes();
+            assert_eq!(tx.get(&key).unwrap().as_ref().unwrap().as_slice(), value.as_slice());
+        }
+    }
+
+    #[test]
+    fn testDeleteSome() {
+        let db = DB::open(None).unwrap();
+        let mut tx = db.newTx().unwrap();
+
+        let key = 700usize.to_be_bytes();
+        tx.delete(&key).unwrap();
+        tx.commit().unwrap();
+
+        let a = unsafe { db.joinHandleMemTableRs.assume_init_read() };
+        drop(db);
+        a.join().unwrap();
+    }
+
+    #[test]
+    fn testGetSome() {
+        let db = DB::open(None).unwrap();
+
+        let tx = db.newTx().unwrap();
+        assert_eq!(tx.get(&700usize.to_be_bytes()).unwrap(), None);
+        // tx.get(&700usize.to_be_bytes()).unwrap();
+
+        thread::sleep(Duration::from_secs(3600));
+        //let a = unsafe { db.joinHandleMemTableRs.assume_init_read() };
+        //drop(db);
+        //a.join().unwrap();
     }
 
     #[test]

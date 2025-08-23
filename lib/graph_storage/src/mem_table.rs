@@ -286,7 +286,7 @@ impl MemTable {
             // 趁着获取write锁的时候,筛选和清理掉需要保留的immutableMemTable
             for immutableMemTable in immutableMemTables.drain(..).collect::<Vec<_>>() {
                 if immutableMemTable.header.written2Disk {
-                    let _ = immutableMemTable.destory();
+                    let _ = immutableMemTable.destroy();
                 } else {
                     immutableMemTables.push(immutableMemTable);
                 }
@@ -301,7 +301,7 @@ impl MemTable {
         Ok(())
     }
 
-    pub(crate) fn destory(self) -> Result<()> {
+    pub(crate) fn destroy(self) -> Result<()> {
         let memTableFilePath = self.memTableFilePath.clone();
         drop(self);
         fs::remove_file(memTableFilePath)?;

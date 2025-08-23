@@ -28,10 +28,10 @@ const VERSION: usize = 1;
 pub(crate) const DB_HEADER_SIZE: usize = size_of::<DBHeader>();
 
 pub(crate) const DEFAULT_DIR_PATH: &str = "./data";
-pub(crate) const DEFAULT_BLOCK_SIZE: usize = 1024 * 1024 * 16;
+pub(crate) const DEFAULT_BLOCK_SIZE: usize = 1024 * 1024;
 pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1024;
 pub(crate) const DEFAULT_MEM_TABLE_R_CHAN_BUFFER_SIZE: usize = 1024;
-pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 1024 * 1024;
+pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 1024;
 pub(crate) const DEFAULT_IMMUTABLE_MEM_TABLE_COUNT: usize = 1;
 
 pub(crate) const BLOCK_FILE_EXTENSION: &str = "block";
@@ -101,7 +101,9 @@ pub struct DB {
     pub(crate) joinHandleCommitReqs: MaybeUninit<JoinHandle<()>>,
     pub(crate) joinHandleMemTableRs: MaybeUninit<JoinHandle<()>>,
 
-    pub(crate) infightingTxIds: RwLock<BTreeSet<TxId>>,
+    pub(crate) flyingTxIds: RwLock<BTreeSet<TxId>>,
+
+    pub(crate) availablePageSizeAfterSplit: usize,
 }
 
 impl DB {
@@ -176,6 +178,8 @@ impl DB {
         let (memTableRSender, memTableRReceiver) =
             mpsc::sync_channel::<MemTableR>(dbOption.memTableRChanBufSize);
 
+        let availablePageSizeAfterSplit = f64::ceil(dbHeader.pageSize as f64 * dbOption.pageFillPercentAfterSplit) as usize;
+        
         let db =
             Arc::new(
                 DB {
@@ -193,7 +197,8 @@ impl DB {
                     memTableRSender,
                     joinHandleCommitReqs: MaybeUninit::<JoinHandle<()>>::uninit(),
                     joinHandleMemTableRs: MaybeUninit::<JoinHandle<()>>::uninit(),
-                    infightingTxIds: Default::default(),
+                    flyingTxIds: Default::default(),
+                    availablePageSizeAfterSplit,
                 }
             );
 
@@ -250,7 +255,7 @@ impl DB {
         let txId = self.allocateTxId()?;
 
         {
-            let mut infightingTxIds = self.infightingTxIds.write().unwrap();
+            let mut infightingTxIds = self.flyingTxIds.write().unwrap();
             infightingTxIds.insert(txId);
         }
 
@@ -264,10 +269,6 @@ impl DB {
         Ok(tx)
     }
 
-    pub fn close(self: &Arc<Self>) -> Result<()> {
-        Ok(())
-    }
-
     #[inline]
     pub(crate) fn getHeader(&self) -> &DBHeader {
         utils::slice2Ref(&self.dbHeaderMmap)
@@ -278,15 +279,15 @@ impl DB {
         utils::slice2RefMut(&self.dbHeaderMmap)
     }
 
-    pub(crate) fn getPageById(&self,
-                              pageId: PageId,
-                              parentPage: Option<Arc<RwLock<Page>>>) -> Result<Arc<RwLock<Page>>> {
+    // todo 完成 感觉函数这样的传参数相当有问题,非得要外部已经知道了它的parentPage是谁了 其实parentPage是哪个应该是page固有信息的
+    pub(crate) fn getPageById(&self, pageId: PageId) -> Result<Arc<RwLock<Page>>> {
         let dbHeader = self.getHeader();
 
         if let Some(page) = self.pageId2Page.get(&pageId) {
             return Ok(page.clone());
         }
 
+        // todo 需要java的获取单例的double check套路
         let targetBlockFileFd = {
             let blockNum = (dbHeader.pageSize as u64 * pageId) / dbHeader.blockSize as u64;
 
@@ -300,7 +301,7 @@ impl DB {
         };
 
         let mut page = Page::try_from(pageMmapMut)?;
-        page.parentPage = parentPage;
+        //page.parentPage = parentPage;
 
         let page = Arc::new(RwLock::new(page));
         self.pageId2Page.insert(pageId, page.clone());
@@ -347,7 +348,7 @@ impl DB {
 
         let mut pageMmap = {
             let pageHeaderOffsetInBlock = (dbHeader.pageSize as u64 * pageId) % dbHeader.blockSize as u64;
-            utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize as usize))?
+            utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize))?
         };
 
         let pageHeader: &mut PageHeader = utils::slice2RefMut(&mut pageMmap);
@@ -355,8 +356,8 @@ impl DB {
         pageHeader.flags = flags;
 
         Ok(Page {
-            parentPage: None,
-            indexInParentPage: None,
+            //parentPage: None,
+           // indexInParentPage: None,
             mmapMut: pageMmap,
             header: pageHeader,
             pageElems: vec![],
@@ -500,7 +501,7 @@ impl DB {
 
                         // empty
                         if memTable.changes.is_empty() || memTable.header.written2Disk {
-                            _ = memTable.destory();
+                            _ = memTable.destroy();
                             continue;
                         }
 

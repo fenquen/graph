@@ -6,7 +6,7 @@ use crate::{page, tx};
 use anyhow::Result;
 use std::sync::{Arc, RwLock};
 use crate::page_elem::PageElem;
-use crate::types::PageId;
+use crate::types::{PageId, TxId};
 
 pub struct Cursor<'db, 'tx> {
     db: &'db DB,
@@ -16,7 +16,7 @@ pub struct Cursor<'db, 'tx> {
     stack: Vec<(Arc<RwLock<Page>>, usize)>,
 
     /// pageId -> (page, indexInParent)
-    pub(crate) pageId2PageAndIndexInParent: HashMap<PageId, (Arc<RwLock<Page>>, Option<usize>)>,
+    pub(crate) leafPageId2LeafPage: HashMap<PageId, Arc<RwLock<Page>>>,
 }
 
 // pub fn
@@ -26,26 +26,30 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
             db,
             tx,
             stack: Vec::new(),
-            pageId2PageAndIndexInParent: HashMap::new(),
+            leafPageId2LeafPage: HashMap::new(),
         })
     }
 
-    pub(crate) fn seek(&mut self, targetKey: &[u8], put: bool, value: Option<&[u8]>) -> Result<()> {
+    pub(crate) fn seek(&mut self,
+                       key: &[u8],
+                       value: Option<&[u8]>,
+                       put: bool,
+                       txIdThreshold2Delete: TxId) -> Result<()> {
         self.move2Root()?;
 
         //let mut arr = [0; 8];
         //arr.copy_from_slice(&key[..8]);
         //let a = usize::from_be_bytes(arr);
 
-        let targetKeyWithTxId =
+        let keyWithTxId =
             match self.tx {
                 // get读取的时候
-                Some(tx) => tx::appendKeyWithTxId(targetKey, tx.id),
+                Some(tx) => tx::appendKeyWithTxId(key, tx.id),
                 // 写入落地的时候,key本身是含有txId的
-                None => targetKey.to_vec(),
+                None => key.to_vec(),
             };
 
-        self.seek0(targetKeyWithTxId.as_slice(), put, value)?;
+        self.seek0(keyWithTxId.as_slice(), value, put, txIdThreshold2Delete)?;
 
         Ok(())
     }
@@ -62,15 +66,17 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
         }
 
         match currentPage.pageElems.get(*currentIndexInPage).unwrap() {
-            PageElem::LeafR(keyWithTxId, value) => Some((keyWithTxId.to_vec(), value.as_ref().map(|v| v.to_vec()))),
-            PageElem::Dummy4PutLeaf(keyWithTxId, value) => Some((keyWithTxId.to_vec(), value.as_ref().map(|v| v.to_vec()))),
+            PageElem::LeafR(keyWithTxId, value) =>
+                Some((keyWithTxId.to_vec(), value.as_ref().map(|v| v.to_vec()))),
+            PageElem::Dummy4PutLeaf(keyWithTxId, value) =>
+                Some((keyWithTxId.to_vec(), value.as_ref().map(|v| v.to_vec()))),
             _ => panic!("impossible")
         }
     }
 
     fn move2Root(&mut self) -> Result<()> {
         let dbHeader = self.db.getHeader();
-        let rootPage = self.db.getPageById(dbHeader.rootPageId, None)?;
+        let rootPage = self.db.getPageById(dbHeader.rootPageId)?;
 
         self.stack.clear();
         self.stack.push((rootPage, 0));
@@ -79,7 +85,11 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
     }
 
     /// 当insert时候会将元素临时的放到node上 先不着急分裂的
-    fn seek0(&mut self, targetKeyWithTxId: &[u8], put: bool, value: Option<&[u8]>) -> Result<()> {
+    fn seek0(&mut self,
+             targetKeyWithTxId: &[u8],
+             value: Option<&[u8]>,
+             put: bool,
+             txIdThreshold2Delete: TxId) -> Result<()> {
         let db = self.db;
 
         if put {
@@ -138,7 +148,9 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
 
                                 *currentIndexInPage = index;
                             }
-                            None => { // delete
+                            None => {
+                                // delete 这种情况也只有可能是相同的tx内先set然后delete
+                                // 不过在changes里就会抵消掉了不会走到这里的
                                 currentPageWriteGuard.pageElems.remove(index);
 
                                 // removed one is the last, index equals with vec current length
@@ -168,31 +180,106 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                             currentPageWriteGuard.pageElems.insert(index, pageElem);
                         }
 
-
                         *currentIndexInPage = index;
                     }
                 }
 
+                // 在当前的leafPage上清洗
+                let targetKeyWithoutTxId = tx::getKeyFromKeyWithTxId(targetKeyWithTxId);
+
+                // 是不是需要到prevPage清理
+                let mut needGo2PrevPage = true;
+
+                // 倒序
+                for index in (0..*currentIndexInPage).rev() {
+                    let keyWithTxIdOfElem = &currentPageWriteGuard.pageElems[index].getKey();
+
+                    let (keyWithoutTxIdOfElem, txIdOfElem) = tx::parseKeyWithTxId(keyWithTxIdOfElem);
+
+                    // 在当前的leafPage倒序上清洗,碰到了纯key不同 || txId 不在清理范围了
+                    // 说明已经到头了,也不需要到prevPage清理
+                    if targetKeyWithoutTxId != keyWithoutTxIdOfElem || txIdOfElem >= txIdThreshold2Delete {
+                        needGo2PrevPage = false;
+                        break;
+                    }
+
+                    // todo 如果pageElems空掉了如何应对 由于remove掉了些pageElem在后续落地时候需要的page数量比原来少了 那多的page如何应对
+                    // todo 如何知道多的page的id
+                    currentPageWriteGuard.pageElems.remove(index);
+                }
+
+                // 当前的leafPage清理掉了,还要不断向前递进清理掉
+                if needGo2PrevPage {
+                    let mut prevPageId = currentPageWriteGuard.header.prevPageId;
+
+                    'a:
+                    loop {
+                        if prevPageId == 0 {
+                            break;
+                        }
+
+                        let prevPage0 = db.getPageById(prevPageId)?;
+                        let mut prevPage = prevPage0.write().unwrap();
+
+                        let mut hasElemRemoved = false;
+
+                        for index in (0..prevPage.pageElems.len()).rev() {
+                            let keyWithTxIdOfElem = &prevPage.pageElems[index].getKey();
+
+                            let (keyWithoutTxIdOfElem, txIdOfElem) = tx::parseKeyWithTxId(keyWithTxIdOfElem);
+
+                            // 在当前的leafPage倒序上清洗,碰到了纯key不同 || txId 不在清理范围了
+                            // 说明已经到头了,也不需要到prevPage清理
+                            if targetKeyWithoutTxId != keyWithoutTxIdOfElem || txIdOfElem >= txIdThreshold2Delete {
+                                break 'a;
+                            }
+
+                            // 不能在这更新pageHeader中的elemCount,因为elemCount是在page的write2Disk()时候明确的,那是在后面调用的
+                            // 这个时候elemCount 和 pageElems.len() 是不对应的
+                            //let prevPageElemCount = prevPage.pageElems.len();
+                            //assert_eq!(prevPage.header.elemCount as usize, prevPageElemCount);
+                            //prevPage.header.elemCount -= 1;
+
+                            prevPage.pageElems.remove(index);
+
+                            hasElemRemoved = true;
+                        }
+
+                        // todo 这样不同寻常的在btree上横向运动如何落地prevPage改动,主要是如何知道prevPage在parentPage的index的 是不是header也要记录的
+                        if hasElemRemoved {
+                            // 能够知道这个page发生了改动,以便让后续对它重写,这样也能更新header中的elemCount了
+                            self.leafPageId2LeafPage.insert(prevPage.header.id, prevPage0.clone());
+                        }
+
+                        prevPageId = prevPage.header.prevPageId;
+                    }
+                }
+
+                //if currentPageWriteGuard.header.indexInParentPage.is_some() {
+                assert_eq!(currentPageWriteGuard.header.indexInParentPage, self.getIndexInParentPage());
+                //}
+
                 // 收集全部收到影响的leaf page
                 // 需要知道有没有经历过历经branch的下钻过程,如果上手便是身为leaf的root page 这样是不对的
-                if self.pageId2PageAndIndexInParent.contains_key(&currentPageId) == false {
-                    self.pageId2PageAndIndexInParent.insert(currentPageId, (currentPage.clone(), self.getIndexInParentPage()));
+                if self.leafPageId2LeafPage.contains_key(&currentPageId) == false {
+                    self.leafPageId2LeafPage.insert(currentPageId, currentPage.clone());
                 }
             } else { // put, 当前是branch
                 let indexResult =
                     currentPageWriteGuard.pageElems.binary_search_by(|pageElem| {
                         match pageElem {
                             PageElem::BranchR(keyWithTxId, _) => keyWithTxId.cmp(&targetKeyWithTxId),
-                            PageElem::Dummy4PutBranch(keyWithTxId, _) |
+                            PageElem::Dummy4PutBranch(keyWithTxId, _, _) |
                             PageElem::Dummy4PutBranch0(keyWithTxId, _) => keyWithTxId.as_slice().cmp(targetKeyWithTxId),
                             _ => panic!("impossible")
                         }
                     });
 
-                // 
                 let index =
                     match indexResult {
-                        // 要insert的key大于当前的branch的最大的key的,意味着需要在末尾追加的
+                        // 要insert的key大于当前的branch的最大的key的,这里是将它落地到了最后1个元素
+                        // 单单这么看的话似乎有问题,按照道理应该是在末尾再添加1个branch elem的
+                        // 然而当read的时候碰到这样的情况时候(Err的index >= pageElems长度)也是读取的最后1个元素
                         Err(index) if index >= currentPageWriteGuard.pageElems.len() => {
                             *currentIndexInPage = index - 1;
                             index - 1
@@ -204,23 +291,22 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                         }
                     };
 
-                currentPageWriteGuard.indexInParentPage = self.getIndexInParentPage();
+                //currentPageWriteGuard.indexInParentPage = self.getIndexInParentPage();
 
                 // 最后时候 就当前的情况添加内容到stack的
                 match currentPageWriteGuard.pageElems.get(index).unwrap() {
                     PageElem::BranchR(_, pageId) | PageElem::Dummy4PutBranch0(_, pageId) => {
-                        let page = db.getPageById(*pageId, Some(currentPage.clone()))?;
+                        let page = db.getPageById(*pageId)?;
                         self.stack.push((page, 0));
                     }
-                    PageElem::Dummy4PutBranch(_, page) => {
-                        self.stack.push((page.clone(), 0));
-                    }
+                    PageElem::Dummy4PutBranch(_, page, _) => self.stack.push((page.clone(), 0)),
                     _ => panic!("impossible")
                 }
 
                 drop(currentPageWriteGuard);
 
-                self.seek0(targetKeyWithTxId, put, value)?;
+                // key 小于 txIdThreshold2Delete 的 ones 可能分布在多个leaf中
+                self.seek0(targetKeyWithTxId, value, put, txIdThreshold2Delete)?;
             }
         } else { // 不是put
             let (currentPage, currentIndexInPage) = self.stackTopMut();
@@ -257,7 +343,7 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                     currentPageReadGuard.pageElems.binary_search_by(|pageElem| {
                         match pageElem {
                             PageElem::BranchR(keyWithTxIdInElem, _) => (*keyWithTxIdInElem).cmp(&targetKeyWithTxId),
-                            PageElem::Dummy4PutBranch(keyWithTxIdInElem, _) |
+                            PageElem::Dummy4PutBranch(keyWithTxIdInElem, _, _) |
                             PageElem::Dummy4PutBranch0(keyWithTxIdInElem, _) => keyWithTxIdInElem.as_slice().cmp(targetKeyWithTxId),
                             _ => panic!("impossible")
                         }
@@ -279,8 +365,8 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                             // index -1 是 小于自己的最大元素的index
                             let prevPageElem = currentPageReadGuard.pageElems.get(index - 1).unwrap();
 
-                            let prevKeyWithoutTxId = tx::extractKeyFromKeyWithTxId(prevPageElem.getKey());
-                            let key0WithoutTxId = tx::extractKeyFromKeyWithTxId(&targetKeyWithTxId);
+                            let prevKeyWithoutTxId = tx::getKeyFromKeyWithTxId(prevPageElem.getKey());
+                            let key0WithoutTxId = tx::getKeyFromKeyWithTxId(&targetKeyWithTxId);
 
                             // 前边(小于自己的最大元素)的key不含txId和自己不含txId相同
                             // 同时意味着prevKey的txId小于key0的txId
@@ -306,7 +392,7 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
 
                     match pageElem {
                         PageElem::BranchR(_, pageId) => *pageId,
-                        PageElem::Dummy4PutBranch(_, page) => {
+                        PageElem::Dummy4PutBranch(_, page, _) => {
                             let page = page.read().unwrap();
                             page.header.id
                         }
@@ -317,10 +403,10 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
 
                 drop(currentPageReadGuard);
 
-                let page = db.getPageById(pageId, Some(currentPage.clone()))?;
+                let page = db.getPageById(pageId)?;
                 self.stack.push((page, 0));
 
-                self.seek0(targetKeyWithTxId, put, value)?;
+                self.seek0(targetKeyWithTxId, value, put, txIdThreshold2Delete)?;
             }
         }
 

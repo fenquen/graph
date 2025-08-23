@@ -28,8 +28,10 @@ impl<'db> Tx<'db> {
 
         let keyWithTxId = appendKeyWithTxId(targetKeyWithoutTxId, self.id);
 
+        // 返回的需要有1个单个的标识来表明是不是exist
+        // 单单的none是不能区分的,因为none可能是真的没有也可能是有只不过value是None
         let scanMemTable =
-            |memTable: &MemTable| -> Option<Vec<u8>> {
+            |memTable: &MemTable| -> (Option<Vec<u8>>, bool) {
                 let memTableCursor = memTable.changes.upper_bound(Bound::Included(&keyWithTxId));
 
                 if let Some((keyWithTxId0, value)) = memTableCursor.peek_prev() {
@@ -37,30 +39,32 @@ impl<'db> Tx<'db> {
 
                     if targetKeyWithoutTxId == originKey {
                         if txId <= self.id {
-                            return value.clone();
+                            return (value.clone(), true);
                         }
                     }
                 }
 
-                None
+                (None, false)
             };
 
         // find in memTables
+        // 需要区分是真的没有,还是说有只不过value是None
         {
             let memTable = self.db.memTable.read().unwrap();
 
-            if let Some(value) = scanMemTable(&*memTable) {
-                return Ok(Some(value));
+            if let (value, true) = scanMemTable(&*memTable) {
+                return Ok(value);
             }
         }
 
         // find in immutableMemTables in reverse order
+        // 需要区分是真的没有,还是说有只不过value是None
         {
             let immutableMemTables = self.db.immutableMemTables.read().unwrap();
 
             for immutableMemTable in immutableMemTables.iter().rev() {
-                if let Some(value) = scanMemTable(immutableMemTable) {
-                    return Ok(Some(value));
+                if let (value, true) = scanMemTable(immutableMemTable) {
+                    return Ok(value);
                 }
             }
         }
@@ -68,7 +72,7 @@ impl<'db> Tx<'db> {
         // find in lower level
         let mut cursor = self.createCursor()?;
 
-        cursor.seek(targetKeyWithoutTxId, false, None)?;
+        cursor.seek(targetKeyWithoutTxId, None, false, 0)?;
 
         if let Some((keyWithTxId, value)) = cursor.currentKV() {
             let (keyWithoutTxId, keyTxId) = parseKeyWithTxId(keyWithTxId.as_slice());
@@ -135,6 +139,11 @@ impl<'db> Tx<'db> {
             commitResult?;
         }
 
+        {
+            let mut infightingTxIds = self.db.flyingTxIds.write().unwrap();
+            infightingTxIds.remove(&self.id);
+        }
+
         Ok(())
     }
 
@@ -150,7 +159,7 @@ pub(crate) fn parseKeyWithTxId(keyWithTxId: &[u8]) -> (&[u8], TxId) {
     (originKey, TxId::from_be_bytes(*txId))
 }
 
-pub(crate) fn extractKeyFromKeyWithTxId(keyWithTxId: &[u8]) -> &[u8] {
+pub(crate) fn getKeyFromKeyWithTxId(keyWithTxId: &[u8]) -> &[u8] {
     let (key, _) = parseKeyWithTxId(keyWithTxId);
     key
 }

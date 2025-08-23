@@ -19,26 +19,29 @@ pub(crate) const LEAF_ELEM_META_SIZE: usize = size_of::<PageElemMetaLeaf>();
 pub(crate) const LEAF_ELEM_OVERFLOW_META_SIZE: usize = size_of::<PageElemMetaLeafOverflow>();
 pub(crate) const BRANCH_ELEM_META_SIZE: usize = size_of::<PageElemMetaBranch>();
 
-pub(crate) static PAGE_HEADER_DUMMY_BRANCH: PageHeader = PageHeader {
-    id: 0,
-    flags: PAGE_FLAG_DUMMY | PAGE_FLAG_BRANCH,
-    elemCount: 0,
-    nextOverflowPageId: 0,
-};
-
-pub(crate) static PAGE_HEADER_DUMMY_LEAF: PageHeader = PageHeader {
-    id: 0,
-    flags: PAGE_FLAG_DUMMY | PAGE_FLAG_LEAF,
-    elemCount: 0,
-    nextOverflowPageId: 0,
-};
-
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub(crate) struct PageHeader {
     pub(crate) id: PageId,
+
+    /// prevPageId和nextPageId 如果是0可以起到none效果
+    /// 因为id是0的那个page是不参与数据保存的
+    /// 而且db刚init时候的rootPageId是1
+    pub(crate) prevPageId: PageId,
+    pub(crate) nextPageId: PageId,
+
+    pub(crate) parentPageId: PageId,
+
+    /// none 说明db当前只有1个leaf page
+    pub(crate) indexInParentPage: Option<usize>,
+
     pub(crate) flags: u16,
+
+    /// 如果是0的话 可能是1个新生成的
+    /// 也有可能是因为和别的page合并空掉了
+    /// 也有可能是因为delete而变空了的
     pub(crate) elemCount: u16,
+
     pub(crate) nextOverflowPageId: PageId,
 }
 
