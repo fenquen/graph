@@ -19,6 +19,7 @@ use std::sync::{mpsc, Arc, Mutex, RwLock, RwLockWriteGuard, Weak};
 use std::{fs, mem, thread, u64, usize};
 use std::mem::MaybeUninit;
 use std::thread::JoinHandle;
+use crate::lru_cache::LruCache;
 use crate::mem_table_r::MemTableR;
 use crate::utils::DEFAULT_PAGE_SIZE;
 
@@ -33,6 +34,9 @@ pub(crate) const DEFAULT_COMMIT_REQ_CHAN_BUFFER_SIZE: usize = 1024;
 pub(crate) const DEFAULT_MEM_TABLE_R_CHAN_BUFFER_SIZE: usize = 1024;
 pub(crate) const DEFAULT_MEM_TABLE_MAX_SIZE: usize = 1024;
 pub(crate) const DEFAULT_IMMUTABLE_MEM_TABLE_COUNT: usize = 1;
+pub(crate) const DEFAULT_PAGE_CACHE_SIZE: usize = 512;
+
+pub(crate) const PAGE_CACHE_PARTITION_COUNT: usize = 64;
 
 pub(crate) const BLOCK_FILE_EXTENSION: &str = "block";
 pub(crate) const FIRST_BLOCK_FILE_NAME: &str = "0.block";
@@ -61,6 +65,8 @@ pub struct DBOption {
 
     /// used only when init
     pub blockSize: usize,
+
+    pub pageCacheSize: usize,
 }
 
 impl Default for DBOption {
@@ -75,6 +81,7 @@ impl Default for DBOption {
             pageFillPercentAfterSplit: 0.7,
             pageSize: DEFAULT_PAGE_SIZE,
             blockSize: DEFAULT_BLOCK_SIZE,
+            pageCacheSize: DEFAULT_PAGE_CACHE_SIZE,
         }
     }
 }
@@ -90,7 +97,9 @@ pub struct DB {
     /// sorted by block file number
     blockFileFds: RwLock<Vec<RawFd>>,
 
+    #[deprecated]
     pageId2Page: DashMap<PageId, Arc<RwLock<Page>>>,
+    pageCaches: Vec<RwLock<LruCache>>,
 
     pub(crate) memTable: RwLock<MemTable>,
     pub(crate) immutableMemTables: RwLock<Vec<MemTable>>,
@@ -164,7 +173,7 @@ impl DB {
         // 当启动的时候总是会新生成1个作为当前的immutableMemTable
         let memTable = {
             let mutableMemTableFileNum =
-                immutableMemTables.last().map_or_else(|| 0, |m| m.memTableFileNum + 1);
+                immutableMemTables.last().map_or_else(|| 0, |memTable| memTable.memTableFileNum + 1);
 
             let mutableMemTableFilePath =
                 Path::join(dbOption.dirPath.as_ref(), format!("{}.{}", mutableMemTableFileNum, MEM_TABLE_FILE_EXTENSION));
@@ -178,8 +187,10 @@ impl DB {
         let (memTableRSender, memTableRReceiver) =
             mpsc::sync_channel::<MemTableR>(dbOption.memTableRChanBufSize);
 
+        let pageCaches = (0..PAGE_CACHE_PARTITION_COUNT).map(|_| RwLock::new(LruCache::new(dbOption.pageCacheSize))).collect::<Vec<_>>();
+
         let availablePageSizeAfterSplit = f64::ceil(dbHeader.pageSize as f64 * dbOption.pageFillPercentAfterSplit) as usize;
-        
+
         let db =
             Arc::new(
                 DB {
@@ -191,6 +202,7 @@ impl DB {
                     pageIdCounter: AtomicU64::new(dbHeader.lastPageId + 1),
                     blockFileFds: RwLock::new(blockFileFds),
                     pageId2Page: DashMap::new(),
+                    pageCaches,
                     memTable: RwLock::new(memTable),
                     immutableMemTables: RwLock::new(immutableMemTables),
                     commitReqSender,
@@ -283,7 +295,9 @@ impl DB {
     pub(crate) fn getPageById(&self, pageId: PageId) -> Result<Arc<RwLock<Page>>> {
         let dbHeader = self.getHeader();
 
-        if let Some(page) = self.pageId2Page.get(&pageId) {
+        let mut pageCache = self.pageCaches[pageId as usize % PAGE_CACHE_PARTITION_COUNT].write().unwrap();
+
+        if let Some(page) = pageCache.get(pageId) {
             return Ok(page.clone());
         }
 
@@ -300,11 +314,10 @@ impl DB {
             utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize))?
         };
 
-        let mut page = Page::try_from(pageMmapMut)?;
-        //page.parentPage = parentPage;
+        let page = Page::try_from(pageMmapMut)?;
 
         let page = Arc::new(RwLock::new(page));
-        self.pageId2Page.insert(pageId, page.clone());
+        pageCache.set(pageId, page.clone());
 
         Ok(page)
     }
@@ -332,7 +345,7 @@ impl DB {
 
         // 得到这个page应该是在哪个blockFile
         // blockFile可能需新建也能依然有了
-        let blockFileNum = (dbHeader.pageSize as usize * pageId as usize) / dbHeader.blockSize as usize;
+        let blockFileNum = (dbHeader.pageSize * pageId as usize) / dbHeader.blockSize;
 
         let mut blockFileFds = self.blockFileFds.write().unwrap();
 
@@ -357,7 +370,7 @@ impl DB {
 
         Ok(Page {
             //parentPage: None,
-           // indexInParentPage: None,
+            // indexInParentPage: None,
             mmapMut: pageMmap,
             header: pageHeader,
             pageElems: vec![],
@@ -439,12 +452,12 @@ impl DB {
         page0Header.flags = page_header::PAGE_FLAG_META;
 
         // transmute as pageHeader in page1
-        let page1Header: &mut PageHeader = utils::slice2RefMut(&mut first2PageSpace[pageSize as usize..]);
+        let page1Header: &mut PageHeader = utils::slice2RefMut(&mut first2PageSpace[pageSize..]);
         page1Header.id = 1;
         page1Header.flags = page_header::PAGE_FLAG_LEAF;
 
         // idea from bbolt,用来计算占用的数量而不是对应的block的index的
-        let blockCount = ((pageSize * 2) as usize + dbHeader.blockSize as usize - 1) / dbHeader.blockSize as usize;
+        let blockCount = ((pageSize * 2) + dbHeader.blockSize - 1) / dbHeader.blockSize;
 
         // 生成各个需要的block对应文件
         for blockFileNum in 0..blockCount {
@@ -456,9 +469,9 @@ impl DB {
             let data2Write =
                 // last part
                 if blockFileNum == blockCount - 1 {
-                    &first2PageSpace[blockFileNum * dbHeader.blockSize as usize..]
+                    &first2PageSpace[blockFileNum * dbHeader.blockSize..]
                 } else {
-                    &first2PageSpace[blockFileNum * dbHeader.blockSize as usize..(blockFileNum + 1) * dbHeader.blockSize as usize]
+                    &first2PageSpace[blockFileNum * dbHeader.blockSize..(blockFileNum + 1) * dbHeader.blockSize]
                 };
 
             let writtenSize = blockFile.write(data2Write)?;

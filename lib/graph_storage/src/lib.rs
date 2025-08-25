@@ -20,6 +20,7 @@ mod cursor;
 mod mem_table;
 mod page_elem;
 mod mem_table_r;
+mod lru_cache;
 
 #[cfg(test)]
 mod tests {

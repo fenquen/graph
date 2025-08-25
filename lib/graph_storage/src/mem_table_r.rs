@@ -144,7 +144,7 @@ pub(crate) fn processMemTableRs(db: &DB, memTableRs: Vec<MemTableR>) -> Result<(
 fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
               parentPagesNeedRewrite: &mut HashMap<PageId, Arc<RwLock<Page>>>) -> Result<()> {
     // 用来收集因为空间利用率太低合并受影响的page
-    let mut mergedPages = Vec::<_>::new();
+    let mut pagesInfluencedByMerge = Vec::<_>::new();
 
     for (writeDestPage0) in writeDestPages.iter() {
         let mut writeDestPage = writeDestPage0.write().unwrap();
@@ -364,7 +364,7 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
                 //let mut currentPage = NonNull::new(writeDestPage as *mut Page).unwrap();
                 let mut pageSizeAccumulated = writeDestPage.diskSize();
 
-                mergedPages.push(writeDestPage0.clone());
+                pagesInfluencedByMerge.push(writeDestPage0.clone());
 
                 loop {
                     let nextPage0 = db.getPageById(nextPageId)?;
@@ -376,12 +376,12 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
                         break;
                     }
 
-                    // next page 上的elem迁移到writeDestPage上
+                    // next page 上的elem全部迁移到writeDestPage上
                     for pageElemInNextPage in nextPage.pageElems.drain(..) {
                         writeDestPage.pageElems.push(pageElemInNextPage);
                     }
 
-                    mergedPages.push(nextPage0.clone());
+                    pagesInfluencedByMerge.push(nextPage0.clone());
 
                     // 两边的elemCount 更改
                     // 这2个page都需要write 如下可以通过page的write2Disk()实现
@@ -428,8 +428,8 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
         writeDestPage.msync()?;
     }
 
-    if mergedPages.is_empty() == false {
-        writePages(db, mergedPages, parentPagesNeedRewrite)?;
+    if pagesInfluencedByMerge.is_empty() == false {
+        writePages(db, pagesInfluencedByMerge, parentPagesNeedRewrite)?;
     }
 
     Ok(())
