@@ -5,6 +5,5 @@ edition = "2021"
 
 [dependencies]
 libc = {version = "0.2"}
-anyhow = "1.0"
-memmap2 = "0.9.7"
-dashmap = "6.1.0"
+anyhow = "1"
+memmap2 = "0"

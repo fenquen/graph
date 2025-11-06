@@ -5,9 +5,8 @@ use crate::tx::{CommitReq, Tx};
 use crate::types::{PageId, TxId};
 use crate::{mem_table_r, page_header, utils};
 use anyhow::Result;
-use dashmap::DashMap;
 use memmap2::{Advice, MmapMut};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -16,11 +15,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as atomic_ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{mpsc, Arc, Mutex, RwLock, RwLockWriteGuard, Weak};
-use std::{fs, mem, thread, u64, usize};
+use std::{fs, mem, thread};
 use std::mem::MaybeUninit;
 use std::thread::JoinHandle;
 use crate::lru_cache::LruCache;
 use crate::mem_table_r::MemTableR;
+use crate::page_allocator::{PageAllocatorWrapper};
 use crate::utils::DEFAULT_PAGE_SIZE;
 
 const MAGIC: usize = 0xCAFEBABE;
@@ -41,6 +41,12 @@ pub(crate) const PAGE_CACHE_PARTITION_COUNT: usize = 64;
 pub(crate) const BLOCK_FILE_EXTENSION: &str = "block";
 pub(crate) const FIRST_BLOCK_FILE_NAME: &str = "0.block";
 pub(crate) const MEM_TABLE_FILE_EXTENSION: &str = "mem";
+
+pub(crate) const PAGE_ALLOCATOR_FILE_NAME: &str = "page_allocator";
+
+/// 默认起始的时候最多有2^20个page,对应4GB容量
+/// 分配page的时候分配的是连续的多个page,且分配的page数量是2的幂次方的
+pub(crate) const INITIAL_PAGE_COUNT_ORDER: u8 = 20;
 
 pub struct DBOption {
     pub dirPath: String,
@@ -92,17 +98,17 @@ pub struct DB {
     dbHeaderMmap: MmapMut,
     lock: Mutex<()>,
     txIdCounter: AtomicU64,
-    pageIdCounter: AtomicU64,
+    // pageIdCounter: AtomicU64,
 
     /// sorted by block file number
     blockFileFds: RwLock<Vec<RawFd>>,
 
-    #[deprecated]
-    pageId2Page: DashMap<PageId, Arc<RwLock<Page>>>,
     pageCaches: Vec<RwLock<LruCache>>,
 
     pub(crate) memTable: RwLock<MemTable>,
     pub(crate) immutableMemTables: RwLock<Vec<MemTable>>,
+
+    pub(crate) pageAllocator: RwLock<PageAllocatorWrapper>,
 
     pub(crate) commitReqSender: SyncSender<CommitReq>,
     pub(crate) memTableRSender: SyncSender<MemTableR>,
@@ -112,6 +118,7 @@ pub struct DB {
 
     pub(crate) flyingTxIds: RwLock<BTreeSet<TxId>>,
 
+    /// 当page因为要容纳的内容太多而分裂为多个后,分裂后的各个新page最多可以
     pub(crate) availablePageSizeAfterSplit: usize,
 }
 
@@ -160,9 +167,9 @@ impl DB {
         let dbHeader = utils::slice2RefMut::<DBHeader>(&dbHeaderMmap);
         dbHeader.verify()?;
 
-        if shouldInit { // init时候会生成pageId是0和1的两个page的
-            dbHeader.lastPageId = 1;
-        }
+        /* if shouldInit { // init时候会生成pageId是0和1的两个page的
+             //  dbHeader.lastPageId = 1;
+         }*/
 
         // memTableMaxSize要是实际的pageSize整数
         dbOption.memTableMaxSize = utils::roundUp2Multiple(dbOption.memTableMaxSize, dbHeader.pageSize);
@@ -170,7 +177,7 @@ impl DB {
         // 启动的时候将已经存在的memTable文件都视为immutable的
         let (blockFileFds, immutableMemTables) = DB::scanDir(dbHeader, &dbOption)?;
 
-        // 当启动的时候总是会新生成1个作为当前的immutableMemTable
+        // 当启动的时候总是会新生成1个作为当前的mutableMemTable
         let memTable = {
             let mutableMemTableFileNum =
                 immutableMemTables.last().map_or_else(|| 0, |memTable| memTable.memTableFileNum + 1);
@@ -180,6 +187,11 @@ impl DB {
 
             MemTable::open(mutableMemTableFilePath, dbOption.memTableMaxSize)?
         };
+
+        // pageAllocator
+        let pageAllocator =
+            PageAllocatorWrapper::open(Path::join(dbOption.dirPath.as_ref(), PAGE_ALLOCATOR_FILE_NAME),
+                                       INITIAL_PAGE_COUNT_ORDER)?;
 
         let (commitReqSender, commitReqReceiver) =
             mpsc::sync_channel::<CommitReq>(dbOption.commitReqChanBufSize);
@@ -199,12 +211,12 @@ impl DB {
                     lock: Mutex::new(()),
                     // 接着原来的保存在dbHeader的txId
                     txIdCounter: AtomicU64::new(dbHeader.lastTxId + 1),
-                    pageIdCounter: AtomicU64::new(dbHeader.lastPageId + 1),
+                    // pageIdCounter: AtomicU64::new(dbHeader.lastPageId + 1),
                     blockFileFds: RwLock::new(blockFileFds),
-                    pageId2Page: DashMap::new(),
                     pageCaches,
                     memTable: RwLock::new(memTable),
                     immutableMemTables: RwLock::new(immutableMemTables),
+                    pageAllocator: RwLock::new(pageAllocator),
                     commitReqSender,
                     memTableRSender,
                     joinHandleCommitReqs: MaybeUninit::<JoinHandle<()>>::uninit(),
@@ -213,6 +225,17 @@ impl DB {
                     availablePageSizeAfterSplit,
                 }
             );
+
+        if shouldInit {
+            // page0 是用来保存dbheader的 不对外使用 需要保留
+            {
+                let mut pageAllocator = db.pageAllocator.write().unwrap();
+                pageAllocator.allocate(dbHeader.pageSize, dbHeader.pageSize);
+            }
+
+            // page1 是默认起始的rootPage 且当时是leaf的
+            db.allocatePagesByCount(1, dbHeader.pageSize, page_header::PAGE_FLAG_LEAF)?;
+        }
 
         // set reference to db
         {
@@ -227,12 +250,17 @@ impl DB {
                     memTable.db = Arc::downgrade(&db);
                 }
             }
+
+            {
+                let mut pageAllocator = db.pageAllocator.write().unwrap();
+                pageAllocator.db = Arc::downgrade(&db);
+            }
         }
 
         // 事务提交处理的thread
         let dbClone = Arc::downgrade(&db);
         let joinHandleCommitReqs =
-            thread::Builder::new().name("thread_process_commit_reqs".to_string()).spawn(move || {
+            thread::Builder::new().name("process_commit_reqs".to_string()).spawn(move || {
                 DB::processCommitReqs(dbClone, commitReqReceiver);
             })?;
 
@@ -240,7 +268,7 @@ impl DB {
         let dbClone = Arc::downgrade(&db);
         let a = db.dbOption.immutableMemTableCount;
         let joinHandleMemTableRs =
-            thread::Builder::new().name("thread_process_mem_table_rs".to_string()).spawn(move || {
+            thread::Builder::new().name("process_mem_table_rs".to_string()).spawn(move || {
                 DB::processMemTableRs(dbClone, memTableRReceiver, a);
             })?;
 
@@ -291,11 +319,11 @@ impl DB {
         utils::slice2RefMut(&self.dbHeaderMmap)
     }
 
-    // todo 完成 感觉函数这样的传参数相当有问题,非得要外部已经知道了它的parentPage是谁了 其实parentPage是哪个应该是page固有信息的
+    /// 这个其实有个隐含的前提 对应的page得是已经创建过的了(调用过了buildPageById)不是空白的
     pub(crate) fn getPageById(&self, pageId: PageId) -> Result<Arc<RwLock<Page>>> {
         let dbHeader = self.getHeader();
 
-        let mut pageCache = self.pageCaches[pageId as usize % PAGE_CACHE_PARTITION_COUNT].write().unwrap();
+        let mut pageCache = self.locateLru(pageId).write().unwrap();
 
         if let Some(page) = pageCache.get(pageId) {
             return Ok(page.clone());
@@ -303,10 +331,8 @@ impl DB {
 
         // todo 需要java的获取单例的double check套路
         let targetBlockFileFd = {
-            let blockNum = (dbHeader.pageSize as u64 * pageId) / dbHeader.blockSize as u64;
-
             let blockFileFds = self.blockFileFds.read().unwrap();
-            blockFileFds.get(blockNum as usize).unwrap().clone()
+            blockFileFds.get(self.blockFileNum(pageId)).unwrap().clone()
         };
 
         let pageMmapMut = {
@@ -314,12 +340,27 @@ impl DB {
             utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize))?
         };
 
-        let page = Page::try_from(pageMmapMut)?;
+        let page = Page::restore(self, pageMmapMut)?;
+
+        // 对应的page得是已经创建过的了(调用过了buildPageById)不是空白的
+        if page.header.id == page_header::PAGE_ID_INVALID {
+            throw!(format!("page [id:{}] is not valid",pageId));
+        }
 
         let page = Arc::new(RwLock::new(page));
         pageCache.set(pageId, page.clone());
 
         Ok(page)
+    }
+
+    #[inline]
+    fn locateLru(&self, pageId: PageId) -> &RwLock<LruCache> {
+        &self.pageCaches[pageId as usize % PAGE_CACHE_PARTITION_COUNT]
+    }
+
+    fn blockFileNum(&self, pageId: PageId) -> usize {
+        let dbHeader = self.getHeader();
+        (dbHeader.pageSize * pageId as usize) / dbHeader.blockSize
     }
 
     pub(crate) fn allocateTxId(&self) -> Result<TxId> {
@@ -337,15 +378,34 @@ impl DB {
         Ok(txId)
     }
 
+    /*#[deprecated]
     pub(crate) fn allocateNewPage(&self, flags: u16) -> Result<Page> {
+        let pageId = self.allocatePageId()?;
+        self.buildPageById(pageId, flags)
+    }
+
+    fn allocatePageId(&self) -> Result<PageId> {
+        let pageId = self.pageIdCounter.fetch_add(1, atomic_ordering::SeqCst);
+
+        let dbHeader = self.getHeaderMut();
+
+        // pageId increase
+        {
+            let lock = self.lock.lock().unwrap();
+            dbHeader.lastPageId = pageId;
+            self.dbHeaderMmap.flush()?;
+        }
+
+        Ok(pageId)
+    }*/
+
+    fn buildPageById(&self, pageId: PageId, flags: u16) -> Result<Page> {
         // 需要blockSize 和 pageSize
         let dbHeader = self.getHeader();
 
-        let pageId = self.allocatePageId()?;
-
         // 得到这个page应该是在哪个blockFile
         // blockFile可能需新建也能依然有了
-        let blockFileNum = (dbHeader.pageSize * pageId as usize) / dbHeader.blockSize;
+        let blockFileNum = self.blockFileNum(pageId);
 
         let mut blockFileFds = self.blockFileFds.write().unwrap();
 
@@ -364,11 +424,21 @@ impl DB {
             utils::mmapFdMut(targetBlockFileFd, Some(pageHeaderOffsetInBlock), Some(dbHeader.pageSize))?
         };
 
-        let pageHeader: &mut PageHeader = utils::slice2RefMut(&mut pageMmap);
-        pageHeader.id = pageId;
-        pageHeader.flags = flags;
+        let pageHeader = {
+            let pageHeader: &mut PageHeader = utils::slice2RefMut(&mut pageMmap);
+
+            /*if pageHeader.flags != page_header::PAGE_FLAG_INVALID {
+                throw!(format!("page [id:{}] is not valid",pageId));
+            }*/
+
+            pageHeader.id = pageId;
+            pageHeader.flags = flags;
+
+            pageHeader
+        };
 
         Ok(Page {
+            db: unsafe { mem::transmute(self) },
             //parentPage: None,
             // indexInParentPage: None,
             mmapMut: pageMmap,
@@ -378,22 +448,45 @@ impl DB {
             //keyMax: Default::default(),
             //childPages: None,
             additionalPages: vec![],
+            replacement: None,
         })
     }
 
-    fn allocatePageId(&self) -> Result<PageId> {
-        let pageId = self.pageIdCounter.fetch_add(1, atomic_ordering::SeqCst);
+    #[inline]
+    pub(crate) fn allocatePagesByCount(&self,
+                                       expectCount: usize, pageSize: usize,
+                                       flags: u16) -> Result<Vec<Page>> {
+        self.allocatePagesBySize(pageSize * expectCount, pageSize, flags)
+    }
 
-        let dbHeader = self.getHeaderMut();
+    /// 要传入pageSize的原因是 如果leafPage会分裂的话,新分裂生成的各个leafPage不能使用全部的pageSize的
+    pub(crate) fn allocatePagesBySize(&self,
+                                      expectSize: usize, pageSize: usize,
+                                      flags: u16) -> Result<Vec<Page>> {
+        let mut pageAllocator = self.pageAllocator.write().unwrap();
 
-        // pageId increase
-        {
-            let lock = self.lock.lock().unwrap();
-            dbHeader.lastPageId = pageId;
-            self.dbHeaderMmap.flush()?;
+        let (mut pageId, pageCount) = pageAllocator.allocate(expectSize, pageSize).unwrap();
+
+        let mut pages = Vec::with_capacity(pageCount);
+
+        for _ in 0..pageCount {
+            pages.push(self.buildPageById(pageId, flags)?);
+            pageId += 1;
         }
 
-        Ok(pageId)
+        Ok(pages)
+    }
+
+    // todo 对page的free涉及到多个点: 数据文件对应的 allocator lrucache
+    pub(crate) fn free(&self, page: &mut Page) {
+        page.invalidate();
+
+        let mut pageAllocator = self.pageAllocator.write().unwrap();
+        pageAllocator.free(page.header.id, 1);
+
+        // 直接从lru给干掉
+        let mut pageCache = self.locateLru(page.header.id).write().unwrap();
+        pageCache.remove(page.header.id);
     }
 
     fn verifyDirPath(dirPath: impl AsRef<Path> + Display) -> Result<()> {
@@ -426,6 +519,7 @@ impl DB {
         Ok(())
     }
 
+    // page0用来保存dbHeader,page1是起始的用来保存data的,它们都保存在blockFile0
     fn init(dbOption: &DBOption) -> Result<()> {
         // 确保用户自定义的pageSize是os的pageSize整数
         let pageSize = utils::roundUp2Multiple(dbOption.pageSize, utils::getOsPageSize());
@@ -483,6 +577,7 @@ impl DB {
         Ok(())
     }
 
+    /// 扫描data目录,对已存在的mem文件需要还原
     fn scanDir(dbHeader: &DBHeader, dbOption: &DBOption) -> Result<(Vec<RawFd>, Vec<MemTable>)> {
         let mut blockFileFds = Vec::new();
         let mut immutableMemTables = Vec::new();
@@ -606,7 +701,7 @@ pub(crate) struct DBHeader {
     pub pageSize: usize,
     pub blockSize: usize,
     pub lastTxId: TxId,
-    pub lastPageId: PageId,
+    // pub lastPageId: PageId,
     pub rootPageId: PageId,
 }
 

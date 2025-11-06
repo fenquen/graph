@@ -75,7 +75,7 @@ impl<'db> Tx<'db> {
         cursor.seek(targetKeyWithoutTxId, None, false, 0)?;
 
         if let Some((keyWithTxId, value)) = cursor.currentKV() {
-            let (keyWithoutTxId, keyTxId) = parseKeyWithTxId(keyWithTxId.as_slice());
+            let (keyWithoutTxId, _) = parseKeyWithTxId(keyWithTxId.as_slice());
 
             if keyWithoutTxId == targetKeyWithoutTxId {
                 let (_, keyTxId) = parseKeyWithTxId(keyWithTxId.as_slice());

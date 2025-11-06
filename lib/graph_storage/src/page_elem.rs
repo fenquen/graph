@@ -2,8 +2,6 @@
  * Copyright (c) 2024-2025 fenquen(https://github.com/fenquen), licensed under Apache 2.0
  */
 
-use std::sync::{Arc, RwLock};
-use crate::page::Page;
 use crate::{page_header, utils};
 use crate::page_header::{PageElemMetaBranch, PageElemMetaLeaf, PageElemMetaLeafOverflow, PageHeader};
 use crate::types::PageId;
@@ -16,21 +14,21 @@ use crate::types::PageId;
 pub(crate) enum PageElem<'a> {
     /// key is with txId
     LeafR(&'a [u8], Option<&'a [u8]>),
+    LeafRClone(Vec<u8>, Option<Vec<u8>>),
     Dummy4PutLeaf(Vec<u8>, Option<Vec<u8>>),
 
     /// (key, value在文件中的位置的)
     LeafOverflowR(&'a [u8], usize),
+    LeafOverflowRClone(Vec<u8>, usize),
     /// (key, pos, val)
     Dummy4PutLeafOverflow(Vec<u8>, usize, Vec<u8>),
 
-    // todo BranchR内部保存的是pageId,通过getPageById后Arc<Page>会1直被dashmap持有不会释放的
     /// branch体系的key不应含有txId
     BranchR(&'a [u8], PageId),
+    BranchRClone(Vec<u8>, PageId),
     /// 是不是可以将page的header给暴露出来到tuple中,这样的话可以直接简单得到page的id
     /// 它含有的page是从0到有生成出来的 不是通过getPageById的
-    Dummy4PutBranch(Vec<u8>, Arc<RwLock<Page>>, &'static mut PageHeader),
-    #[deprecated]
-    Dummy4PutBranch0(Vec<u8>, PageId),
+    Dummy4PutBranch(Vec<u8>, PageHeader),
 }
 
 impl<'a> PageElem<'a> {
@@ -71,6 +69,7 @@ impl<'a> PageElem<'a> {
 
                 Ok(keySlice)
             }
+            PageElem::LeafRClone(k, v) |
             PageElem::Dummy4PutLeaf(k, v) => {
                 let (pageElemMetaSlice, kvSlice) = dest.split_at_mut(page_header::LEAF_ELEM_META_SIZE);
 
@@ -104,6 +103,7 @@ impl<'a> PageElem<'a> {
 
                 Ok(keySlice)
             }
+            PageElem::LeafOverflowRClone(k, valPos) |
             PageElem::Dummy4PutLeafOverflow(k, valPos, _) => {
                 let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::LEAF_ELEM_OVERFLOW_META_SIZE);
 
@@ -131,7 +131,7 @@ impl<'a> PageElem<'a> {
 
                 Ok(keySlice)
             }
-            PageElem::Dummy4PutBranch(k, childPage, childPageHeader) => {
+            PageElem::Dummy4PutBranch(k, childPageHeader) => {
                 let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::BRANCH_ELEM_META_SIZE);
 
                 let pageElemMetaBranch: &mut PageElemMetaBranch = utils::slice2RefMut(pageElemMetaSlice);
@@ -146,17 +146,7 @@ impl<'a> PageElem<'a> {
 
                 Ok(keySlice)
             }
-            PageElem::Dummy4PutBranch0(k, pageId) => {
-                let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::BRANCH_ELEM_META_SIZE);
-
-                let pageElemMetaBranch: &mut PageElemMetaBranch = utils::slice2RefMut(pageElemMetaSlice);
-                pageElemMetaBranch.keySize = k.len() as u16;
-                pageElemMetaBranch.pageId = *pageId;
-
-                keySlice.copy_from_slice(k);
-
-                Ok(keySlice)
-            }
+            _ => unimplemented!(),
         }
     }
 
@@ -168,34 +158,53 @@ impl<'a> PageElem<'a> {
                     k.len() +
                     v.map_or_else(|| { 0 }, |v| v.len())
             }
+            PageElem::LeafRClone(k, v) |
             PageElem::Dummy4PutLeaf(k, v) => {
                 page_header::LEAF_ELEM_META_SIZE +
                     k.len() +
-                    if let Some(v) = v {
-                        v.len()
-                    } else {
-                        0
-                    }
+                    v.as_ref().map_or_else(|| { 0 }, |v| v.len())
             }
             //
             PageElem::LeafOverflowR(k, _) => page_header::LEAF_ELEM_OVERFLOW_META_SIZE + k.len() + size_of::<usize>(),
+            PageElem::LeafOverflowRClone(k, _) |
             PageElem::Dummy4PutLeafOverflow(k, _, _) => page_header::LEAF_ELEM_OVERFLOW_META_SIZE + k.len() + size_of::<usize>(),
             //
             PageElem::BranchR(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(), // + size_of::<PageId>(),
-            PageElem::Dummy4PutBranch(k, _, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(), // + size_of::<PageId>(),
-            PageElem::Dummy4PutBranch0(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(), // + size_of::<PageId>(),
+            PageElem::BranchRClone(k, _) |
+            PageElem::Dummy4PutBranch(k, _) => page_header::BRANCH_ELEM_META_SIZE + k.len(), // + size_of::<PageId>(),
+            //_ => unimplemented!(),
         }
     }
 
     pub(crate) fn getKey(&self) -> &[u8] {
         match self {
             PageElem::LeafR(k, _) => k,
+            PageElem::LeafRClone(k, _) => k,
             PageElem::Dummy4PutLeaf(k, _) => k,
             PageElem::LeafOverflowR(k, _) => k,
+            PageElem::LeafOverflowRClone(k, _) => k,
             PageElem::Dummy4PutLeafOverflow(k, _, _) => k,
             PageElem::BranchR(k, _) => k,
-            PageElem::Dummy4PutBranch(k, _, _) => k,
-            PageElem::Dummy4PutBranch0(k, _) => k,
+            PageElem::BranchRClone(k, _) => k,
+            PageElem::Dummy4PutBranch(k, _) => k,
+            //_ => unimplemented!(),
+        }
+    }
+}
+
+impl<'a> Clone for PageElem<'a> {
+    fn clone(&self) -> Self {
+        match self {
+            PageElem::LeafR(key, value) => PageElem::LeafRClone(key.to_vec(), value.map(|v| v.to_vec())),
+            PageElem::LeafRClone(key, value) => PageElem::LeafRClone(key.clone(), value.clone()),
+            PageElem::Dummy4PutLeaf(key, value) => PageElem::Dummy4PutLeaf(key.clone(), value.clone()),
+            PageElem::LeafOverflowR(key, pos) => PageElem::LeafOverflowRClone(key.to_vec(), pos.clone()),
+            PageElem::LeafOverflowRClone(key, pos) => PageElem::LeafOverflowRClone(key.clone(), pos.clone()),
+            PageElem::Dummy4PutLeafOverflow(key, pos, value) => PageElem::Dummy4PutLeafOverflow(key.clone(), pos.clone(), value.clone()),
+            PageElem::BranchR(key, pageId) => PageElem::BranchRClone(key.to_vec(), pageId.clone()),
+            PageElem::BranchRClone(key, pageId) => PageElem::BranchRClone(key.clone(), pageId.clone()),
+            PageElem::Dummy4PutBranch(key, pageHeader) => PageElem::Dummy4PutBranch(key.clone(), pageHeader.clone()),
+            //_ => unimplemented!(),
         }
     }
 }

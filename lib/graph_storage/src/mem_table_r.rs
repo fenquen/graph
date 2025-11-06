@@ -3,7 +3,8 @@
  */
 
 use std::collections::HashMap;
-use std::mem;
+use std::{mem, ptr};
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::DerefMut;
 use std::os::fd::RawFd;
 use std::sync::{Arc, RwLock};
@@ -85,7 +86,7 @@ pub(crate) fn processMemTableRs(db: &DB, memTableRs: Vec<MemTableR>) -> Result<(
 
     let mut cursor = Cursor::new(db, None)?;
 
-    // 如果某个key对应的txId a 不在infightingTxIds中 且 对应的value是None
+    // 如果某个key对应的txId "a" 不在infightingTxIds中 且 对应的value是None
     // 那么这个key的全部小于等于a体系的都可以干掉了
     for memTableR in memTableRs.iter() {
         for (key, value) in memTableR.iter() {
@@ -132,6 +133,12 @@ pub(crate) fn processMemTableRs(db: &DB, memTableRs: Vec<MemTableR>) -> Result<(
         writePages(db, page2IndexInParentPage, &mut involvedParentPages)?;
     }
 
+    // page的allocator pattern 持久化
+    {
+        let mut pageAllocator = db.pageAllocator.write().unwrap();
+        pageAllocator.refresh();
+    }
+
     // memTableRs中的元素已经全部落地了,通知对应的immutable memTable
     for memTableR in memTableRs.iter() {
         let header: &mut MemTableFileHeader = utils::slice2RefMut(&memTableR.memTableFileMmap);
@@ -143,12 +150,15 @@ pub(crate) fn processMemTableRs(db: &DB, memTableRs: Vec<MemTableR>) -> Result<(
 
 fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
               parentPagesNeedRewrite: &mut HashMap<PageId, Arc<RwLock<Page>>>) -> Result<()> {
+
     // 用来收集因为空间利用率太低合并受影响的page
     let mut pagesInfluencedByMerge = Vec::<_>::new();
 
-    for (writeDestPage0) in writeDestPages.iter() {
-        let mut writeDestPage = writeDestPage0.write().unwrap();
-        let writeDestPage = writeDestPage.deref_mut();
+    for writeDestPageArc in writeDestPages {
+        let mut writeDestPageGuard = writeDestPageArc.write().unwrap();
+        let mut writeDestPage = writeDestPageGuard.deref_mut();
+
+        let pageIdUnderMutex = writeDestPage.header.id;
 
         if writeDestPage.header.indexInParentPage.is_none() {
             assert_eq!(db.getHeader().rootPageId, writeDestPage.header.id);
@@ -157,7 +167,8 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
             assert_ne!(writeDestPage.header.parentPageId, 0);
         }
 
-        // todo 如果writeDestPage是空的(pageElems是空的)应该如何对应的
+        let mut replacement = MaybeUninit::uninit();
+
         // 目前已知的会这样的情况是 cursor时候的顺便删掉旧版本、下边的当page过度空闲的合并的
         if writeDestPage.pageElems.is_empty() {
             match writeDestPage.header.indexInParentPage {
@@ -178,7 +189,30 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
         }
 
         // 如果page会分裂成多个的话,是会受到填充率的限制的
-        writeDestPage.write2Disk(&db)?;
+        writeDestPage.write2Disk()?;
+
+        // 说明在write2Disk时候因为元素太多又另外分配了新的page,原来的self对应的page后续要回收了
+        if let Some(page) = writeDestPage.replacement.take() {
+            replacement.write(unsafe {
+                let pointer = Box::into_raw(page);
+                // 浅拷贝MauallyDrop<Page>
+                let manuallyDrop = ptr::read(pointer);
+                let replacement = ManuallyDrop::into_inner(manuallyDrop);
+
+                // 利用box本身的析构 清理掉ManuallyDrop<Page>本身在heap上占用的空间,同时不去清理page
+                drop(Box::from_raw(pointer));
+
+                replacement
+            });
+
+            //原来的writeDestPage不能在这个时候注销掉
+            //db.free(writeDestPage);
+
+            writeDestPage = unsafe { replacement.assume_init_mut() };
+
+            // 原来id对应的lock释放
+            // drop(writeDestPageGuard);
+        }
 
         // 原来的单个的leaf 现在成了多个 需要原来的那个单个的leaf的parantPage来应对
         // 得要知道当前的这个page在父级的那个位置,然后在对应的位置塞入data
@@ -209,14 +243,17 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
         let parentPageId =
             // 到了顶头没有上级了
             if needBuildNewParentPage {
-                let newParentPage = db.allocateNewPage(page_header::PAGE_FLAG_BRANCH)?;
+                //db.allocateNewPage(page_header::PAGE_FLAG_BRANCH)?;
+                let newParentPage = {
+                    // 会有这样的情况 起始的时候就1个leafPage 它的id是1
+                    let mut allocatedPages = db.allocatePagesByCount(1, db.getHeader().pageSize, page_header::PAGE_FLAG_BRANCH)?;
+                    allocatedPages.remove(0)
+                };
 
                 let newParentPageId = newParentPage.header.id;
 
                 // 因为rootPage变动了,dbHeader的rootPageId也要相应的变化
                 db.getHeaderMut().rootPageId = newParentPageId;
-
-                // writeDestPage.parentPage = Some(Arc::new(RwLock::new(newParentPage)));
 
                 writeDestPage.header.parentPageId = newParentPageId;
 
@@ -228,41 +265,38 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
                 } else {
                     writeDestPage.header.parentPageId
                 }
-                /*match writeDestPage.parentPage {
-                    Some(ref parentPage) => parentPage.read().unwrap().header.id,
-                    None => continue,
-                }*/
             };
 
-        let parentPage0 = db.getPageById(writeDestPage.header.parentPageId)?; //writeDestPage.parentPage.as_ref().unwrap();
+        let parentPage = db.getPageById(writeDestPage.header.parentPageId)?; //writeDestPage.parentPage.as_ref().unwrap();
 
         // 添加之前先瞧瞧是不是已经有了相应的pageId了
         if parentPagesNeedRewrite.contains_key(&parentPageId) == false {
-            parentPagesNeedRewrite.insert(parentPageId, parentPage0.clone());
+            parentPagesNeedRewrite.insert(parentPageId, parentPage.clone());
         }
 
-        let mut parentPage = parentPage0.write().unwrap();
+        // todo 需要应对新的问题pageId可能是之前循环过的lrucache中还有导致lock的重入的
+        let mut parentPageWriteGuard = parentPage.write().unwrap();
 
         // writeDestPage本身对应的branch elem在branch page的index的
         let writeDestPageIndexInParentPage = {
             let lastKeyInPage = writeDestPage.getLastKey();
 
-            let writeDestPageHeader = utils::slice2RefMut(&writeDestPage.mmapMut);
+            let writeDestPageHeader = *utils::slice2RefMut(&writeDestPage.mmapMut);
 
             let writeDestPageIndexInParentPage =
                 match writeDestPage.header.indexInParentPage {
                     Some(indexInParentPage) => {
                         // 这是不可能的,因为indexInParentPage不是none意味着已有了parentPage,不可能是needBuildNewParentPage
                         if needBuildNewParentPage {
-                            parentPage.pageElems.push(PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPage0.clone(), writeDestPageHeader));
+                            parentPageWriteGuard.pageElems.push(PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPageHeader));
                             0
                         } else {
-                            parentPage.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPage0.clone(), writeDestPageHeader);
+                            parentPageWriteGuard.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPageHeader);
                             indexInParentPage
                         }
                     }
                     None => { // 说明直接到了leafPage未经过branch 要么 这是1个临时新建的branch
-                        parentPage.pageElems.push(PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPage0.clone(), writeDestPageHeader));
+                        parentPageWriteGuard.pageElems.push(PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPageHeader));
                         0
                     }
                 };
@@ -303,7 +337,7 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
         {
             // parentPage.pageElems[writeDestPageIndexInParentPage-1] 和 它们中的第1个(writeDestPage) 关联
             if writeDestPageIndexInParentPage >= 1 {
-                let pageElem = &mut parentPage.pageElems[writeDestPageIndexInParentPage - 1];
+                let pageElem = &mut parentPageWriteGuard.pageElems[writeDestPageIndexInParentPage - 1];
 
                 match pageElem {
                     PageElem::BranchR(_, pageId) => {
@@ -313,7 +347,7 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
                         page.header.nextPageId = writeDestPage.header.id;
                         writeDestPage.header.prevPageId = page.header.id;
                     }
-                    PageElem::Dummy4PutBranch(_, _, pageHeader) => {
+                    PageElem::Dummy4PutBranch(_, pageHeader) => {
                         pageHeader.nextPageId = writeDestPage.header.id;
                         writeDestPage.header.prevPageId = pageHeader.id;
                     }
@@ -322,7 +356,7 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
             }
 
             // 它们中的最后1个 和 parentPage.pageElems[writeDestPageIndexInParentPage+1] 关联
-            if let Some(pageElem) = parentPage.pageElems.get_mut(writeDestPageIndexInParentPage + 1) {
+            if let Some(pageElem) = parentPageWriteGuard.pageElems.get_mut(writeDestPageIndexInParentPage + 1) {
                 // 如果additionalPages没有的话lastOne便是writeDestPage本身
                 let lastOne =
                     if additionalPages.is_empty() {
@@ -344,7 +378,7 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
                         lastOne.header.nextPageId = page.header.id;
                         page.header.prevPageId = lastOne.header.id;
                     }
-                    PageElem::Dummy4PutBranch(_, _, pageHeader) => {
+                    PageElem::Dummy4PutBranch(_, pageHeader) => {
                         lastOne.header.nextPageId = pageHeader.id;
                         pageHeader.prevPageId = lastOne.header.id;
                     }
@@ -357,18 +391,20 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
         // 如果两个page合并，合并后的占用率是不是应该小于那个填充率的
         // additionalPages空的时候,说明page实际的内容大小是1个page容的下
         // 占用率要比availablePageSize的50%小
-        if additionalPages.is_empty() { // 意味着可以使用完全的page大小
-            let mut nextPageId = writeDestPage.header.id;
+        if additionalPages.is_empty() { // 意味着未发生过顶替的,replacement是none
+            let mut nextPageId = writeDestPage.header.nextPageId;
 
+            // 说明是有连在后边的page的
             if nextPageId != 0 {
                 //let mut currentPage = NonNull::new(writeDestPage as *mut Page).unwrap();
                 let mut pageSizeAccumulated = writeDestPage.diskSize();
 
-                pagesInfluencedByMerge.push(writeDestPage0.clone());
+                pagesInfluencedByMerge.push(writeDestPageArc.clone());
 
+                // todo 合并page时候也要调用pageAllocator的free回收
                 loop {
-                    let nextPage0 = db.getPageById(nextPageId)?;
-                    let mut nextPage = nextPage0.write().unwrap();
+                    let nextPageArc = db.getPageById(nextPageId)?;
+                    let mut nextPage = nextPageArc.write().unwrap();
 
                     let nextPagePayloadSize = nextPage.payloadDiskSize();
 
@@ -381,7 +417,7 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
                         writeDestPage.pageElems.push(pageElemInNextPage);
                     }
 
-                    pagesInfluencedByMerge.push(nextPage0.clone());
+                    pagesInfluencedByMerge.push(nextPageArc.clone());
 
                     // 两边的elemCount 更改
                     // 这2个page都需要write 如下可以通过page的write2Disk()实现
@@ -411,15 +447,15 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
                 let additionalPageHeader: &mut PageHeader = utils::slice2RefMut(&additionalPage.mmapMut);
                 additionalPageHeader.indexInParentPage = Some(additionalPageIndexInParentPage);
 
-                // todo 完成 page的msync没有涉及到additionalPages
+                // 不要忘了additionalPage
                 additionalPage.msync()?;
 
                 let lastKeyInPage = additionalPage.getLastKey();
 
                 // insert的目标index可以和len相同,塞到最后的和push相同
-                parentPage.pageElems.insert(
+                parentPageWriteGuard.pageElems.insert(
                     additionalPageIndexInParentPage,
-                    PageElem::Dummy4PutBranch(lastKeyInPage, Arc::new(RwLock::new(additionalPage)), additionalPageHeader),
+                    PageElem::Dummy4PutBranch(lastKeyInPage, *additionalPageHeader),
                 );
             }
         }
@@ -428,7 +464,8 @@ fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
         writeDestPage.msync()?;
     }
 
-    if pagesInfluencedByMerge.is_empty() == false {
+    // 需要merge的page数量应该至少有2个
+    if pagesInfluencedByMerge.len() >= 2 {
         writePages(db, pagesInfluencedByMerge, parentPagesNeedRewrite)?;
     }
 

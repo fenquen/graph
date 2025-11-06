@@ -52,10 +52,12 @@ impl MemTable {
 
         let alreadyExisted = fs::exists(&memTableFilePath)?;
 
-        let mut openOptions = OpenOptions::new();
-        openOptions.read(true).write(true).create(true);
+        let memTableFile = {
+            let mut openOptions = OpenOptions::new();
+            openOptions.read(true).write(true).create(true);
 
-        let memTableFile = openOptions.open(&memTableFilePath)?;
+            openOptions.open(&memTableFilePath)?
+        };
 
         if alreadyExisted == false {
             memTableFile.set_len(newMemTableFileSize as u64)?;
@@ -72,7 +74,9 @@ impl MemTable {
         };
 
         // 文件如果是writable的且mmap不是私有映射,mmap超出了文件会扩展文件
-        // 这样的话应该就不用上边的sync_all(),因为后续写完tx的changes还是会调用msyc()的
+        // 这样的话应该就不用上边的sync_all(),因为后续写完tx的changes还是会调用msync()的
+        //
+        // mmap2有个很坑的地方,要map的字节的长度虽然类型是usize不能超过isize::MAX,详见其validate_len()
         let memTableFileMmap = utils::mmapFdMut(memTableFileFd, None, Some(1024 * 1024 * 1024))?;
 
         // macos特殊点
@@ -210,14 +214,19 @@ impl MemTable {
                     let db = self.db.upgrade().unwrap();
                     let pageSize = db.getHeader().pageSize;
 
-                    while end >= self.currentFileSize {
-                        // 额外再增加1个os内存页大小,以防止频繁的干这个
-                        self.currentFileSize = end + pageSize * 16;
+                    // 先另外的copy份不去污染字段的值
+                    // 等到set_len()调用成功后再去设置字段
+                    let mut currentFileSize = self.currentFileSize;
+                    if end >= currentFileSize {
+                        // 额外再增加16个os内存页大小,以防止频繁的干这个
+                        currentFileSize = end + pageSize * 16;
                     }
 
                     let memTableFile = unsafe { File::from_raw_fd(self.memTableFileFd) };
-                    memTableFile.set_len(self.currentFileSize as u64)?;
+                    memTableFile.set_len(currentFileSize as u64)?;
                     mem::forget(memTableFile);
+
+                    self.currentFileSize = currentFileSize;
                 }
             }
 

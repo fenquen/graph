@@ -203,8 +203,7 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                         break;
                     }
 
-                    // todo 如果pageElems空掉了如何应对 由于remove掉了些pageElem在后续落地时候需要的page数量比原来少了 那多的page如何应对
-                    // todo 如何知道多的page的id
+                    // 后续在memTableR的writePages时候,如果page足够空闲了会尝试和其它的合并以节省空间的
                     currentPageWriteGuard.pageElems.remove(index);
                 }
 
@@ -245,7 +244,6 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                             hasElemRemoved = true;
                         }
 
-                        // todo 这样不同寻常的在btree上横向运动如何落地prevPage改动,主要是如何知道prevPage在parentPage的index的 是不是header也要记录的
                         if hasElemRemoved {
                             // 能够知道这个page发生了改动,以便让后续对它重写,这样也能更新header中的elemCount了
                             self.leafPageId2LeafPage.insert(prevPage.header.id, prevPage0.clone());
@@ -269,8 +267,7 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                     currentPageWriteGuard.pageElems.binary_search_by(|pageElem| {
                         match pageElem {
                             PageElem::BranchR(keyWithTxId, _) => keyWithTxId.cmp(&targetKeyWithTxId),
-                            PageElem::Dummy4PutBranch(keyWithTxId, _, _) |
-                            PageElem::Dummy4PutBranch0(keyWithTxId, _) => keyWithTxId.as_slice().cmp(targetKeyWithTxId),
+                            PageElem::Dummy4PutBranch(keyWithTxId, _) => keyWithTxId.as_slice().cmp(targetKeyWithTxId),
                             _ => panic!("impossible")
                         }
                     });
@@ -295,11 +292,14 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
 
                 // 最后时候 就当前的情况添加内容到stack的
                 match currentPageWriteGuard.pageElems.get(index).unwrap() {
-                    PageElem::BranchR(_, pageId) | PageElem::Dummy4PutBranch0(_, pageId) => {
+                    PageElem::BranchR(_, pageId) => {
                         let page = db.getPageById(*pageId)?;
                         self.stack.push((page, 0));
                     }
-                    PageElem::Dummy4PutBranch(_, page, _) => self.stack.push((page.clone(), 0)),
+                    PageElem::Dummy4PutBranch(_, pageHeader) => {
+                        let childPage = db.getPageById(pageHeader.id)?;
+                        self.stack.push((childPage, 0))
+                    }
                     _ => panic!("impossible")
                 }
 
@@ -343,8 +343,7 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                     currentPageReadGuard.pageElems.binary_search_by(|pageElem| {
                         match pageElem {
                             PageElem::BranchR(keyWithTxIdInElem, _) => (*keyWithTxIdInElem).cmp(&targetKeyWithTxId),
-                            PageElem::Dummy4PutBranch(keyWithTxIdInElem, _, _) |
-                            PageElem::Dummy4PutBranch0(keyWithTxIdInElem, _) => keyWithTxIdInElem.as_slice().cmp(targetKeyWithTxId),
+                            PageElem::Dummy4PutBranch(keyWithTxIdInElem, _) => keyWithTxIdInElem.as_slice().cmp(targetKeyWithTxId),
                             _ => panic!("impossible")
                         }
                     }).unwrap_or_else(|index| {
@@ -388,15 +387,14 @@ impl<'db, 'tx> Cursor<'db, 'tx> {
                 *currentIndexInPage = index;
 
                 let pageId = {
-                    let pageElem = currentPageReadGuard.pageElems.get(index).unwrap();
+                    let pageElem = match currentPageReadGuard.pageElems.get(index) {
+                        Some(pageElem) => pageElem,
+                        None => panic!("impossible")
+                    };
 
                     match pageElem {
                         PageElem::BranchR(_, pageId) => *pageId,
-                        PageElem::Dummy4PutBranch(_, page, _) => {
-                            let page = page.read().unwrap();
-                            page.header.id
-                        }
-                        PageElem::Dummy4PutBranch0(_, pageId) => *pageId,
+                        PageElem::Dummy4PutBranch(_, pageHeader) => pageHeader.id,
                         _ => panic!("impossible")
                     }
                 };

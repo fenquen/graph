@@ -178,3 +178,12 @@ where
         value
     }
 }
+
+/// 返回满足 2^a >= x 的最小整数 a
+pub(crate) fn ceilLog2(x: usize) -> usize {
+    if x.is_power_of_two() {
+        x.trailing_zeros() as usize
+    } else {
+        x.next_power_of_two().trailing_zeros() as usize
+    }
+}

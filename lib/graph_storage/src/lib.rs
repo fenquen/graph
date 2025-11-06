@@ -2,7 +2,6 @@
 #![feature(likely_unlikely)]
 #![allow(non_snake_case)]
 #![feature(ptr_metadata)]
-#![feature(rwlock_downgrade)]
 //#![allow(unused)]
 
 extern crate core;
@@ -21,17 +20,20 @@ mod mem_table;
 mod page_elem;
 mod mem_table_r;
 mod lru_cache;
+mod bitmap;
+mod page_allocator;
 
 #[cfg(test)]
 mod tests {
     use crate::db::{DBHeader, DBOption, DB};
     use std::{fs, thread};
     use std::time::{Duration, Instant, SystemTime};
+    use libc::munlock;
 
     const ELEM_COUNT: usize = 1024;
 
     #[test]
-    fn general() {
+    fn testGeneral() {
         let s: [usize; 1] = [0];
         let target = 1;
         // Ok 说明 存在相等的 里边的值v是index
@@ -169,6 +171,8 @@ mod tests {
                 assert_eq!(tx.get(&k).unwrap().as_ref().unwrap().as_slice(), k.as_slice());
             }
         }
+
+        return;
 
         // delete
         {

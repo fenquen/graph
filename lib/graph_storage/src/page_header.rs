@@ -1,9 +1,11 @@
-use std::{ptr, usize};
+use std::ptr;
 use crate::page_elem::PageElem;
 use crate::types::PageId;
 use anyhow::Result;
 
-/// 第1个page的header的flag, 它是在dbHeader后边
+pub(crate) const PAGE_ID_INVALID: PageId = 0;
+
+/// page0(保存dbHeader)的flag
 pub(crate) const PAGE_FLAG_META: u16 = 1;
 
 pub(crate) const PAGE_FLAG_LEAF: u16 = 1 << 1;
@@ -19,7 +21,7 @@ pub(crate) const LEAF_ELEM_META_SIZE: usize = size_of::<PageElemMetaLeaf>();
 pub(crate) const LEAF_ELEM_OVERFLOW_META_SIZE: usize = size_of::<PageElemMetaLeafOverflow>();
 pub(crate) const BRANCH_ELEM_META_SIZE: usize = size_of::<PageElemMetaBranch>();
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 #[repr(C)]
 pub(crate) struct PageHeader {
     pub(crate) id: PageId,
@@ -64,6 +66,13 @@ impl PageHeader {
     #[inline]
     pub(crate) fn isDummy(&self) -> bool {
         self.flags & PAGE_FLAG_DUMMY != 0
+    }
+
+    /// 虽然说是reset,还是保留了pageId
+    pub(crate) fn reset(&mut self) {
+        let id = self.id;
+        *self = Default::default();
+        self.id = id;
     }
 }
 
