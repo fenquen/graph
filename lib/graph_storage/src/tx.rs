@@ -5,6 +5,7 @@ use crate::types::TxId;
 use crate::{constant, utils};
 use anyhow::Result;
 use std::collections::BTreeMap;
+use std::mem;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
@@ -113,7 +114,7 @@ impl<'db> Tx<'db> {
         Ok(())
     }
 
-    pub fn commit(self) -> Result<()> {
+    pub fn commit(mut self) -> Result<()> {
         // already committed
         if let Err(_) = self.committed.compare_exchange(false, true,
                                                         Ordering::SeqCst, Ordering::Acquire) {
@@ -124,12 +125,12 @@ impl<'db> Tx<'db> {
             return Ok(());
         }
 
-        let (commitResultSender, commitResultReceiver) =
-            mpsc::sync_channel::<Result<()>>(1);
+        let (commitResultSender,
+            commitResultReceiver) = mpsc::sync_channel::<Result<()>>(1);
 
         let commitReq = CommitReq {
             txId: self.id,
-            changes: self.changes,
+            changes: mem::take(&mut self.changes),
             commitResultSender,
         };
 
@@ -139,16 +140,21 @@ impl<'db> Tx<'db> {
             commitResult?;
         }
 
-        {
-            let mut infightingTxIds = self.db.flyingTxIds.write().unwrap();
-            infightingTxIds.remove(&self.id);
-        }
-
         Ok(())
     }
 
     fn createCursor(&'_ self) -> Result<Cursor<'_, '_>> {
         Cursor::new(&*self.db, Some(self))
+    }
+}
+
+impl Drop for Tx<'_> {
+    fn drop(&mut self) {
+        // deregister txId
+        {
+            let mut infightingTxIds = self.db.flyingTxIds.write().unwrap();
+            infightingTxIds.remove(&self.id);
+        }
     }
 }
 
