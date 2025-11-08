@@ -335,7 +335,7 @@ pub(crate) struct BitmapIter<'a> {
 }
 
 impl<'a> BitmapIter<'a> {
-    fn new(len: usize, data: &'a [u64]) -> BitmapIter {
+    fn new(len: usize, data: &'_ [u64]) -> BitmapIter<'_> {
         BitmapIter {
             len,
             data,

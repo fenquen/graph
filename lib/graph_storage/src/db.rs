@@ -3,7 +3,7 @@ use crate::page::Page;
 use crate::page_header::PageHeader;
 use crate::tx::{CommitReq, Tx};
 use crate::types::{PageId, TxId};
-use crate::{mem_table_r, page_header, utils};
+use crate::{page_header, utils};
 use anyhow::Result;
 use memmap2::{Advice, MmapMut};
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,7 +19,7 @@ use std::{fs, mem, thread};
 use std::mem::MaybeUninit;
 use std::thread::JoinHandle;
 use crate::lru_cache::LruCache;
-use crate::mem_table_r::MemTableR;
+use crate::mem_table_r::{MemTableR, MemTableRWriter};
 use crate::page_allocator::{PageAllocatorWrapper};
 use crate::utils::DEFAULT_PAGE_SIZE;
 
@@ -265,11 +265,11 @@ impl DB {
             })?;
 
         // 落地immutableMemTable的thread
-        let dbClone = Arc::downgrade(&db);
+        let weakDb = Arc::downgrade(&db);
         let a = db.dbOption.immutableMemTableCount;
         let joinHandleMemTableRs =
             thread::Builder::new().name("process_mem_table_rs".to_string()).spawn(move || {
-                DB::processMemTableRs(dbClone, memTableRReceiver, a);
+                DB::processMemTableRs(weakDb, memTableRReceiver, a);
             })?;
 
         // 使用非正常的手段设置
@@ -319,7 +319,8 @@ impl DB {
         utils::slice2RefMut(&self.dbHeaderMmap)
     }
 
-    /// 这个其实有个隐含的前提 对应的page得是已经创建过的了(调用过了buildPageById)不是空白的
+    /// 尝试从lru获取,要是没有就读取blockFile然后mmap映射,并将其加入lru
+    /// page得是有效的(header.flags != PAGE_FLAG_INVALID)
     pub(crate) fn getPageById(&self, pageId: PageId) -> Result<Arc<RwLock<Page>>> {
         let dbHeader = self.getHeader();
 
@@ -343,7 +344,7 @@ impl DB {
         let page = Page::restore(self, pageMmapMut)?;
 
         // 对应的page得是已经创建过的了(调用过了buildPageById)不是空白的
-        if page.header.id == page_header::PAGE_ID_INVALID {
+        if page.header.flags == page_header::PAGE_FLAG_INVALID {
             throw!(format!("page [id:{}] is not valid",pageId));
         }
 
@@ -477,7 +478,7 @@ impl DB {
         Ok(pages)
     }
 
-    // todo 对page的free涉及到多个点: 数据文件对应的 allocator lrucache
+    /// 对page的free涉及: 数据文件对应的,allocator,lrucache
     pub(crate) fn free(&self, page: &mut Page) {
         page.invalidate();
 
@@ -634,7 +635,7 @@ impl DB {
         Ok((blockFileFds, immutableMemTables))
     }
 
-    fn processCommitReqs(db: Weak<Self>, commitReqReceiver: Receiver<CommitReq>) {
+    fn processCommitReqs(db: Weak<DB>, commitReqReceiver: Receiver<CommitReq>) {
         // write changes in commitReq into memTable
         for commitReq in commitReqReceiver {
             match db.upgrade() {
@@ -647,9 +648,10 @@ impl DB {
         }
     }
 
-    fn processMemTableRs(db: Weak<Self>, memTableRReceiver: Receiver<MemTableR>, countThreshold: usize) {
+    fn processMemTableRs(db: Weak<DB>, memTableRReceiver: Receiver<MemTableR>, countThreshold: usize) {
         let mut vec: Vec<MemTableR> = Vec::with_capacity(countThreshold);
-
+        let mut memTableRWriter = MemTableRWriter::new();
+        
         // 收取了某些数量后再落地
         for memTableR in memTableRReceiver {
             match db.upgrade() {
@@ -658,7 +660,7 @@ impl DB {
 
                     if vec.len() >= countThreshold {
                         let batch = vec.drain(..).collect();
-                        _ = mem_table_r::processMemTableRs(&*db, batch);
+                        _ = memTableRWriter.processMemTableRs(&*db, batch);
                     }
                 }
                 None => break,
@@ -667,10 +669,9 @@ impl DB {
     }
 
     fn generateBlockFile(dbOption: &DBOption, blockFileNum: usize, blockSize: usize) -> Result<File> {
-        let blockFilePath = Path::join(
-            dbOption.dirPath.as_ref(),
-            format!("{}.{}", blockFileNum, BLOCK_FILE_EXTENSION),
-        );
+        let blockFilePath =
+            Path::join(dbOption.dirPath.as_ref(),
+                       format!("{}.{}", blockFileNum, BLOCK_FILE_EXTENSION));
 
         let blockFile = OpenOptions::new().read(true).write(true).create_new(true).open(blockFilePath)?;
 

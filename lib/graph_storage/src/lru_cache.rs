@@ -3,7 +3,7 @@
  */
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, RwLock};
 use crate::page::Page;
 use crate::types::PageId;
 

@@ -1,5 +1,7 @@
 use std::{fs, io};
+use std::collections::HashMap;
 use std::fs::{Metadata};
+use std::hash::Hash;
 use std::ops::{Add, BitAnd, Rem, Sub};
 use std::os::fd::{RawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -185,5 +187,43 @@ pub(crate) fn ceilLog2(x: usize) -> usize {
         x.trailing_zeros() as usize
     } else {
         x.next_power_of_two().trailing_zeros() as usize
+    }
+}
+
+pub(crate) trait HashMapExt<K, V> {
+    fn insetIfNotExist(&mut self, key: K, value: V) -> (bool, Option<V>);
+
+    fn insertIfNotExistLazy(&mut self, key: K, valueFn: impl Fn() -> V) -> (bool, Option<V>);
+
+    fn absorbNotExist(&mut self, other: HashMap<K, V>);
+
+    fn isNotEmpty(&self) -> bool;
+}
+
+impl<K: Eq + Hash, V> HashMapExt<K, V> for HashMap<K, V> {
+    fn insetIfNotExist(&mut self, key: K, value: V) -> (bool, Option<V>) {
+        if self.contains_key(&key) {
+            (false, None)
+        } else {
+            (true, self.insert(key, value))
+        }
+    }
+
+    fn insertIfNotExistLazy(&mut self, key: K, valueFn: impl Fn() -> V) -> (bool, Option<V>) {
+        if self.contains_key(&key) {
+            (false, None)
+        } else {
+            (true, self.insert(key, valueFn()))
+        }
+    }
+
+    fn absorbNotExist(&mut self, other: HashMap<K, V>) {
+        for (key, value) in other {
+            self.insetIfNotExist(key, value);
+        }
+    }
+
+    fn isNotEmpty(&self) -> bool {
+        self.is_empty() == false
     }
 }

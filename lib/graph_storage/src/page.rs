@@ -1,3 +1,4 @@
+use std::hash::{Hash, Hasher};
 use std::mem;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
@@ -276,6 +277,20 @@ impl Page {
         })
     }
 }
+
+impl Hash for Page {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.header.id.hash(state);
+    }
+}
+
+impl PartialEq for Page {
+    fn eq(&self, other: &Self) -> bool {
+        self.header.id == other.header.id
+    }
+}
+
+impl Eq for Page {}
 
 impl Drop for Page {
     fn drop(&mut self) {

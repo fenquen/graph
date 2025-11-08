@@ -2,6 +2,7 @@
 #![feature(likely_unlikely)]
 #![allow(non_snake_case)]
 #![feature(ptr_metadata)]
+#![feature(rwlock_data_ptr)]
 //#![allow(unused)]
 
 extern crate core;
@@ -27,8 +28,8 @@ mod page_allocator;
 mod tests {
     use crate::db::{DBHeader, DBOption, DB};
     use std::{fs, thread};
+    use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant, SystemTime};
-    use libc::munlock;
 
     const ELEM_COUNT: usize = 1024;
 
@@ -42,7 +43,13 @@ mod tests {
         //assert_eq!(s.binary_search_by(|probe| probe.cmp(&seek)), Err(8));
 
         println!("{},{}", size_of::<DBHeader>(), align_of::<DBHeader>());
-        return;
+
+
+        let a =Arc::new(RwLock::new(1));
+        let b = a.clone();
+
+        let readGuardA = a.read().unwrap();
+        let readGuardB=b.read().unwrap();
     }
 
     #[test]
@@ -171,6 +178,11 @@ mod tests {
                 assert_eq!(tx.get(&k).unwrap().as_ref().unwrap().as_slice(), k.as_slice());
             }
         }
+
+        thread::sleep(Duration::from_secs(10));
+        let a = unsafe { db.joinHandleMemTableRs.assume_init_read() };
+        drop(db);
+        a.join().unwrap();
 
         return;
 

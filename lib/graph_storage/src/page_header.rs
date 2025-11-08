@@ -3,16 +3,18 @@ use crate::page_elem::PageElem;
 use crate::types::PageId;
 use anyhow::Result;
 
-pub(crate) const PAGE_ID_INVALID: PageId = 0;
+/// 从未非配过的page/分配后又回收的page
+pub(crate) const PAGE_FLAG_INVALID: u16 = 0;
 
 /// page0(保存dbHeader)的flag
 pub(crate) const PAGE_FLAG_META: u16 = 1;
-
 pub(crate) const PAGE_FLAG_LEAF: u16 = 1 << 1;
 pub(crate) const PAGE_FLAG_LEAF_OVERFLOW: u16 = 1 << 2;
 pub(crate) const PAGE_FLAG_BRANCH: u16 = 1 << 3;
 
 pub(crate) const PAGE_FLAG_DUMMY: u16 = 1 << 4;
+/// 说明这个page可以被free回收
+pub(crate) const PAGE_FLAG_FREEABLE: u16 = 1 << 6;
 
 pub(crate) const PAGE_HEADER_SIZE: usize = size_of::<PageHeader>();
 pub(crate) const PAGE_ID_SIZE: usize = size_of::<PageId>();
@@ -73,6 +75,16 @@ impl PageHeader {
         let id = self.id;
         *self = Default::default();
         self.id = id;
+    }
+
+    #[inline]
+    pub(crate) fn isFreeable(&self) -> bool {
+        self.flags & PAGE_FLAG_FREEABLE != 0
+    }
+
+    #[inline]
+    pub(crate) fn markFreeable(&mut self) {
+        self.flags |= PAGE_FLAG_FREEABLE;
     }
 }
 

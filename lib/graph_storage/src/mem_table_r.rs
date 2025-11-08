@@ -2,10 +2,9 @@
  * Copyright (c) 2024-2025 fenquen(https://github.com/fenquen), licensed under Apache 2.0
  */
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::{mem, ptr};
 use std::mem::{ManuallyDrop, MaybeUninit};
-use std::ops::DerefMut;
 use std::os::fd::RawFd;
 use std::sync::{Arc, RwLock};
 use memmap2::{Advice, MmapMut};
@@ -17,7 +16,8 @@ use crate::db::DB;
 use crate::page::Page;
 use crate::page_elem::PageElem;
 use crate::page_header::PageHeader;
-use crate::types::PageId;
+use crate::types::{PageId, TxId};
+use crate::utils::HashMapExt;
 
 pub(crate) struct MemTableR {
     memTableFileMmap: MmapMut,
@@ -76,398 +76,454 @@ impl<'a> Iterator for MemTableRIter<'a> {
     }
 }
 
-// 当写完了1个memTableR如何通知对应的immutableTable清理
-// 目前的话不能精确到通知单个immutable只能是以batch维度,因为memTableR的内容都融合到1起了
-pub(crate) fn processMemTableRs(db: &DB, memTableRs: Vec<MemTableR>) -> Result<()> {
-    let flyingTxIdMinimal = {
-        let flyingTxIds = db.flyingTxIds.read().unwrap();
-        flyingTxIds.first().copied()
-    };
-
-    let mut cursor = Cursor::new(db, None)?;
-
-    // 如果某个key对应的txId "a" 不在infightingTxIds中 且 对应的value是None
-    // 那么这个key的全部小于等于a体系的都可以干掉了
-    for memTableR in memTableRs.iter() {
-        for (key, value) in memTableR.iter() {
-            let txIdThreshold2Delete =
-                if flyingTxIdMinimal.is_none() {
-                    let (_, txId) = tx::parseKeyWithTxId(key);
-                    txId
-                } else {
-                    flyingTxIdMinimal.unwrap()
-                };
-
-            // 试图删掉小于txIdThreshold的全部版本
-            cursor.seek(key, value, true, txIdThreshold2Delete)?;
-        }
-    }
-
-    let mut involvedParentPages = HashMap::new();
-
-    // 这里的都是leafPage
-    writePages(db, cursor.leafPageId2LeafPage.into_values().collect(), &mut involvedParentPages)?;
-
-    loop {
-        let involvedParentPagesPrevRound: Vec<Arc<RwLock<Page>>> = {
-            let pairs: Vec<(PageId, Arc<RwLock<Page>>)> = involvedParentPages.drain().collect();
-            pairs.into_iter().map(|(_, involvedParentPage)| involvedParentPage).collect()
-        };
-
-        if involvedParentPagesPrevRound.is_empty() {
-            break;
-        }
-
-        let page2IndexInParentPage =
-            involvedParentPagesPrevRound.into_iter().map(|involvedParentPage| {
-                /* let indexInParentPage = {
-                     let pageReadGuard = involvedParentPage.read().unwrap();
-                     pageReadGuard.indexInParentPage
-                 };*/
-
-                // (involvedParentPage, indexInParentPage)
-
-                involvedParentPage
-            }).collect::<Vec<_>>();
-
-        writePages(db, page2IndexInParentPage, &mut involvedParentPages)?;
-    }
-
-    // page的allocator pattern 持久化
-    {
-        let mut pageAllocator = db.pageAllocator.write().unwrap();
-        pageAllocator.refresh();
-    }
-
-    // memTableRs中的元素已经全部落地了,通知对应的immutable memTable
-    for memTableR in memTableRs.iter() {
-        let header: &mut MemTableFileHeader = utils::slice2RefMut(&memTableR.memTableFileMmap);
-        header.written2Disk = true
-    }
-
-    Ok(())
+///
+pub(crate) struct MemTableRWriter {
+    pub(crate) waitingTxIds2PageId2Page: Vec<(BTreeSet<TxId>, HashMap<PageId, Arc<RwLock<Page>>>)>,
+    pub(crate) pageIdsNeedFree: HashSet<PageId>,
 }
 
-fn writePages(db: &DB, writeDestPages: Vec<Arc<RwLock<Page>>>,
-              parentPagesNeedRewrite: &mut HashMap<PageId, Arc<RwLock<Page>>>) -> Result<()> {
-
-    // 用来收集因为空间利用率太低合并受影响的page
-    let mut pagesInfluencedByMerge = Vec::<_>::new();
-
-    for writeDestPageArc in writeDestPages {
-        let mut writeDestPageGuard = writeDestPageArc.write().unwrap();
-        let mut writeDestPage = writeDestPageGuard.deref_mut();
-
-        let pageIdUnderMutex = writeDestPage.header.id;
-
-        if writeDestPage.header.indexInParentPage.is_none() {
-            assert_eq!(db.getHeader().rootPageId, writeDestPage.header.id);
-            assert_eq!(writeDestPage.header.parentPageId, 0);
-        } else {
-            assert_ne!(writeDestPage.header.parentPageId, 0);
+impl MemTableRWriter {
+    pub(crate) fn new() -> MemTableRWriter {
+        MemTableRWriter {
+            waitingTxIds2PageId2Page: Vec::new(),
+            pageIdsNeedFree: HashSet::new(),
         }
+    }
 
-        let mut replacement = MaybeUninit::uninit();
-
-        // 目前已知的会这样的情况是 cursor时候的顺便删掉旧版本、下边的当page过度空闲的合并的
-        if writeDestPage.pageElems.is_empty() {
-            match writeDestPage.header.indexInParentPage {
-                // 说明是rootPage了,它就算空了也是要保持住的
-                None => {}
-                Some(indexInParentPage) => {
-                    let parentPage0 = db.getPageById(writeDestPage.header.parentPageId)?;
-                    let mut parentPage = parentPage0.write().unwrap();
-
-                    parentPagesNeedRewrite.insert(writeDestPage.header.parentPageId, parentPage0.clone());
-
-                    // 它原来在parentPage的栏位要干掉
-                    parentPage.pageElems.remove(indexInParentPage);
-                }
-            }
-
-            continue;
-        }
-
-        // 如果page会分裂成多个的话,是会受到填充率的限制的
-        writeDestPage.write2Disk()?;
-
-        // 说明在write2Disk时候因为元素太多又另外分配了新的page,原来的self对应的page后续要回收了
-        if let Some(page) = writeDestPage.replacement.take() {
-            replacement.write(unsafe {
-                let pointer = Box::into_raw(page);
-                // 浅拷贝MauallyDrop<Page>
-                let manuallyDrop = ptr::read(pointer);
-                let replacement = ManuallyDrop::into_inner(manuallyDrop);
-
-                // 利用box本身的析构 清理掉ManuallyDrop<Page>本身在heap上占用的空间,同时不去清理page
-                drop(Box::from_raw(pointer));
-
-                replacement
-            });
-
-            //原来的writeDestPage不能在这个时候注销掉
-            //db.free(writeDestPage);
-
-            writeDestPage = unsafe { replacement.assume_init_mut() };
-
-            // 原来id对应的lock释放
-            // drop(writeDestPageGuard);
-        }
-
-        // 原来的单个的leaf 现在成了多个 需要原来的那个单个的leaf的parantPage来应对
-        // 得要知道当前的这个page在父级的那个位置,然后在对应的位置塞入data
-        // 例如 原来 这个leafPage在它的上级中是对应(700,750]的
-        // 现在的话(700,750]这段区间又要分裂了
-        // 原来是单单这1个区间对应1个leaf,现在是分成多个各自对应单个leaf的
-
-        // 现在要知道各个分裂出来的leafPage的最大的key是多少
-        // 要现在最底下的writeDestLeafPage层上平坦横向scan掉然后再到上级的
-
-        // 读取当前的additionalPage的最大的key
-        // 是否有必要通过读取mmap来知道,能不能通过直接通过pageElems属性得到啊
-
-        // 当前的page塞不下了,实际要分裂成多个了,需要再在上头盖1个branch
-        // 如果说rootPage还是容纳的下 那么不用去理会了
-        let needBuildNewParentPage =
-            if writeDestPage.additionalPages.len() > 0 {
-                writeDestPage.header.parentPageId == 0
-            } else {
-                false
+    // 当写完了1个memTableR如何通知对应的immutableTable清理
+    // 目前的话不能精确到通知单个immutable只能是以batch维度,因为memTableR的内容都融合到1起了
+    pub(crate) fn processMemTableRs(&mut self, db: &DB, memTableRs: Vec<MemTableR>) -> Result<()> {
+        let flyingTxIdMinimal =
+            match db.flyingTxIds.read() {
+                Ok(flyingTxIds) => flyingTxIds.first().copied(),
+                Err(_) => unreachable!()
             };
 
-        // 说明要分裂为多个 且没有parentPage,那它就是rootPage了
-        if needBuildNewParentPage {
-            assert!(writeDestPage.header.indexInParentPage.is_none())
+        let mut cursor = Cursor::new(db, None)?;
+
+        // 如果某个key对应的txId "a" 不在infightingTxIds中 且 对应的value是None
+        // 那么这个key的全部小于等于a体系的都可以干掉了
+        for memTableR in memTableRs.iter() {
+            for (key, value) in memTableR.iter() {
+                let txIdThreshold2Delete =
+                    flyingTxIdMinimal.unwrap_or_else(|| {
+                        let (_, txId) = tx::parseKeyWithTxId(key);
+                        txId
+                    });
+
+                // 试图删掉小于txIdThreshold的全部版本
+                cursor.seek(key, value, true, txIdThreshold2Delete)?;
+            }
         }
 
-        let parentPageId =
-            // 到了顶头没有上级了
-            if needBuildNewParentPage {
-                //db.allocateNewPage(page_header::PAGE_FLAG_BRANCH)?;
-                let newParentPage = {
-                    // 会有这样的情况 起始的时候就1个leafPage 它的id是1
-                    let mut allocatedPages = db.allocatePagesByCount(1, db.getHeader().pageSize, page_header::PAGE_FLAG_BRANCH)?;
-                    allocatedPages.remove(0)
-                };
+        let mut involvedParentPages = HashMap::new();
+        let mut pagesNeedFree = HashMap::new();
 
-                let newParentPageId = newParentPage.header.id;
+        // 这里的都是leafPage
+        self.writePages(
+            db,
+            cursor.leafPageId2LeafPage.into_values().collect(),
+            &mut involvedParentPages,
+            &mut pagesNeedFree,
+        )?;
 
-                // 因为rootPage变动了,dbHeader的rootPageId也要相应的变化
-                db.getHeaderMut().rootPageId = newParentPageId;
-
-                writeDestPage.header.parentPageId = newParentPageId;
-
-                newParentPageId
-            } else {
-                // 说明writeDestPage本身是那个的rootPage
-                if writeDestPage.header.parentPageId == 0 {
-                    continue;
-                } else {
-                    writeDestPage.header.parentPageId
-                }
+        loop {
+            let involvedParentPagesPrevRound: Vec<Arc<RwLock<Page>>> = {
+                let pairs: Vec<(PageId, Arc<RwLock<Page>>)> = involvedParentPages.drain().collect();
+                pairs.into_iter().map(|(_, involvedParentPage)| involvedParentPage).collect()
             };
 
-        let parentPage = db.getPageById(writeDestPage.header.parentPageId)?; //writeDestPage.parentPage.as_ref().unwrap();
-
-        // 添加之前先瞧瞧是不是已经有了相应的pageId了
-        if parentPagesNeedRewrite.contains_key(&parentPageId) == false {
-            parentPagesNeedRewrite.insert(parentPageId, parentPage.clone());
-        }
-
-        // todo 需要应对新的问题pageId可能是之前循环过的lrucache中还有导致lock的重入的
-        let mut parentPageWriteGuard = parentPage.write().unwrap();
-
-        // writeDestPage本身对应的branch elem在branch page的index的
-        let writeDestPageIndexInParentPage = {
-            let lastKeyInPage = writeDestPage.getLastKey();
-
-            let writeDestPageHeader = *utils::slice2RefMut(&writeDestPage.mmapMut);
-
-            let writeDestPageIndexInParentPage =
-                match writeDestPage.header.indexInParentPage {
-                    Some(indexInParentPage) => {
-                        // 这是不可能的,因为indexInParentPage不是none意味着已有了parentPage,不可能是needBuildNewParentPage
-                        if needBuildNewParentPage {
-                            parentPageWriteGuard.pageElems.push(PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPageHeader));
-                            0
-                        } else {
-                            parentPageWriteGuard.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPageHeader);
-                            indexInParentPage
-                        }
-                    }
-                    None => { // 说明直接到了leafPage未经过branch 要么 这是1个临时新建的branch
-                        parentPageWriteGuard.pageElems.push(PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPageHeader));
-                        0
-                    }
-                };
-
-            writeDestPage.header.indexInParentPage = Some(writeDestPageIndexInParentPage);
-
-            writeDestPageIndexInParentPage
-        };
-
-        // 如果还有additionalPage的话,就要在indexInParentPage后边不断的塞入的
-        // 使用drain是因为原来的测试是put之后重启在测试get,如果不重启直接get需要这样干清理掉的
-        let mut additionalPages = writeDestPage.additionalPages.drain(..).collect::<Vec<_>>();
-
-        // writeDestPage体系内的pages(writeDestPage自身 加上 additionalPages)实现首尾相连
-        for (index, additionalPage) in additionalPages.iter().enumerate() {
-            // 要这样的原因是 additionalPage.header.prevPageId = writeDestPage.header.id; 会报错 can not assign which behind "&" reference
-            let additionalPageHeader: &mut PageHeader = utils::slice2RefMut(&additionalPage.mmapMut);
-
-            // writeDestPage体系内的pages(writeDestPage自身 加上 additionalPages) 首尾相连
-            if index == 0 { // 第1个additionalPage,它和writeDestPage关联
-                writeDestPage.header.nextPageId = additionalPageHeader.id;
-                additionalPageHeader.prevPageId = writeDestPage.header.id;
-            } else { // 前后additionPage相互关联
-                let prevAdditionalPage = &additionalPages[index - 1];
-                let prevAdditionalPageHeader: &mut PageHeader = utils::slice2RefMut(&prevAdditionalPage.mmapMut);
-
-                prevAdditionalPageHeader.nextPageId = additionalPageHeader.id;
-                additionalPageHeader.prevPageId = prevAdditionalPageHeader.id;
+            if involvedParentPagesPrevRound.is_empty() {
+                break;
             }
 
-            // 顺便设置它们的parentPageId
-            additionalPageHeader.parentPageId = parentPageId;
+            self.writePages(
+                db,
+                involvedParentPagesPrevRound,
+                &mut involvedParentPages,
+                &mut pagesNeedFree,
+            )?;
         }
 
-        writeDestPage.header.parentPageId = parentPageId;
-
-        // writeDestPage体系内的pages 和外部的前后首尾相连
         {
-            // parentPage.pageElems[writeDestPageIndexInParentPage-1] 和 它们中的第1个(writeDestPage) 关联
-            if writeDestPageIndexInParentPage >= 1 {
-                let pageElem = &mut parentPageWriteGuard.pageElems[writeDestPageIndexInParentPage - 1];
-
-                match pageElem {
-                    PageElem::BranchR(_, pageId) => {
-                        let page = db.getPageById(*pageId)?;
-                        let mut page = page.write().unwrap();
-
-                        page.header.nextPageId = writeDestPage.header.id;
-                        writeDestPage.header.prevPageId = page.header.id;
+            // 到了这里之前那些被标记为freeable的page可以free回收了
+            // 那么如何知道之前用到的tx都已经结束了呢?
+            let flyingTxIds = db.flyingTxIds.read().unwrap().clone();
+            println!("flyingTxIds: {:?}", flyingTxIds);
+            if flyingTxIds.is_empty() == false {
+                pagesNeedFree.retain(|pageId, _| {
+                    if self.pageIdsNeedFree.contains(pageId) == false {
+                        self.pageIdsNeedFree.insert(*pageId);
+                        return true;
                     }
-                    PageElem::Dummy4PutBranch(_, pageHeader) => {
-                        pageHeader.nextPageId = writeDestPage.header.id;
-                        writeDestPage.header.prevPageId = pageHeader.id;
+
+                    false
+                });
+            }
+
+            for (waitingTxIds, pageId2Page) in &self.waitingTxIds2PageId2Page {
+                // 说明这批的waitingTxIds都已经结束了
+                // 那么对应的freeable的page也可以真正free了
+                if flyingTxIds.intersection(waitingTxIds).collect::<Vec<_>>().is_empty() {
+                    for (pageId, page) in pageId2Page {
+                        // 绕过RwLock,直接读取page
+                        // 可以这样的原因是到了这个时候这些page已经不可能被其他tx用到
+                        let page = unsafe { page.data_ptr().as_mut().unwrap() };
+                        db.free(page);
+
+                        self.pageIdsNeedFree.remove(pageId);
                     }
-                    _ => panic!("impossible"),
                 }
             }
 
-            // 它们中的最后1个 和 parentPage.pageElems[writeDestPageIndexInParentPage+1] 关联
-            if let Some(pageElem) = parentPageWriteGuard.pageElems.get_mut(writeDestPageIndexInParentPage + 1) {
-                // 如果additionalPages没有的话lastOne便是writeDestPage本身
-                let lastOne =
-                    if additionalPages.is_empty() {
-                        // 不能这样直接写,因为rust编译器是保守的
-                        // 它的视角来看不管additionalPages.is_empty()条件是不是成立,writeDestPage这个&mut都是move到了lastOne
-                        // writeDestPage
+            if pagesNeedFree.isNotEmpty() {
+                self.waitingTxIds2PageId2Page.push((flyingTxIds, pagesNeedFree));
+            }
+        }
 
-                        // 只能这样通过野路子了
-                        unsafe { mem::transmute(writeDestPage as *mut Page) }
-                    } else {
-                        additionalPages.last_mut().unwrap()
+        // page的allocator pattern 持久化
+        {
+            let mut pageAllocator = db.pageAllocator.write().unwrap();
+            pageAllocator.refresh();
+        }
+
+        // memTableRs中的元素已经全部落地了,通知对应的immutable memTable
+        for memTableR in memTableRs.iter() {
+            let header: &mut MemTableFileHeader = utils::slice2RefMut(&memTableR.memTableFileMmap);
+            header.written2Disk = true
+        }
+
+        Ok(())
+    }
+
+    fn writePages(&mut self,
+                  db: &DB,
+                  writeDestPages: Vec<Arc<RwLock<Page>>>,
+                  parentPagesNeedRewrite: &mut HashMap<PageId, Arc<RwLock<Page>>>,
+                  pagesNeedFree: &mut HashMap<PageId, Arc<RwLock<Page>>>) -> Result<()> {
+        // 用来收集因为空间利用率太低而需要合并的page,它们能够合并为单个page
+        let mut pagesInfluencedByMerge = Vec::<_>::new();
+
+        for writeDestPageArc in writeDestPages {
+            let mut writeDestPageGuard = writeDestPageArc.write().unwrap();
+            let mut writeDestPage = &mut *writeDestPageGuard;
+
+            if writeDestPage.header.indexInParentPage.is_none() {
+                assert_eq!(db.getHeader().rootPageId, writeDestPage.header.id);
+                assert_eq!(writeDestPage.header.parentPageId, 0);
+            } else {
+                assert_ne!(writeDestPage.header.parentPageId, 0);
+            }
+
+            let mut replacement = MaybeUninit::uninit();
+
+            // 目前已知的会造成这样的可能是
+            // cursor时候的顺便删掉旧版本的pageElem,下边的当page过度空闲的合并的
+            if writeDestPage.pageElems.is_empty() {
+                writeDestPage.header.markFreeable();
+                pagesNeedFree.insertIfNotExistLazy(writeDestPage.header.id, || writeDestPageArc.clone());
+
+                match writeDestPage.header.indexInParentPage {
+                    // 说明是rootPage了,它就算空了也是要保持住的
+                    None => {}
+                    Some(indexInParentPage) => {
+                        let parentPageArc = db.getPageById(writeDestPage.header.parentPageId)?;
+                        let mut parentPage = parentPageArc.write().unwrap();
+
+                        parentPagesNeedRewrite.insert(writeDestPage.header.parentPageId, parentPageArc.clone());
+
+                        // 它原来在parentPage的栏位要干掉
+                        parentPage.pageElems.remove(indexInParentPage);
+                    }
+                }
+
+                continue;
+            }
+
+            // 如果page会分裂成多个的话,是会受到填充率的限制的
+            writeDestPage.write2Disk()?;
+
+            // 说明在write2Disk时候因为元素太多又另外分配了新的page,原来的self对应的page后续要回收了
+            if let Some(page) = writeDestPage.replacement.take() {
+                replacement.write(unsafe {
+                    let pointer = Box::into_raw(page);
+                    // 浅拷贝MauallyDrop<Page>
+                    let manuallyDrop = ptr::read(pointer);
+                    let replacement = ManuallyDrop::into_inner(manuallyDrop);
+
+                    // 利用box本身的析构 清理掉ManuallyDrop<Page>本身在heap上占用的空间,同时不去清理page
+                    drop(Box::from_raw(pointer));
+
+                    replacement
+                });
+
+                // 原来的writeDestPage其实已经是没有用了可以free回收了
+                // 不过现在还不可以,先标记为freeable
+                writeDestPage.header.markFreeable();
+                pagesNeedFree.insertIfNotExistLazy(writeDestPage.header.id, || writeDestPageArc.clone());
+                //db.free(writeDestPage);
+
+                writeDestPage = unsafe { replacement.assume_init_mut() };
+
+                // 原来id对应的lock释放
+                drop(writeDestPageGuard);
+            }
+
+            // 原来的单个的leaf 现在成了多个 需要原来的那个单个的leaf的parantPage来应对
+            // 得要知道当前的这个page在父级的那个位置,然后在对应的位置塞入data
+            // 例如 原来 这个leafPage在它的上级中是对应(700,750]的
+            // 现在的话(700,750]这段区间又要分裂了
+            // 原来是单单这1个区间对应1个leaf,现在是分成多个各自对应单个leaf的
+
+            // 现在要知道各个分裂出来的leafPage的最大的key是多少
+            // 要现在最底下的writeDestLeafPage层上平坦横向scan掉然后再到上级的
+
+            // 读取当前的additionalPage的最大的key
+            // 是否有必要通过读取mmap来知道,能不能通过直接通过pageElems属性得到啊
+
+            // 当前的page塞不下了,实际要分裂成多个了,需要再在上头盖1个branch
+            // 如果说rootPage还是容纳的下 那么不用去理会了
+            let needBuildNewParentPage =
+                if writeDestPage.additionalPages.len() > 0 {
+                    writeDestPage.header.parentPageId == 0
+                } else {
+                    false
+                };
+
+            // 说明要分裂为多个 且没有parentPage,那它就是rootPage了
+            if needBuildNewParentPage {
+                assert!(writeDestPage.header.indexInParentPage.is_none())
+            }
+
+            let parentPageId =
+                // 到了顶头没有上级了
+                if needBuildNewParentPage {
+                    //db.allocateNewPage(page_header::PAGE_FLAG_BRANCH)?;
+                    let newParentPage = {
+                        // 会有这样的情况 起始的时候就1个leafPage 它的id是1
+                        let mut allocatedPages =
+                            db.allocatePagesByCount(1, db.getHeader().pageSize, page_header::PAGE_FLAG_BRANCH)?;
+
+                        allocatedPages.remove(0)
                     };
 
-                match pageElem {
-                    PageElem::BranchR(_, pageId) => {
-                        let page = db.getPageById(*pageId)?;
-                        let mut page = page.write().unwrap();
+                    let newParentPageId = newParentPage.header.id;
 
-                        lastOne.header.nextPageId = page.header.id;
-                        page.header.prevPageId = lastOne.header.id;
+                    // 因为rootPage变动了,dbHeader的rootPageId也要相应的变化
+                    db.getHeaderMut().rootPageId = newParentPageId;
+
+                    writeDestPage.header.parentPageId = newParentPageId;
+
+                    newParentPageId
+                } else {
+                    // 说明writeDestPage本身是那个的rootPage
+                    if writeDestPage.header.parentPageId == 0 {
+                        continue;
+                    } else {
+                        writeDestPage.header.parentPageId
                     }
-                    PageElem::Dummy4PutBranch(_, pageHeader) => {
-                        lastOne.header.nextPageId = pageHeader.id;
-                        pageHeader.prevPageId = lastOne.header.id;
-                    }
-                    _ => panic!("impossible"),
-                }
-            }
-        }
+                };
 
-        // todo pageElem当remove后page不是饱满的,是不是可以相邻的合并的
-        // 如果两个page合并，合并后的占用率是不是应该小于那个填充率的
-        // additionalPages空的时候,说明page实际的内容大小是1个page容的下
-        // 占用率要比availablePageSize的50%小
-        if additionalPages.is_empty() { // 意味着未发生过顶替的,replacement是none
-            let mut nextPageId = writeDestPage.header.nextPageId;
+            let parentPage = db.getPageById(writeDestPage.header.parentPageId)?; //writeDestPage.parentPage.as_ref().unwrap();
 
-            // 说明是有连在后边的page的
-            if nextPageId != 0 {
-                //let mut currentPage = NonNull::new(writeDestPage as *mut Page).unwrap();
-                let mut pageSizeAccumulated = writeDestPage.diskSize();
+            // 添加之前先瞧瞧是不是已经有了相应的pageId了
+            parentPagesNeedRewrite.insertIfNotExistLazy(parentPageId, || parentPage.clone());
 
-                pagesInfluencedByMerge.push(writeDestPageArc.clone());
+            // todo 需要应对新的问题pageId可能是之前循环过的lrucache中还有导致lock的重入的
+            let mut parentPageWriteGuard = parentPage.write().unwrap();
 
-                // todo 合并page时候也要调用pageAllocator的free回收
-                loop {
-                    let nextPageArc = db.getPageById(nextPageId)?;
-                    let mut nextPage = nextPageArc.write().unwrap();
+            // writeDestPage本身对应的branch elem在branch page的index的
+            let writeDestPageIndexInParentPage = {
+                let lastKeyInPage = writeDestPage.getLastKey();
 
-                    let nextPagePayloadSize = nextPage.payloadDiskSize();
+                let writeDestPageHeader = *utils::slice2RefMut(&writeDestPage.mmapMut);
 
-                    if pageSizeAccumulated + nextPagePayloadSize > db.availablePageSizeAfterSplit {
-                        break;
-                    }
+                let writeDestPageIndexInParentPage =
+                    match writeDestPage.header.indexInParentPage {
+                        Some(indexInParentPage) => {
+                            // 这是不可能的,因为indexInParentPage不是none意味着已有了parentPage,不可能是needBuildNewParentPage
+                            if needBuildNewParentPage {
+                                parentPageWriteGuard.pageElems.push(PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPageHeader));
+                                0
+                            } else {
+                                parentPageWriteGuard.pageElems[indexInParentPage] = PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPageHeader);
+                                indexInParentPage
+                            }
+                        }
+                        None => { // 说明直接到了leafPage未经过branch 要么 这是1个临时新建的branch
+                            parentPageWriteGuard.pageElems.push(PageElem::Dummy4PutBranch(lastKeyInPage, writeDestPageHeader));
+                            0
+                        }
+                    };
 
-                    // next page 上的elem全部迁移到writeDestPage上
-                    for pageElemInNextPage in nextPage.pageElems.drain(..) {
-                        writeDestPage.pageElems.push(pageElemInNextPage);
-                    }
+                writeDestPage.header.indexInParentPage = Some(writeDestPageIndexInParentPage);
 
-                    pagesInfluencedByMerge.push(nextPageArc.clone());
+                writeDestPageIndexInParentPage
+            };
 
-                    // 两边的elemCount 更改
-                    // 这2个page都需要write 如下可以通过page的write2Disk()实现
-                    // writeDestPage.header.elemCount += nextPage.header.elemCount;
-                    // nextPage.header.elemCount = 0;
+            // 如果还有additionalPage的话,就要在indexInParentPage后边不断的塞入的
+            // 使用drain是因为原来的测试是put之后重启在测试get,如果不重启直接get需要这样干清理掉的
+            let mut additionalPages = writeDestPage.additionalPages.drain(..).collect::<Vec<_>>();
 
-                    // nextPageId更改
-                    //writeDestPage.header.nextPageId = nextPage.header.id;
-
-                    // next page 对应的栏位要注销掉
-
-                    pageSizeAccumulated += nextPagePayloadSize;
-
-                    match nextPage.header.nextPageId {
-                        0 => break,
-                        other => nextPageId = other,
-                    }
-                }
-            }
-        } else {
-            // 虽然调用了两遍for循环有点low的,然后没有别的好套路
-            // 要到了最后再去move掉additionalPages落地到parentPage的pageElems了
-            let mut additionalPageIndexInParentPage = writeDestPageIndexInParentPage;
-            for additionalPage in additionalPages {
-                additionalPageIndexInParentPage += 1;
-
+            // writeDestPage体系内的pages(writeDestPage自身 加上 additionalPages)实现首尾相连
+            for (index, additionalPage) in additionalPages.iter().enumerate() {
+                // 要这样的原因是 additionalPage.header.prevPageId = writeDestPage.header.id; 会报错 can not assign which behind "&" reference
                 let additionalPageHeader: &mut PageHeader = utils::slice2RefMut(&additionalPage.mmapMut);
-                additionalPageHeader.indexInParentPage = Some(additionalPageIndexInParentPage);
 
-                // 不要忘了additionalPage
-                additionalPage.msync()?;
+                // writeDestPage体系内的pages(writeDestPage自身 加上 additionalPages) 首尾相连
+                if index == 0 { // 第1个additionalPage,它和writeDestPage关联
+                    writeDestPage.header.nextPageId = additionalPageHeader.id;
+                    additionalPageHeader.prevPageId = writeDestPage.header.id;
+                } else { // 前后additionPage相互关联
+                    let prevAdditionalPage = &additionalPages[index - 1];
+                    let prevAdditionalPageHeader: &mut PageHeader = utils::slice2RefMut(&prevAdditionalPage.mmapMut);
 
-                let lastKeyInPage = additionalPage.getLastKey();
+                    prevAdditionalPageHeader.nextPageId = additionalPageHeader.id;
+                    additionalPageHeader.prevPageId = prevAdditionalPageHeader.id;
+                }
 
-                // insert的目标index可以和len相同,塞到最后的和push相同
-                parentPageWriteGuard.pageElems.insert(
-                    additionalPageIndexInParentPage,
-                    PageElem::Dummy4PutBranch(lastKeyInPage, *additionalPageHeader),
-                );
+                // 顺便设置它们的parentPageId
+                additionalPageHeader.parentPageId = parentPageId;
             }
+
+            writeDestPage.header.parentPageId = parentPageId;
+
+            // writeDestPage体系内的pages 和外部的前后首尾相连
+            {
+                // parentPage.pageElems[writeDestPageIndexInParentPage-1] 和 它们中的第1个(writeDestPage) 关联
+                if writeDestPageIndexInParentPage >= 1 {
+                    let pageElem = &mut parentPageWriteGuard.pageElems[writeDestPageIndexInParentPage - 1];
+
+                    match pageElem {
+                        PageElem::BranchR(_, pageId) => {
+                            let page = db.getPageById(*pageId)?;
+                            let mut page = page.write().unwrap();
+
+                            page.header.nextPageId = writeDestPage.header.id;
+                            writeDestPage.header.prevPageId = page.header.id;
+                        }
+                        PageElem::Dummy4PutBranch(_, pageHeader) => {
+                            pageHeader.nextPageId = writeDestPage.header.id;
+                            writeDestPage.header.prevPageId = pageHeader.id;
+                        }
+                        _ => panic!("impossible"),
+                    }
+                }
+
+                // 它们中的最后1个 和 parentPage.pageElems[writeDestPageIndexInParentPage+1] 关联
+                if let Some(pageElem) = parentPageWriteGuard.pageElems.get_mut(writeDestPageIndexInParentPage + 1) {
+                    // 如果additionalPages没有的话lastOne便是writeDestPage本身
+                    let lastOne =
+                        if additionalPages.is_empty() {
+                            // 不能这样直接写,因为rust编译器是保守的
+                            // 它的视角来看不管additionalPages.is_empty()条件是不是成立,writeDestPage这个&mut都是move到了lastOne
+                            // writeDestPage
+
+                            // 只能这样通过野路子了
+                            unsafe { mem::transmute(writeDestPage as *mut Page) }
+                        } else {
+                            additionalPages.last_mut().unwrap()
+                        };
+
+                    match pageElem {
+                        PageElem::BranchR(_, pageId) => {
+                            let page = db.getPageById(*pageId)?;
+                            let mut page = page.write().unwrap();
+
+                            lastOne.header.nextPageId = page.header.id;
+                            page.header.prevPageId = lastOne.header.id;
+                        }
+                        PageElem::Dummy4PutBranch(_, pageHeader) => {
+                            lastOne.header.nextPageId = pageHeader.id;
+                            pageHeader.prevPageId = lastOne.header.id;
+                        }
+                        _ => panic!("impossible"),
+                    }
+                }
+            }
+
+            // todo pageElem当remove后page不是饱满的,是不是可以相邻的合并的
+            // 如果两个page合并，合并后的占用率是不是应该小于那个填充率的
+            // additionalPages空的时候,说明page实际的内容大小是1个page容的下
+            // 占用率要比availablePageSize的50%小
+            if additionalPages.is_empty() { // 意味着未发生过顶替的,replacement是none
+                let mut nextPageId = writeDestPage.header.nextPageId;
+
+                // 说明是有连在后边的page的
+                if nextPageId != 0 {
+                    //let mut currentPage = NonNull::new(writeDestPage as *mut Page).unwrap();
+                    let mut pageSizeAccumulated = writeDestPage.diskSize();
+
+                    pagesInfluencedByMerge.push(writeDestPageArc.clone());
+
+                    // todo 合并page时候也要调用pageAllocator的free回收
+                    loop {
+                        let nextPageArc = db.getPageById(nextPageId)?;
+                        let mut nextPage = nextPageArc.write().unwrap();
+
+                        let nextPagePayloadSize = nextPage.payloadDiskSize();
+
+                        if pageSizeAccumulated + nextPagePayloadSize > db.availablePageSizeAfterSplit {
+                            break;
+                        }
+
+                        // next page 上的elem全部move到writeDestPage上
+                        for pageElemInNextPage in nextPage.pageElems.drain(..) {
+                            writeDestPage.pageElems.push(pageElemInNextPage);
+                        }
+
+                        pagesInfluencedByMerge.push(nextPageArc.clone());
+
+                        // 两边的elemCount 更改
+                        // 这2个page都需要write 如下可以通过page的write2Disk()实现
+                        // writeDestPage.header.elemCount += nextPage.header.elemCount;
+                        // nextPage.header.elemCount = 0;
+
+                        // nextPageId更改
+                        //writeDestPage.header.nextPageId = nextPage.header.id;
+
+                        // next page 对应的栏位要注销掉
+
+                        pageSizeAccumulated += nextPagePayloadSize;
+
+                        match nextPage.header.nextPageId {
+                            0 => break,
+                            other => nextPageId = other,
+                        }
+                    }
+                }
+            } else {
+                // 虽然调用了两遍for循环有点low的,然后没有别的好套路
+                // 要到了最后再去move掉additionalPages落地到parentPage的pageElems了
+                let mut additionalPageIndexInParentPage = writeDestPageIndexInParentPage;
+                for additionalPage in additionalPages {
+                    additionalPageIndexInParentPage += 1;
+
+                    let additionalPageHeader: &mut PageHeader = utils::slice2RefMut(&additionalPage.mmapMut);
+                    additionalPageHeader.indexInParentPage = Some(additionalPageIndexInParentPage);
+
+                    // 不要忘了additionalPage
+                    additionalPage.msync()?;
+
+                    let lastKeyInPage = additionalPage.getLastKey();
+
+                    // insert的目标index可以和len相同,塞到最后的和push相同
+                    parentPageWriteGuard.pageElems.insert(
+                        additionalPageIndexInParentPage,
+                        PageElem::Dummy4PutBranch(lastKeyInPage, *additionalPageHeader),
+                    );
+                }
+            }
+
+            // todo 完成 page的msync不应该在write2Disk函数里调用应该在外边
+            writeDestPage.msync()?;
         }
 
-        // todo 完成 page的msync不应该在write2Disk函数里调用应该在外边
-        writeDestPage.msync()?;
-    }
+        // 需要merge的page数量应该至少有2个
+        if pagesInfluencedByMerge.len() >= 2 {
+            self.writePages(db, pagesInfluencedByMerge, parentPagesNeedRewrite, pagesNeedFree)?;
+        }
 
-    // 需要merge的page数量应该至少有2个
-    if pagesInfluencedByMerge.len() >= 2 {
-        writePages(db, pagesInfluencedByMerge, parentPagesNeedRewrite)?;
+        Ok(())
     }
-
-    Ok(())
 }
