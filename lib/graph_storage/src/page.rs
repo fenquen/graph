@@ -2,7 +2,7 @@ use std::hash::{Hash, Hasher};
 use std::mem;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
-use crate::page_header::{PageElemMeta, PageHeader};
+use crate::page_header::{PageElemHeader, PageHeader};
 use crate::{page_header, utils};
 use anyhow::Result;
 use memmap2::{MmapMut};
@@ -62,18 +62,6 @@ impl Page {
         size
     }
 
-    pub(crate) fn get1stElemMeta(&self) -> Result<&dyn PageElemMeta> {
-        let pageHeader = utils::slice2Ref::<PageHeader>(self.mmapMut.as_ref());
-        let pageElemMeta = pageHeader.readPageElemMeta(0)?;
-        Ok(pageElemMeta)
-    }
-
-    pub(crate) fn getLastElemMeta(&self) -> Result<&dyn PageElemMeta> {
-        let pageHeader = utils::slice2Ref::<PageHeader>(self.mmapMut.as_ref());
-        let pageElemMeta = pageHeader.readPageElemMeta(pageHeader.elemCount as usize - 1)?;
-        Ok(pageElemMeta)
-    }
-
     pub(crate) fn write2Disk(&mut self) -> Result<usize> {
         let pageSize = self.db.getHeader().pageSize;
 
@@ -88,17 +76,15 @@ impl Page {
 
         let mut originalSelfOpt = None;
 
-        let writePageHeader = |elementCount: usize, mmapMut: &MmapMut| {
-            let pageHeader: &mut PageHeader = utils::slice2RefMut(mmapMut);
-
+        let writePageHeader = |elementCount: usize, page: &mut Page| {
             // 写当前page的header
-            pageHeader.flags = if pageIsLeaf {
+            page.header.flags = if pageIsLeaf {
                 page_header::PAGE_FLAG_LEAF
             } else {
                 page_header::PAGE_FLAG_BRANCH
             };
 
-            pageHeader.elemCount = elementCount as u16;
+            page.header.elemCount = elementCount as u16;
         };
 
         // 需提前知道会不会分裂,以确定真正的pageSize大小
@@ -167,7 +153,7 @@ impl Page {
 
                 curPage = {
                     // 上1个的page写满之后的处理的
-                    writePageHeader(elementCount, unsafe { &curPage.as_ref().mmapMut });
+                    writePageHeader(elementCount, unsafe { curPage.as_mut() });
 
                     // 说明原来的leafPage空间不够了,分裂出了又1个leafPage
                     let additionalPage = additionalPages.pop().unwrap(); // db.allocateNewPage(page_header::PAGE_FLAG_LEAF)?;
@@ -196,7 +182,7 @@ impl Page {
         }
 
         // 全部的pageElem写完后的处理的
-        writePageHeader(elementCount, unsafe { &curPage.as_ref().mmapMut });
+        writePageHeader(elementCount, unsafe { curPage.as_mut() });
 
         // 分配切分pageElems到各个additionalPage
         // 使用倒序
@@ -250,12 +236,12 @@ impl Page {
         let pageHeader = utils::slice2RefMut::<PageHeader>(&mmapMut);
 
         let pageElems = {
-           let pageHeader = utils::slice2RefMut::<PageHeader>(&mmapMut);
+            let pageHeader = utils::slice2RefMut::<PageHeader>(&mmapMut);
 
             let mut pageElems = Vec::with_capacity(pageHeader.elemCount as usize);
 
             for index in 0..pageHeader.elemCount as usize {
-                let pageElemMeta = pageHeader.readPageElemMeta(index)?;
+                let pageElemMeta = pageHeader.readPageElemHeader(index)?;
                 let pageElem = pageElemMeta.readPageElem();
                 pageElems.push(pageElem);
             }

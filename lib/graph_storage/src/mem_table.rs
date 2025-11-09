@@ -42,7 +42,7 @@ pub(crate) struct MemTable {
 
     pub(crate) immutable: bool,
 
-    pub(crate) header: &'static mut MemTableFileHeader,
+    pub(crate) header: &'static mut MemTableHeader,
 }
 
 impl MemTable {
@@ -126,7 +126,7 @@ impl MemTable {
         for _ in 0..self.header.entryCount as usize {
             let (key, value, entrySize) = {
                 let (key, value, entrySize) =
-                    readEntry(&self.memTableFileMmap[self.posInFile..]);
+                    readMemTableFileElem(&self.memTableFileMmap[self.posInFile..]);
 
                 (
                     key.to_vec(),
@@ -184,7 +184,7 @@ impl MemTable {
 
         // 当前这个的kv对应的memtableEnrty
         let memTableFileEntryHeader = {
-            let memTableFileEntryHeader: &mut MemTableFileEntryHeader =
+            let memTableFileEntryHeader: &mut MemTableElemHeader =
                 utils::slice2RefMut(&self.memTableFileMmap[self.posInFile..]);
 
             memTableFileEntryHeader.keySize = keyWithTxId.len() as u16;
@@ -197,8 +197,8 @@ impl MemTable {
         };
 
         let entryContentMmap = {
-            let start = self.posInFile + MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
-            let end = self.posInFile + memTableFileEntryHeader.entrySize();
+            let start = self.posInFile + MEM_TABLE_FILE_ELEM_HEADER_SIZE;
+            let end = self.posInFile + memTableFileEntryHeader.elemSize();
 
             // macos特殊点
             // 在mmap长度大于文件大小的情况下,在超出文件原始大小的区域追加写入时,若写入位置超过一定程度后会出现BadAccess(通常是SIGBUS)
@@ -245,7 +245,7 @@ impl MemTable {
         // 可能会涉及到多个memTable,如果切换了新的,原来的旧的需要设置entryCount的
         //self.header.entryCount += 1;
         self.writtenEntryCountInTx += 1;
-        self.posInFile += memTableFileEntryHeader.entrySize();
+        self.posInFile += memTableFileEntryHeader.elemSize();
 
         // 变量体系中同步记录
         self.changes.insert(keyWithTxId, value);
@@ -336,36 +336,36 @@ impl Drop for MemTable {
     }
 }
 
-pub(crate) fn readEntry(entryData: &[u8]) -> (&[u8], Option<&[u8]>, usize) {
-    let memTableFileEntryHeader: &MemTableFileEntryHeader = utils::slice2Ref(entryData);
+pub(crate) fn readMemTableFileElem(elemBinary: &[u8]) -> (&[u8], Option<&[u8]>, usize) {
+    let memTableFileEntryHeader: &MemTableElemHeader = utils::slice2Ref(elemBinary);
 
     // keySize should greater than 0, valSize can be 0
     assert!(memTableFileEntryHeader.keySize > 0);
 
     let key = {
-        let start = MEM_TABLE_FILE_ENTRY_HEADER_SIZE;
+        let start = MEM_TABLE_FILE_ELEM_HEADER_SIZE;
         let end = start + memTableFileEntryHeader.keySize as usize;
 
-        &entryData[start..end]
+        &elemBinary[start..end]
     };
 
     let value =
         if memTableFileEntryHeader.valSize > 0 {
-            let start = MEM_TABLE_FILE_ENTRY_HEADER_SIZE + memTableFileEntryHeader.keySize as usize;
+            let start = MEM_TABLE_FILE_ELEM_HEADER_SIZE + memTableFileEntryHeader.keySize as usize;
             let end = start + memTableFileEntryHeader.valSize as usize;
 
-            Some(&entryData[start..end])
+            Some(&elemBinary[start..end])
         } else {
             None
         };
 
-    (key, value, memTableFileEntryHeader.entrySize())
+    (key, value, memTableFileEntryHeader.elemSize())
 }
 
-pub(crate) const MEM_TABLE_FILE_HEADER_SIZE: usize = size_of::<MemTableFileHeader>();
+pub(crate) const MEM_TABLE_FILE_HEADER_SIZE: usize = size_of::<MemTableHeader>();
 
 #[repr(C)]
-pub(crate) struct MemTableFileHeader {
+pub(crate) struct MemTableHeader {
     /// 当它是mutable时候 不断写入的时候递增
     pub(crate) entryCount: u32,
 
@@ -373,21 +373,22 @@ pub(crate) struct MemTableFileHeader {
     pub(crate) written2Disk: bool,
 }
 
-pub(crate) const MEM_TABLE_FILE_ENTRY_HEADER_SIZE: usize = size_of::<MemTableFileEntryHeader>();
+pub(crate) const MEM_TABLE_FILE_ELEM_HEADER_SIZE: usize = size_of::<MemTableElemHeader>();
 
+/// 和PageElemHeader像
 /// representation in file <br>
 /// keySize u16 | valSize u32 | key | val
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct MemTableFileEntryHeader {
+pub(crate) struct MemTableElemHeader {
     pub(crate) keySize: u16,
     pub(crate) valSize: u32,
 }
 
-impl MemTableFileEntryHeader {
+impl MemTableElemHeader {
     #[inline]
-    pub(crate) fn entrySize(&self) -> usize {
-        MEM_TABLE_FILE_ENTRY_HEADER_SIZE +
+    pub(crate) fn elemSize(&self) -> usize {
+        MEM_TABLE_FILE_ELEM_HEADER_SIZE +
             self.keySize as usize + self.valSize as usize
     }
 }

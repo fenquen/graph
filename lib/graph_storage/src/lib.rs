@@ -45,11 +45,11 @@ mod tests {
         println!("{},{}", size_of::<DBHeader>(), align_of::<DBHeader>());
 
 
-        let a =Arc::new(RwLock::new(1));
+        let a = Arc::new(RwLock::new(1));
         let b = a.clone();
 
         let readGuardA = a.read().unwrap();
-        let readGuardB=b.read().unwrap();
+        let readGuardB = b.read().unwrap();
     }
 
     #[test]
@@ -62,10 +62,16 @@ mod tests {
 
         let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
 
+        let mut vec = vec![0; 9];
         let a = Instant::now();
         for a in 0..ELEM_COUNT {
-            let aa = a.to_be_bytes();
-            tx.set(&aa, &aa).unwrap();
+            {
+                let v = &mut vec.as_mut_slice()[0..8];
+               v.copy_from_slice(&a.to_le_bytes());
+            }
+
+            // let aa = a.to_be_bytes();
+            tx.set(vec.as_slice(), vec.as_slice()).unwrap();
         }
         println!("set time: {} micro second", a.elapsed().as_micros());
 
@@ -85,9 +91,14 @@ mod tests {
         let db = DB::open(None).unwrap();
         let tx = db.newTx().unwrap();
 
+        let mut vec = vec![0; 19];
+        let v = vec.as_mut_slice();
+        let v = &mut v[0..8];
+
         for a in 0..ELEM_COUNT {
-            let key = a.to_be_bytes();
-            assert_eq!(tx.get(&key).unwrap().as_ref().unwrap().as_slice(), key.as_slice());
+            v.copy_from_slice(&a.to_le_bytes());
+           // let key = a.to_be_bytes();
+            assert_eq!(tx.get(v).unwrap().as_ref().unwrap().as_slice(), v);
         }
     }
 

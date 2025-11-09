@@ -8,7 +8,7 @@ use std::mem::{ManuallyDrop, MaybeUninit};
 use std::os::fd::RawFd;
 use std::sync::{Arc, RwLock};
 use memmap2::{Advice, MmapMut};
-use crate::mem_table::{MemTableFileHeader};
+use crate::mem_table::{MemTableHeader};
 use crate::{mem_table, page_header, tx, utils};
 use anyhow::Result;
 use crate::cursor::Cursor;
@@ -41,7 +41,7 @@ impl TryFrom<RawFd> for MemTableR {
 
 impl MemTableR {
     pub(crate) fn iter(&self) -> MemTableRIter<'_> {
-        let fileHeader: &MemTableFileHeader = utils::slice2Ref(&self.memTableFileMmap);
+        let fileHeader: &MemTableHeader = utils::slice2Ref(&self.memTableFileMmap);
 
         MemTableRIter {
             data: &self.memTableFileMmap,
@@ -67,7 +67,7 @@ impl<'a> Iterator for MemTableRIter<'a> {
         }
 
         let (key, value, entrySize) =
-            mem_table::readEntry(&self.data[self.posInfile..]);
+            mem_table::readMemTableFileElem(&self.data[self.posInfile..]);
 
         self.entryCountRemain -= 1;
         self.posInfile += entrySize;
@@ -189,7 +189,7 @@ impl MemTableRWriter {
 
         // memTableRs中的元素已经全部落地了,通知对应的immutable memTable
         for memTableR in memTableRs.iter() {
-            let header: &mut MemTableFileHeader = utils::slice2RefMut(&memTableR.memTableFileMmap);
+            let header: &mut MemTableHeader = utils::slice2RefMut(&memTableR.memTableFileMmap);
             header.written2Disk = true
         }
 
@@ -336,7 +336,7 @@ impl MemTableRWriter {
             let writeDestPageIndexInParentPage = {
                 let lastKeyInPage = writeDestPage.getLastKey();
 
-                let writeDestPageHeader = *utils::slice2RefMut(&writeDestPage.mmapMut);
+                let writeDestPageHeader = *writeDestPage.header;
 
                 let writeDestPageIndexInParentPage =
                     match writeDestPage.header.indexInParentPage {
@@ -498,9 +498,8 @@ impl MemTableRWriter {
                 let mut additionalPageIndexInParentPage = writeDestPageIndexInParentPage;
                 for additionalPage in additionalPages {
                     additionalPageIndexInParentPage += 1;
-
-                    let additionalPageHeader: &mut PageHeader = utils::slice2RefMut(&additionalPage.mmapMut);
-                    additionalPageHeader.indexInParentPage = Some(additionalPageIndexInParentPage);
+                    
+                    additionalPage.header.indexInParentPage = Some(additionalPageIndexInParentPage);
 
                     // 不要忘了additionalPage
                     additionalPage.msync()?;
@@ -510,7 +509,7 @@ impl MemTableRWriter {
                     // insert的目标index可以和len相同,塞到最后的和push相同
                     parentPageWriteGuard.pageElems.insert(
                         additionalPageIndexInParentPage,
-                        PageElem::Dummy4PutBranch(lastKeyInPage, *additionalPageHeader),
+                        PageElem::Dummy4PutBranch(lastKeyInPage, *additionalPage.header),
                     );
                 }
             }

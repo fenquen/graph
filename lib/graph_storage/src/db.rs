@@ -12,7 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as atomic_ordering};
+use std::sync::atomic::{AtomicBool};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{mpsc, Arc, Mutex, RwLock, RwLockWriteGuard, Weak};
 use std::{fs, mem, thread};
@@ -95,9 +95,11 @@ impl Default for DBOption {
 pub struct DB {
     pub(crate) dbOption: DBOption,
 
-    dbHeaderMmap: MmapMut,
+    headerMmapMut: MmapMut,
+    header: &'static mut DBHeader,
+
     lock: Mutex<()>,
-    txIdCounter: AtomicU64,
+    // txIdCounter: AtomicU64,
     // pageIdCounter: AtomicU64,
 
     /// sorted by block file number
@@ -207,10 +209,11 @@ impl DB {
             Arc::new(
                 DB {
                     dbOption,
-                    dbHeaderMmap,
+                    header: dbHeader,
+                    headerMmapMut: dbHeaderMmap,
                     lock: Mutex::new(()),
                     // 接着原来的保存在dbHeader的txId
-                    txIdCounter: AtomicU64::new(dbHeader.lastTxId + 1),
+                    //txIdCounter: AtomicU64::new(dbHeader.lastTxId + 1),
                     // pageIdCounter: AtomicU64::new(dbHeader.lastPageId + 1),
                     blockFileFds: RwLock::new(blockFileFds),
                     pageCaches,
@@ -230,11 +233,11 @@ impl DB {
             // page0 是用来保存dbheader的 不对外使用 需要保留
             {
                 let mut pageAllocator = db.pageAllocator.write().unwrap();
-                pageAllocator.allocate(dbHeader.pageSize, dbHeader.pageSize);
+                pageAllocator.allocate(db.header.pageSize, db.header.pageSize);
             }
 
             // page1 是默认起始的rootPage 且当时是leaf的
-            db.allocatePagesByCount(1, dbHeader.pageSize, page_header::PAGE_FLAG_LEAF)?;
+            db.allocatePagesByCount(1, db.header.pageSize, page_header::PAGE_FLAG_LEAF)?;
         }
 
         // set reference to db
@@ -311,12 +314,12 @@ impl DB {
 
     #[inline]
     pub(crate) fn getHeader(&self) -> &DBHeader {
-        utils::slice2Ref(&self.dbHeaderMmap)
+        self.header
     }
 
     #[inline]
     pub(crate) fn getHeaderMut(&self) -> &mut DBHeader {
-        utils::slice2RefMut(&self.dbHeaderMmap)
+        utils::slice2RefMut(&self.headerMmapMut)
     }
 
     /// 尝试从lru获取,要是没有就读取blockFile然后mmap映射,并将其加入lru
@@ -364,17 +367,17 @@ impl DB {
         (dbHeader.pageSize * pageId as usize) / dbHeader.blockSize
     }
 
+    /// txId increase
     pub(crate) fn allocateTxId(&self) -> Result<TxId> {
-        let txId = self.txIdCounter.fetch_add(1, atomic_ordering::SeqCst);
-
         let dbHeader = self.getHeaderMut();
 
-        // txId increase
-        {
+        let txId = {
             let lock = self.lock.lock().unwrap();
-            dbHeader.lastTxId = txId;
-            self.dbHeaderMmap.flush()?;
-        }
+            let txId = dbHeader.lastTxId;
+            dbHeader.lastTxId += 1;
+            self.headerMmapMut.flush()?;
+            txId
+        };
 
         Ok(txId)
     }
@@ -651,7 +654,7 @@ impl DB {
     fn processMemTableRs(db: Weak<DB>, memTableRReceiver: Receiver<MemTableR>, countThreshold: usize) {
         let mut vec: Vec<MemTableR> = Vec::with_capacity(countThreshold);
         let mut memTableRWriter = MemTableRWriter::new();
-        
+
         // 收取了某些数量后再落地
         for memTableR in memTableRReceiver {
             match db.upgrade() {

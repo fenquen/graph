@@ -19,9 +19,9 @@ pub(crate) const PAGE_FLAG_FREEABLE: u16 = 1 << 6;
 pub(crate) const PAGE_HEADER_SIZE: usize = size_of::<PageHeader>();
 pub(crate) const PAGE_ID_SIZE: usize = size_of::<PageId>();
 
-pub(crate) const LEAF_ELEM_META_SIZE: usize = size_of::<PageElemMetaLeaf>();
-pub(crate) const LEAF_ELEM_OVERFLOW_META_SIZE: usize = size_of::<PageElemMetaLeafOverflow>();
-pub(crate) const BRANCH_ELEM_META_SIZE: usize = size_of::<PageElemMetaBranch>();
+pub(crate) const LEAF_ELEM_META_SIZE: usize = size_of::<PageElemHeaderLeaf>();
+pub(crate) const LEAF_ELEM_OVERFLOW_META_SIZE: usize = size_of::<PageElemHeaderLeafOverflow>();
+pub(crate) const BRANCH_ELEM_META_SIZE: usize = size_of::<PageElemHeaderBranch>();
 
 #[derive(Copy, Clone, Default)]
 #[repr(C)]
@@ -106,24 +106,25 @@ macro_rules! impl_read_page_elem_meta {
 }
 
 impl<'a> PageHeader {
-    pub(crate) fn readPageElemMeta(&self, index: usize) -> Result<&dyn PageElemMeta> {
+    pub(crate) fn readPageElemHeader(&self, index: usize) -> Result<&dyn PageElemHeader> {
         if self.isLeaf() {
-            return Ok(impl_read_page_elem_meta!(self, PageElemMetaLeaf, index));
+            return Ok(impl_read_page_elem_meta!(self, PageElemHeaderLeaf, index));
         }
 
         if self.isLeafOverflow() {
-            return Ok(impl_read_page_elem_meta!(self, PageElemMetaLeafOverflow, index));
+            return Ok(impl_read_page_elem_meta!(self, PageElemHeaderLeafOverflow, index));
         }
 
         if self.isBranch() {
-            return Ok(impl_read_page_elem_meta!(self, PageElemMetaBranch, index));
+            return Ok(impl_read_page_elem_meta!(self, PageElemHeaderBranch, index));
         }
 
         throw!("unsupported page header")
     }
 }
 
-pub(crate) trait PageElemMeta {
+/// 和MemTableFileEntryHeader像
+pub(crate) trait PageElemHeader {
     fn readPageElem(&'_ self) -> PageElem<'_>;
 
     /// 整个的pageElem大小
@@ -133,7 +134,7 @@ pub(crate) trait PageElemMeta {
 /// 对应 PageElem::Leaf
 #[derive(Copy, Clone)]
 #[repr(C)]
-pub(crate) struct PageElemMetaLeaf {
+pub(crate) struct PageElemHeaderLeaf {
     /// 实际数据离当前的offset
     // pub(crate) offset: u16,
     pub(crate) keySize: u16,
@@ -141,7 +142,7 @@ pub(crate) struct PageElemMetaLeaf {
     pub(crate) valueSize: u32,
 }
 
-impl PageElemMeta for PageElemMetaLeaf {
+impl PageElemHeader for PageElemHeaderLeaf {
     fn readPageElem(&'_ self) -> PageElem<'_> {
         unsafe {
             //const OFFSET: usize = size_of::<u16>() + size_of::<u32>();
@@ -169,13 +170,13 @@ impl PageElemMeta for PageElemMetaLeaf {
 /// 对应 PageElem::LeafOverflow
 #[derive(Copy, Clone)]
 #[repr(C)]
-pub(crate) struct PageElemMetaLeafOverflow {
+pub(crate) struct PageElemHeaderLeafOverflow {
     // pub(crate) offset: u16,
     pub(crate) keySize: u16,
     pub(crate) valPos: usize,
 }
 
-impl PageElemMeta for PageElemMetaLeafOverflow {
+impl PageElemHeader for PageElemHeaderLeafOverflow {
     fn readPageElem(&'_ self) -> PageElem<'_> {
         unsafe {
             //const OFFSET: usize = size_of::<u16>() + size_of::<usize>();
@@ -194,14 +195,14 @@ impl PageElemMeta for PageElemMetaLeafOverflow {
 /// 对应 PageElem::Branch
 #[derive(Copy, Clone)]
 #[repr(C)]
-pub(crate) struct PageElemMetaBranch {
+pub(crate) struct PageElemHeaderBranch {
     /// 实际数据离当前的offset
     // pub(crate) offset: u16,
     pub(crate) keySize: u16,
     pub(crate) pageId: PageId,
 }
 
-impl PageElemMeta for PageElemMetaBranch {
+impl PageElemHeader for PageElemHeaderBranch {
     fn readPageElem(&'_ self) -> PageElem<'_> {
         unsafe {
             // const OFFSET: usize = size_of::<u16>() + size_of::<PageId>();

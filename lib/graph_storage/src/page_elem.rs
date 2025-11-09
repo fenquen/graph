@@ -3,7 +3,7 @@
  */
 
 use crate::{page_header, utils};
-use crate::page_header::{PageElemMetaBranch, PageElemMetaLeaf, PageElemMetaLeafOverflow, PageHeader};
+use crate::page_header::{PageElemHeaderBranch, PageElemHeaderLeaf, PageElemHeaderLeafOverflow, PageHeader};
 use crate::types::PageId;
 
 /// table(文件)->block   block(文件)->page
@@ -40,7 +40,7 @@ impl<'a> PageElem<'a> {
             PageElem::LeafR(k, v) => {
                 let (pageElemMetaSlice, kvSlice) = dest.split_at_mut(page_header::LEAF_ELEM_META_SIZE);
 
-                let pageElemMetaLeaf: &mut PageElemMetaLeaf = utils::slice2RefMut(pageElemMetaSlice);
+                let pageElemMetaLeaf: &mut PageElemHeaderLeaf = utils::slice2RefMut(pageElemMetaSlice);
                 pageElemMetaLeaf.keySize = k.len() as u16;
                 pageElemMetaLeaf.valueSize = v.map_or_else(|| { 0 }, |v| v.len()) as u32;
 
@@ -73,7 +73,7 @@ impl<'a> PageElem<'a> {
             PageElem::Dummy4PutLeaf(k, v) => {
                 let (pageElemMetaSlice, kvSlice) = dest.split_at_mut(page_header::LEAF_ELEM_META_SIZE);
 
-                let pageElemMetaLeaf: &mut PageElemMetaLeaf = utils::slice2RefMut(pageElemMetaSlice);
+                let pageElemMetaLeaf: &mut PageElemHeaderLeaf = utils::slice2RefMut(pageElemMetaSlice);
                 pageElemMetaLeaf.keySize = k.len() as u16;
                 pageElemMetaLeaf.valueSize = v.as_ref().map_or_else(|| { 0 }, |v| v.len()) as u32;
 
@@ -95,7 +95,7 @@ impl<'a> PageElem<'a> {
                     return Ok(keySlice);
                 }
 
-                let pageElemMetaLeafOverflow: &mut PageElemMetaLeafOverflow = utils::slice2RefMut(pageElemMetaSlice);
+                let pageElemMetaLeafOverflow: &mut PageElemHeaderLeafOverflow = utils::slice2RefMut(pageElemMetaSlice);
                 pageElemMetaLeafOverflow.keySize = k.len() as u16;
                 pageElemMetaLeafOverflow.valPos = *valPos;
 
@@ -107,7 +107,7 @@ impl<'a> PageElem<'a> {
             PageElem::Dummy4PutLeafOverflow(k, valPos, _) => {
                 let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::LEAF_ELEM_OVERFLOW_META_SIZE);
 
-                let pageElemMetaLeafOverflow: &mut PageElemMetaLeafOverflow = utils::slice2RefMut(pageElemMetaSlice);
+                let pageElemMetaLeafOverflow: &mut PageElemHeaderLeafOverflow = utils::slice2RefMut(pageElemMetaSlice);
                 pageElemMetaLeafOverflow.keySize = k.len() as u16;
                 pageElemMetaLeafOverflow.valPos = *valPos;
 
@@ -123,7 +123,7 @@ impl<'a> PageElem<'a> {
                     return Ok(keySlice);
                 }
 
-                let pageElemMetaBranch: &mut PageElemMetaBranch = utils::slice2RefMut(pageElemMetaSlice);
+                let pageElemMetaBranch: &mut PageElemHeaderBranch = utils::slice2RefMut(pageElemMetaSlice);
                 pageElemMetaBranch.keySize = k.len() as u16;
                 pageElemMetaBranch.pageId = *pageId;
 
@@ -134,7 +134,7 @@ impl<'a> PageElem<'a> {
             PageElem::Dummy4PutBranch(k, childPageHeader) => {
                 let (pageElemMetaSlice, keySlice) = dest.split_at_mut(page_header::BRANCH_ELEM_META_SIZE);
 
-                let pageElemMetaBranch: &mut PageElemMetaBranch = utils::slice2RefMut(pageElemMetaSlice);
+                let pageElemMetaBranch: &mut PageElemHeaderBranch = utils::slice2RefMut(pageElemMetaSlice);
                 pageElemMetaBranch.keySize = k.len() as u16;
                 pageElemMetaBranch.pageId = childPageHeader.id;
                 /*{
