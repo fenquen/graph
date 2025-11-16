@@ -2,12 +2,14 @@ use std::hash::{Hash, Hasher};
 use std::mem;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
-use crate::page_header::{PageElemHeader, PageHeader};
+use crate::page_header::{PageHeader, PAGE_HEADER_SIZE};
 use crate::{page_header, utils};
 use anyhow::Result;
-use memmap2::{MmapMut};
+use memmap2::MmapMut;
 use crate::db::DB;
 use crate::page_elem::PageElem;
+use crate::page_elem_header::{PageElemHeader, PageElemHeaderBranch, PageElemHeaderLeaf, PageElemHeaderLeafOverflow};
+use crate::utils::Codec;
 
 pub(crate) const OVERFLOW_DIVIDE: usize = 100;
 
@@ -232,17 +234,51 @@ impl Page {
         self.header.reset()
     }
 
-    pub(crate) fn restore(db: &DB, mmapMut: MmapMut) -> Result<Page> {
-        let pageHeader = utils::slice2RefMut::<PageHeader>(&mmapMut);
-
+    pub(crate) fn restore(db: &DB, pageMmapMut: MmapMut) -> Result<Page> {
+        let pageHeader = utils::slice2RefMut::<PageHeader>(&pageMmapMut);
+        
         let pageElems = {
-            let pageHeader = utils::slice2RefMut::<PageHeader>(&mmapMut);
+            let mut pageElems = Vec::with_capacity(pageHeader.elemCount.try_into().unwrap());
+            let pageElemsBinary: &[u8] = unsafe { mem::transmute(&pageMmapMut[PAGE_HEADER_SIZE..]) };
 
-            let mut pageElems = Vec::with_capacity(pageHeader.elemCount as usize);
+            // pageHeader虽然不是实际文件的打头,page却是和os的内存页大小是相同的
+            let mut position = 0;
 
-            for index in 0..pageHeader.elemCount as usize {
-                let pageElemMeta = pageHeader.readPageElemHeader(index)?;
-                let pageElem = pageElemMeta.readPageElem();
+            for _ in 0..pageHeader.elemCount as usize {
+                let pageElem =
+                    if pageHeader.isLeaf() {
+                        let src = &pageElemsBinary[position..];
+
+                        let pageElemHeaderLeaf = PageElemHeaderLeaf::deserializeFrom(src);
+                        let pageElem = pageElemHeaderLeaf.readPageElem(src);
+
+                        position += pageElemHeaderLeaf.elemTotalSize();
+
+                        pageElem
+                    } else if pageHeader.isBranch() {
+                        let src = &pageElemsBinary[position..];
+
+                        let pageElemHeaderBranch = PageElemHeaderBranch::deserializeFrom(src);
+                        let pageElem = pageElemHeaderBranch.readPageElem(src);
+
+                        position += pageElemHeaderBranch.elemTotalSize();
+
+                        pageElem
+                    } else if pageHeader.isLeafOverflow() {
+                        let src = &pageElemsBinary[position..];
+
+                        let pageElemHeaderLeafOverflow = PageElemHeaderLeafOverflow::deserializeFrom(src);
+                        let pageElem = pageElemHeaderLeafOverflow.readPageElem(src);
+
+                        position += pageElemHeaderLeafOverflow.elemTotalSize();
+
+                        pageElem
+                    } else {
+                        throw!("unsupported page header")
+                    };
+
+                //let pageElemHeader = pageHeader.readPageElemHeader(index)?;
+                //let pageElem = pageElemHeader.readPageElem();
                 pageElems.push(pageElem);
             }
 
@@ -254,7 +290,7 @@ impl Page {
             db: unsafe { mem::transmute(db) },
             //parentPage: None,
             //indexInParentPage: None,
-            mmapMut,
+            mmapMut: pageMmapMut,
             header: pageHeader,
             pageElems,
             //childPages: None,

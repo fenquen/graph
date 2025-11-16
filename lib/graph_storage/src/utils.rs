@@ -191,24 +191,12 @@ pub(crate) fn ceilLog2(x: usize) -> usize {
 }
 
 pub(crate) trait HashMapExt<K, V> {
-    fn insetIfNotExist(&mut self, key: K, value: V) -> (bool, Option<V>);
-
     fn insertIfNotExistLazy(&mut self, key: K, valueFn: impl Fn() -> V) -> (bool, Option<V>);
-
-    fn absorbNotExist(&mut self, other: HashMap<K, V>);
 
     fn isNotEmpty(&self) -> bool;
 }
 
 impl<K: Eq + Hash, V> HashMapExt<K, V> for HashMap<K, V> {
-    fn insetIfNotExist(&mut self, key: K, value: V) -> (bool, Option<V>) {
-        if self.contains_key(&key) {
-            (false, None)
-        } else {
-            (true, self.insert(key, value))
-        }
-    }
-
     fn insertIfNotExistLazy(&mut self, key: K, valueFn: impl Fn() -> V) -> (bool, Option<V>) {
         if self.contains_key(&key) {
             (false, None)
@@ -217,13 +205,44 @@ impl<K: Eq + Hash, V> HashMapExt<K, V> for HashMap<K, V> {
         }
     }
 
-    fn absorbNotExist(&mut self, other: HashMap<K, V>) {
-        for (key, value) in other {
-            self.insetIfNotExist(key, value);
-        }
-    }
 
     fn isNotEmpty(&self) -> bool {
         self.is_empty() == false
     }
 }
+
+pub(crate) fn readNum<T: Copy + Codec>(src: &[u8]) -> T {
+    <T as Codec>::deserializeFrom(src)
+}
+
+pub(crate) fn writeNum<T: Copy + Codec>(value: T, dest: &mut [u8]) {
+    value.serializeTo(dest);
+}
+
+pub(crate) trait Codec {
+    fn serializeTo(&self, dest: &mut [u8]);
+
+    fn deserializeFrom(src: &[u8]) -> Self;
+}
+
+macro_rules! impl_codec_for_num {
+    ($($t:ty),*) => {
+        $(
+            impl Codec for $t {
+                fn serializeTo(&self, dest: &mut [u8]) {
+                    let bytes = self.to_be_bytes();
+                    dest[..bytes.len()].copy_from_slice(&bytes);
+                }
+
+                fn deserializeFrom(src: &[u8]) -> Self {
+                    let mut bytes = [0u8; std::mem::size_of::<$t>()];
+                    bytes.copy_from_slice(&src[..std::mem::size_of::<$t>()]);
+                    <$t>::from_be_bytes(bytes)
+                }
+            }
+        )*
+    };
+}
+
+// 使用宏为常见数字类型实现Codec trait
+impl_codec_for_num!(u8,u16,u32,u64,usize,i8,i16,i32,i64);

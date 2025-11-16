@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use crate::db::{DB, MEM_TABLE_FILE_EXTENSION};
 use crate::mem_table_r::MemTableR;
+use crate::utils::Codec;
 
 /// memTable 文件结构
 /// | entryCount | keySize | valSize | 实际data | keySize | valSize | 实际data |
@@ -97,7 +98,7 @@ impl MemTable {
             memTableFileFd,
             memTableFileMmap,
             maxFileSizeBeforeSwitch: newMemTableFileSize,
-            posInFile: MEM_TABLE_FILE_HEADER_SIZE,
+            posInFile: MEM_TABLE_HEADER_SIZE,
             writtenEntryCountInTx: 0,
             //#[cfg(target_os = "macos")]
             currentFileSize: newMemTableFileSize,
@@ -124,19 +125,19 @@ impl MemTable {
         assert!(self.immutable);
 
         for _ in 0..self.header.entryCount as usize {
-            let (key, value, entrySize) = {
-                let (key, value, entrySize) =
-                    readMemTableFileElem(&self.memTableFileMmap[self.posInFile..]);
+            let (key, value, elemSize) = {
+                let (key, value, elemSize) =
+                    readMemTableElem(&self.memTableFileMmap[self.posInFile..]);
 
                 (
                     key.to_vec(),
                     value.map(|value| value.to_vec()),
-                    entrySize
+                    elemSize
                 )
             };
 
             self.changes.insert(key, value);
-            self.posInFile += entrySize;
+            self.posInFile += elemSize;
         }
 
         Ok(())
@@ -183,22 +184,14 @@ impl MemTable {
         // }
 
         // 当前这个的kv对应的memtableEnrty
-        let memTableFileEntryHeader = {
-            let memTableFileEntryHeader: &mut MemTableElemHeader =
-                utils::slice2RefMut(&self.memTableFileMmap[self.posInFile..]);
-
-            memTableFileEntryHeader.keySize = keyWithTxId.len() as u16;
-
-            if let Some(ref val) = value {
-                memTableFileEntryHeader.valSize = val.len() as u32;
-            }
-
-            memTableFileEntryHeader
+        let memTableElemHeader = MemTableElemHeader {
+            keySize: keyWithTxId.len() as u16,
+            valueSize: value.as_ref().map_or(0, |v| v.len()) as u32,
         };
 
-        let entryContentMmap = {
-            let start = self.posInFile + MEM_TABLE_FILE_ELEM_HEADER_SIZE;
-            let end = self.posInFile + memTableFileEntryHeader.elemSize();
+        let memTableElemBinary = {
+            let start = self.posInFile; //+ MEM_TABLE_FILE_ELEM_HEADER_SIZE;
+            let end = self.posInFile + memTableElemHeader.elemTotalSize();
 
             // macos特殊点
             // 在mmap长度大于文件大小的情况下,在超出文件原始大小的区域追加写入时,若写入位置超过一定程度后会出现BadAccess(通常是SIGBUS)
@@ -233,19 +226,30 @@ impl MemTable {
             &mut self.memTableFileMmap[start..end]
         };
 
-        // 落地 key 到memtable对应的文件
-        entryContentMmap[..keyWithTxId.len()].copy_from_slice(keyWithTxId.as_slice());
+        {
+            let mut position = 0usize;
 
-        // 落地 val 到memtable对应的文件
-        if let Some(ref value) = value {
-            entryContentMmap[keyWithTxId.len()..].copy_from_slice(value);
+            // 落地 header 到memtable对应的文件
+            memTableElemHeader.serializeTo(&mut memTableElemBinary[..MEM_TABLE_FILE_ELEM_HEADER_SIZE]);
+            position += MEM_TABLE_FILE_ELEM_HEADER_SIZE;
+
+            // 落地 key 到memtable对应的文件
+            memTableElemBinary[position..position + keyWithTxId.len()].copy_from_slice(keyWithTxId.as_slice());
+            position += keyWithTxId.len();
+
+            // 落地 val 到memtable对应的文件
+            if let Some(ref value) = value {
+                if value.len() > 0 {
+                    memTableElemBinary[position..].copy_from_slice(value);
+                }
+            }
         }
 
         // entryCount不应1个个递增,应该以tx的entryCount为单位来更新的
         // 可能会涉及到多个memTable,如果切换了新的,原来的旧的需要设置entryCount的
         //self.header.entryCount += 1;
         self.writtenEntryCountInTx += 1;
-        self.posInFile += memTableFileEntryHeader.elemSize();
+        self.posInFile += memTableElemHeader.elemTotalSize();
 
         // 变量体系中同步记录
         self.changes.insert(keyWithTxId, value);
@@ -261,7 +265,7 @@ impl MemTable {
         self.refreshEntryCount();
         self.msync()?;
 
-        let newMemTableFileSize = db.dbOption.memTableMaxSize + MEM_TABLE_FILE_HEADER_SIZE;
+        let newMemTableFileSize = db.dbOption.memTableMaxSize + MEM_TABLE_HEADER_SIZE;
 
         // open a new memTable
         // 测试得知当设置memTable大小为1024byte时候,以下的action要消耗4ms的
@@ -336,8 +340,8 @@ impl Drop for MemTable {
     }
 }
 
-pub(crate) fn readMemTableFileElem(elemBinary: &[u8]) -> (&[u8], Option<&[u8]>, usize) {
-    let memTableFileEntryHeader: &MemTableElemHeader = utils::slice2Ref(elemBinary);
+pub(crate) fn readMemTableElem(elemBinary: &[u8]) -> (&[u8], Option<&[u8]>, usize) {
+    let memTableFileEntryHeader = MemTableElemHeader::deserializeFrom(elemBinary);
 
     // keySize should greater than 0, valSize can be 0
     assert!(memTableFileEntryHeader.keySize > 0);
@@ -350,19 +354,19 @@ pub(crate) fn readMemTableFileElem(elemBinary: &[u8]) -> (&[u8], Option<&[u8]>, 
     };
 
     let value =
-        if memTableFileEntryHeader.valSize > 0 {
+        if memTableFileEntryHeader.valueSize > 0 {
             let start = MEM_TABLE_FILE_ELEM_HEADER_SIZE + memTableFileEntryHeader.keySize as usize;
-            let end = start + memTableFileEntryHeader.valSize as usize;
+            let end = start + memTableFileEntryHeader.valueSize as usize;
 
             Some(&elemBinary[start..end])
         } else {
             None
         };
 
-    (key, value, memTableFileEntryHeader.elemSize())
+    (key, value, memTableFileEntryHeader.elemTotalSize())
 }
 
-pub(crate) const MEM_TABLE_FILE_HEADER_SIZE: usize = size_of::<MemTableHeader>();
+pub(crate) const MEM_TABLE_HEADER_SIZE: usize = size_of::<MemTableHeader>();
 
 #[repr(C)]
 pub(crate) struct MemTableHeader {
@@ -370,10 +374,14 @@ pub(crate) struct MemTableHeader {
     pub(crate) entryCount: u32,
 
     /// 由对应的memTableR写入,当true时候当前这个memTable就可删掉了
+    /// 目前当启动时候/switch2NewMemTable时候会读取它,如果是true删掉对应的memTable
     pub(crate) written2Disk: bool,
 }
 
-pub(crate) const MEM_TABLE_FILE_ELEM_HEADER_SIZE: usize = size_of::<MemTableElemHeader>();
+// size_of::<MemTableElemHeader>();
+pub(crate) const MEM_TABLE_FILE_ELEM_HEADER_SIZE: usize = {
+    size_of::<u16>() + size_of::<u32>()
+};
 
 /// 和PageElemHeader像
 /// representation in file <br>
@@ -382,14 +390,38 @@ pub(crate) const MEM_TABLE_FILE_ELEM_HEADER_SIZE: usize = size_of::<MemTableElem
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct MemTableElemHeader {
     pub(crate) keySize: u16,
-    pub(crate) valSize: u32,
+    pub(crate) valueSize: u32,
 }
 
 impl MemTableElemHeader {
     #[inline]
-    pub(crate) fn elemSize(&self) -> usize {
+    pub(crate) fn elemTotalSize(&self) -> usize {
         MEM_TABLE_FILE_ELEM_HEADER_SIZE +
-            self.keySize as usize + self.valSize as usize
+            self.keySize as usize + self.valueSize as usize
     }
 }
 
+impl Codec for MemTableElemHeader {
+    fn serializeTo(&self, dest: &mut [u8]) {
+        let mut position = 0usize;
+
+        utils::writeNum(self.keySize, &mut dest[position..]);
+        position += size_of_val(&self.keySize);
+
+        utils::writeNum(self.valueSize, &mut dest[position..]);
+    }
+
+    fn deserializeFrom(src: &[u8]) -> MemTableElemHeader {
+        let mut position = 0usize;
+
+        let keySize = utils::readNum(&src[position..]);
+        position += size_of::<u16>();
+
+        let valueSize = utils::readNum(&src[position..]);
+
+        MemTableElemHeader {
+            keySize,
+            valueSize,
+        }
+    }
+}

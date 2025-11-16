@@ -6,7 +6,7 @@ use crate::types::{PageId, TxId};
 use crate::{page_header, utils};
 use anyhow::Result;
 use memmap2::{Advice, MmapMut};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -103,7 +103,7 @@ pub struct DB {
     // pageIdCounter: AtomicU64,
 
     /// sorted by block file number
-    blockFileFds: RwLock<Vec<RawFd>>,
+    blockFileNum2Fd: RwLock<HashMap<usize, RawFd>>,
 
     pageCaches: Vec<RwLock<LruCache>>,
 
@@ -177,7 +177,7 @@ impl DB {
         dbOption.memTableMaxSize = utils::roundUp2Multiple(dbOption.memTableMaxSize, dbHeader.pageSize);
 
         // 启动的时候将已经存在的memTable文件都视为immutable的
-        let (blockFileFds, immutableMemTables) = DB::scanDir(dbHeader, &dbOption)?;
+        let (blockFileNum2Fd, immutableMemTables) = DB::scanDir(dbHeader, &dbOption)?;
 
         // 当启动的时候总是会新生成1个作为当前的mutableMemTable
         let memTable = {
@@ -215,7 +215,7 @@ impl DB {
                     // 接着原来的保存在dbHeader的txId
                     //txIdCounter: AtomicU64::new(dbHeader.lastTxId + 1),
                     // pageIdCounter: AtomicU64::new(dbHeader.lastPageId + 1),
-                    blockFileFds: RwLock::new(blockFileFds),
+                    blockFileNum2Fd: RwLock::new(blockFileNum2Fd),
                     pageCaches,
                     memTable: RwLock::new(memTable),
                     immutableMemTables: RwLock::new(immutableMemTables),
@@ -269,10 +269,10 @@ impl DB {
 
         // 落地immutableMemTable的thread
         let weakDb = Arc::downgrade(&db);
-        let a = db.dbOption.immutableMemTableCount;
+        let immutableMemTableCount = db.dbOption.immutableMemTableCount;
         let joinHandleMemTableRs =
             thread::Builder::new().name("process_mem_table_rs".to_string()).spawn(move || {
-                DB::processMemTableRs(weakDb, memTableRReceiver, a);
+                DB::processMemTableRs(weakDb, memTableRReceiver, immutableMemTableCount);
             })?;
 
         // 使用非正常的手段设置
@@ -282,13 +282,14 @@ impl DB {
             db.joinHandleMemTableRs.write(joinHandleMemTableRs);
         }
 
-        // 当前的这些immutableMemTables需要发送到对应的处理线程去落地
+        //  启动的时候这些遗留的immutableMemTables需要发送到对应的处理线程去落地
         {
             let immutableMemTables = db.immutableMemTables.read().unwrap();
-            immutableMemTables.iter().for_each(|immutableMemTable| {
-                let memTableR = MemTableR::try_from(immutableMemTable.memTableFileFd).unwrap();
-                db.memTableRSender.send(memTableR).unwrap();
-            });
+
+            for memTable in immutableMemTables.iter() {
+                let memTableR = MemTableR::try_from(memTable.memTableFileFd)?;
+                db.memTableRSender.send(memTableR)?;
+            }
         }
 
         Ok(db)
@@ -319,7 +320,9 @@ impl DB {
 
     #[inline]
     pub(crate) fn getHeaderMut(&self) -> &mut DBHeader {
-        utils::slice2RefMut(&self.headerMmapMut)
+        unsafe {
+            mem::transmute(self.header as *const _ as *mut DBHeader)
+        }
     }
 
     /// 尝试从lru获取,要是没有就读取blockFile然后mmap映射,并将其加入lru
@@ -335,8 +338,9 @@ impl DB {
 
         // todo 需要java的获取单例的double check套路
         let targetBlockFileFd = {
-            let blockFileFds = self.blockFileFds.read().unwrap();
-            blockFileFds.get(self.blockFileNum(pageId)).unwrap().clone()
+            let blockFileFds = self.blockFileNum2Fd.read().unwrap();
+            let blockFileNum = self.blockFileNum(pageId);
+            blockFileFds.get(&blockFileNum).unwrap().clone()
         };
 
         let pageMmapMut = {
@@ -411,17 +415,21 @@ impl DB {
         // blockFile可能需新建也能依然有了
         let blockFileNum = self.blockFileNum(pageId);
 
-        let mut blockFileFds = self.blockFileFds.write().unwrap();
+        let mut blockFileNum2Fd = self.blockFileNum2Fd.write().unwrap();
 
         // blockFile尚未创建
-        if blockFileNum >= blockFileFds.len() {
+        if blockFileNum2Fd.contains_key(&blockFileNum) == false {
             let blockFile = DB::generateBlockFile(&self.dbOption, blockFileNum, self.getHeader().blockSize)?;
-            blockFileFds.push(blockFile.as_raw_fd());
+            blockFileNum2Fd.insert(blockFileNum, blockFile.as_raw_fd());
             mem::forget(blockFile);
         }
 
-        let blockFileFds = RwLockWriteGuard::downgrade(blockFileFds);
-        let targetBlockFileFd = blockFileFds.get(blockFileNum).unwrap().clone();
+        let blockFileFds = RwLockWriteGuard::downgrade(blockFileNum2Fd);
+        let targetBlockFileFd =
+            match blockFileFds.get(&blockFileNum) {
+                Some(blockFileFd) => *blockFileFd,
+                None => panic!("{}", format!("blockFile num:[{}] not exist should not happen", blockFileNum)),
+            };
 
         let mut pageMmap = {
             let pageHeaderOffsetInBlock = (dbHeader.pageSize as u64 * pageId) % dbHeader.blockSize as u64;
@@ -582,8 +590,8 @@ impl DB {
     }
 
     /// 扫描data目录,对已存在的mem文件需要还原
-    fn scanDir(dbHeader: &DBHeader, dbOption: &DBOption) -> Result<(Vec<RawFd>, Vec<MemTable>)> {
-        let mut blockFileFds = Vec::new();
+    fn scanDir(dbHeader: &DBHeader, dbOption: &DBOption) -> Result<(HashMap<usize, RawFd>, Vec<MemTable>)> {
+        let mut blockFileNum2Fd = HashMap::new();
         let mut immutableMemTables = Vec::new();
 
         for readDir in fs::read_dir(&dbOption.dirPath)? {
@@ -602,7 +610,7 @@ impl DB {
                         let fileNum = utils::extractFileNum(&path).unwrap();
                         let blockFile = OpenOptions::new().read(true).write(true).open(path)?;
 
-                        blockFileFds.push((fileNum, blockFile.as_raw_fd()));
+                        blockFileNum2Fd.insert(fileNum, blockFile.as_raw_fd());
 
                         mem::forget(blockFile);
                     }
@@ -626,16 +634,10 @@ impl DB {
             }
         }
 
-        // sort by block num asc
-        let blockFileFds = {
-            blockFileFds.sort_by(|a, b| a.0.cmp(&b.0));
-            blockFileFds.into_iter().map(|(_, fd)| fd).collect::<Vec<_>>()
-        };
-
         // sort by memTable file num asc
         immutableMemTables.sort_by(|a, b| a.memTableFileNum.cmp(&b.memTableFileNum));
 
-        Ok((blockFileFds, immutableMemTables))
+        Ok((blockFileNum2Fd, immutableMemTables))
     }
 
     fn processCommitReqs(db: Weak<DB>, commitReqReceiver: Receiver<CommitReq>) {
@@ -687,8 +689,8 @@ impl DB {
 
 impl Drop for DB {
     fn drop(&mut self) {
-        let blockFileFds = self.blockFileFds.read().unwrap();
-        for dataFd in blockFileFds.iter() {
+        let blockFileFds = self.blockFileNum2Fd.read().unwrap();
+        for (_, dataFd) in blockFileFds.iter() {
             let file = unsafe { File::from_raw_fd(*dataFd) };
             drop(file);
         }

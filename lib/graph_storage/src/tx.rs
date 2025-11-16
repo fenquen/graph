@@ -140,6 +140,14 @@ impl<'db> Tx<'db> {
             commitResult?;
         }
 
+
+        // page的allocator pattern 持久化
+        {
+            let mut pageAllocator = self.db.pageAllocator.write().unwrap();
+            pageAllocator.refresh();
+        }
+
+
         Ok(())
     }
 

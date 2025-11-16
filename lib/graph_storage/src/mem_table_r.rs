@@ -46,7 +46,7 @@ impl MemTableR {
         MemTableRIter {
             data: &self.memTableFileMmap,
             entryCountRemain: fileHeader.entryCount as usize,
-            posInfile: mem_table::MEM_TABLE_FILE_HEADER_SIZE,
+            posInfile: mem_table::MEM_TABLE_HEADER_SIZE,
         }
     }
 }
@@ -67,7 +67,7 @@ impl<'a> Iterator for MemTableRIter<'a> {
         }
 
         let (key, value, entrySize) =
-            mem_table::readMemTableFileElem(&self.data[self.posInfile..]);
+            mem_table::readMemTableElem(&self.data[self.posInfile..]);
 
         self.entryCountRemain -= 1;
         self.posInfile += entrySize;
@@ -179,12 +179,6 @@ impl MemTableRWriter {
             if pagesNeedFree.isNotEmpty() {
                 self.waitingTxIds2PageId2Page.push((flyingTxIds, pagesNeedFree));
             }
-        }
-
-        // page的allocator pattern 持久化
-        {
-            let mut pageAllocator = db.pageAllocator.write().unwrap();
-            pageAllocator.refresh();
         }
 
         // memTableRs中的元素已经全部落地了,通知对应的immutable memTable
