@@ -2,7 +2,7 @@ use crate::cursor::Cursor;
 use crate::db::DB;
 use crate::mem_table::MemTable;
 use crate::types::TxId;
-use crate::{constant, utils};
+use crate::{constant, page_elem, utils};
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::mem;
@@ -93,6 +93,10 @@ impl<'db> Tx<'db> {
     pub fn set(&mut self, keyWithoutTxId: &[u8], val: &[u8]) -> Result<()> {
         if keyWithoutTxId.is_empty() {
             throw!("key is empty");
+        }
+
+        if keyWithoutTxId.len() > *page_elem::MAX_KEY_SIZE {
+            throw!(format!("key is too long, max:{}", *page_elem::MAX_KEY_SIZE));
         }
 
         if val.is_empty() {

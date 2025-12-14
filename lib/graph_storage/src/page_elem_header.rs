@@ -81,12 +81,13 @@ impl PageElemHeader for PageElemHeaderLeaf {
 // ------------------------------------------------------------------------------------------------
 
 /// 对应 PageElem::LeafOverflow
+// todo leaf overflow 是不是可以和leaf都在相同的page
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub(crate) struct PageElemHeaderLeafOverflow {
     // pub(crate) offset: u16,
     pub(crate) keySize: u16,
-    pub(crate) valPos: usize,
+    pub(crate) valuePos: usize,
 }
 
 impl PageElemHeaderLeafOverflow {
@@ -102,7 +103,7 @@ impl Codec for PageElemHeaderLeafOverflow {
         utils::writeNum(self.keySize, &mut dest[position..]);
         position += size_of_val(&self.keySize);
 
-        utils::writeNum(self.valPos, &mut dest[position..]);
+        utils::writeNum(self.valuePos, &mut dest[position..]);
     }
 
     fn deserializeFrom(src: &[u8]) -> Self {
@@ -115,7 +116,7 @@ impl Codec for PageElemHeaderLeafOverflow {
 
         Self {
             keySize,
-            valPos,
+            valuePos: valPos,
         }
     }
 }
@@ -127,7 +128,7 @@ impl PageElemHeader for PageElemHeaderLeafOverflow {
             let ptr = (src as *const _ as *const u8).add(PageElemHeaderLeafOverflow::size());
             let key = ptr::slice_from_raw_parts(ptr, self.keySize as usize);
 
-            PageElem::LeafOverflowR(&*key, self.valPos)
+            PageElem::LeafOverflowR(&*key, self.valuePos)
         }
     }
 

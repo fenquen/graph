@@ -1,9 +1,9 @@
 [package]
 name = "graph_storage"
-version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libc = {version = "0.2"}
+lazy_static = "1"
+libc = "0.2"
 anyhow = "1"
-memmap2 = "0"
+memmap2 = "0.9"

@@ -534,7 +534,7 @@ impl DB {
     // page0用来保存dbHeader,page1是起始的用来保存data的,它们都保存在blockFile0
     fn init(dbOption: &DBOption) -> Result<()> {
         // 确保用户自定义的pageSize是os的pageSize整数
-        let pageSize = utils::roundUp2Multiple(dbOption.pageSize, utils::getOsPageSize());
+        let pageSize = utils::roundUp2Multiple(dbOption.pageSize, *utils::OS_PAGE_SIZE);
 
         // allocate space for 2 init pages in memory
         // 分别是容纳dbHeader的以及第1个leafPage

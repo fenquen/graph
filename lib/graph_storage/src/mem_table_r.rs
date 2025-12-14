@@ -215,7 +215,11 @@ impl MemTableRWriter {
             // cursor时候的顺便删掉旧版本的pageElem,下边的当page过度空闲的合并的
             if writeDestPage.pageElems.is_empty() {
                 writeDestPage.header.markFreeable();
-                pagesNeedFree.insertIfNotExistLazy(writeDestPage.header.id, || writeDestPageArc.clone());
+
+                pagesNeedFree.insertIfNotExistLazy(
+                    writeDestPage.header.id,
+                    || writeDestPageArc.clone(),
+                );
 
                 match writeDestPage.header.indexInParentPage {
                     // 说明是rootPage了,它就算空了也是要保持住的
@@ -254,7 +258,11 @@ impl MemTableRWriter {
                 // 原来的writeDestPage其实已经是没有用了可以free回收了
                 // 不过现在还不可以,先标记为freeable
                 writeDestPage.header.markFreeable();
-                pagesNeedFree.insertIfNotExistLazy(writeDestPage.header.id, || writeDestPageArc.clone());
+
+                pagesNeedFree.insertIfNotExistLazy(
+                    writeDestPage.header.id,
+                    || writeDestPageArc.clone(),
+                );
                 //db.free(writeDestPage);
 
                 writeDestPage = unsafe { replacement.assume_init_mut() };
@@ -321,7 +329,10 @@ impl MemTableRWriter {
             let parentPage = db.getPageById(writeDestPage.header.parentPageId)?; //writeDestPage.parentPage.as_ref().unwrap();
 
             // 添加之前先瞧瞧是不是已经有了相应的pageId了
-            parentPagesNeedRewrite.insertIfNotExistLazy(parentPageId, || parentPage.clone());
+            parentPagesNeedRewrite.insertIfNotExistLazy(
+                parentPageId,
+                || parentPage.clone(),
+            );
 
             // todo 需要应对新的问题pageId可能是之前循环过的lrucache中还有导致lock的重入的
             let mut parentPageWriteGuard = parentPage.write().unwrap();
@@ -357,7 +368,8 @@ impl MemTableRWriter {
 
             // 如果还有additionalPage的话,就要在indexInParentPage后边不断的塞入的
             // 使用drain是因为原来的测试是put之后重启在测试get,如果不重启直接get需要这样干清理掉的
-            let mut additionalPages = writeDestPage.additionalPages.drain(..).collect::<Vec<_>>();
+            let mut additionalPages =
+                writeDestPage.additionalPages.drain(..).collect::<Vec<_>>();
 
             // writeDestPage体系内的pages(writeDestPage自身 加上 additionalPages)实现首尾相连
             for (index, additionalPage) in additionalPages.iter().enumerate() {
@@ -450,7 +462,6 @@ impl MemTableRWriter {
 
                     pagesInfluencedByMerge.push(writeDestPageArc.clone());
 
-                    // todo 合并page时候也要调用pageAllocator的free回收
                     loop {
                         let nextPageArc = db.getPageById(nextPageId)?;
                         let mut nextPage = nextPageArc.write().unwrap();
@@ -492,7 +503,7 @@ impl MemTableRWriter {
                 let mut additionalPageIndexInParentPage = writeDestPageIndexInParentPage;
                 for additionalPage in additionalPages {
                     additionalPageIndexInParentPage += 1;
-                    
+
                     additionalPage.header.indexInParentPage = Some(additionalPageIndexInParentPage);
 
                     // 不要忘了additionalPage

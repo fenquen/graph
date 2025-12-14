@@ -8,13 +8,18 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::str::FromStr;
 use anyhow::Result;
+use lazy_static::lazy_static;
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use crate::constant;
 
 pub(crate) const EMPTY_STR: &str = "";
 pub(crate) const DEFAULT_PAGE_SIZE: usize = 4096;
 
-pub(crate) fn getOsPageSize() -> usize {
+lazy_static! {
+    pub (crate) static ref OS_PAGE_SIZE: usize = getOsPageSize();
+}
+
+fn getOsPageSize() -> usize {
     invokeLibcFn(|| { unsafe { libc::sysconf(libc::_SC_PAGESIZE) } }).map_or_else(
         |_| { DEFAULT_PAGE_SIZE },
         |pageSize| { pageSize as usize },

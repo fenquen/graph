@@ -1,12 +1,14 @@
 /*
  * Copyright (c) 2024-2025 fenquen(https://github.com/fenquen), licensed under Apache 2.0
  */
-
+use std::{cmp, mem};
 use crate::page_header::PageHeader;
-use crate::types::PageId;
+use crate::types::{PageId, TxId};
 use crate::utils::Codec;
 use anyhow::Result;
+use lazy_static::lazy_static;
 use crate::page_elem_header::{PageElemHeaderBranch, PageElemHeaderLeaf, PageElemHeaderLeafOverflow};
+use crate::utils;
 
 /// table(文件)->block   block(文件)->page
 ///
@@ -111,7 +113,7 @@ impl<'a> PageElem<'a> {
 
                 let pageElemHeaderLeafOverflow = PageElemHeaderLeafOverflow {
                     keySize: k.len() as u16,
-                    valPos: *valPos,
+                    valuePos: *valPos,
                 };
                 pageElemHeaderLeafOverflow.serializeTo(headerDest);
 
@@ -125,7 +127,7 @@ impl<'a> PageElem<'a> {
 
                 let pageElemHeaderLeafOverflow = PageElemHeaderLeafOverflow {
                     keySize: k.len() as u16,
-                    valPos: *valPos,
+                    valuePos: *valPos,
                 };
                 pageElemHeaderLeafOverflow.serializeTo(&mut dest[position..]);
                 position += k.len();
@@ -216,6 +218,8 @@ impl<'a> PageElem<'a> {
 }
 
 impl<'a> Clone for PageElem<'a> {
+    /// 当page因为不断set变大需要分裂的时候,通过allocator分配足够数量的pages
+    /// 现有的pageElems会先原样的clone,然后分到各个分配那些pages的
     fn clone(&self) -> Self {
         match self {
             PageElem::LeafR(key, value) => PageElem::LeafRClone(key.to_vec(), value.map(|v| v.to_vec())),
@@ -230,4 +234,32 @@ impl<'a> Clone for PageElem<'a> {
             //_ => unimplemented!(),
         }
     }
+}
+
+lazy_static! {
+    /// 叶子节点的key的最大长度,可以大到在page中不给value留位
+    pub (crate) static ref MAX_KEY_SIZE: usize = {
+        let min = cmp::min(maxLeafKeySize(), maxLeafOverflowKeySize());
+
+        // 因为pageElem中keySize是用u16表达的
+        cmp::min(u16::MAX as usize, min)
+    };
+}
+
+#[inline(always)]
+fn maxLeafKeySize() -> usize {
+    *utils::OS_PAGE_SIZE -
+        mem::size_of::<PageHeader>() -
+        PageElemHeaderLeaf::size() -
+        mem::size_of::<TxId>() -
+        1
+}
+
+#[inline(always)]
+fn maxLeafOverflowKeySize() -> usize {
+    *utils::OS_PAGE_SIZE -
+        mem::size_of::<PageHeader>() -
+        PageElemHeaderLeafOverflow::size() -
+        mem::size_of::<TxId>() -
+        mem::size_of::<usize>()
 }
