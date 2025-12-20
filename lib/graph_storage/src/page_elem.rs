@@ -247,17 +247,17 @@ lazy_static! {
 }
 
 #[inline(always)]
-fn maxLeafKeySize() -> usize {
-    *utils::OS_PAGE_SIZE -
+const fn maxLeafKeySize() -> usize {
+    utils::OS_PAGE_SIZE -
         mem::size_of::<PageHeader>() -
         PageElemHeaderLeaf::size() -
-        mem::size_of::<TxId>() -
-        1
+        mem::size_of::<TxId>() - // key的末尾是txId
+        1 // value不能是空的至少与1个byte
 }
 
 #[inline(always)]
-fn maxLeafOverflowKeySize() -> usize {
-    *utils::OS_PAGE_SIZE -
+const fn maxLeafOverflowKeySize() -> usize {
+    utils::OS_PAGE_SIZE -
         mem::size_of::<PageHeader>() -
         PageElemHeaderLeafOverflow::size() -
         mem::size_of::<TxId>() -

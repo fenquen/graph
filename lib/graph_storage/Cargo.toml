@@ -1,6 +1,10 @@
 [package]
+authors = ["fenquen <fenquen@163.com>"]
 name = "graph_storage"
 edition = "2021"
+
+[build-dependencies]
+libc = "0.2"
 
 [dependencies]
 lazy_static = "1"

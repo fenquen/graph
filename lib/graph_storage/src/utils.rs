@@ -1,9 +1,9 @@
 use std::{fs, io};
 use std::collections::HashMap;
-use std::fs::{Metadata};
+use std::fs::Metadata;
 use std::hash::Hash;
 use std::ops::{Add, BitAnd, Rem, Sub};
-use std::os::fd::{RawFd};
+use std::os::fd::RawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::str::FromStr;
@@ -11,13 +11,13 @@ use anyhow::Result;
 use lazy_static::lazy_static;
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use crate::constant;
+use crate::constant::{DEFAULT_PAGE_SIZE, EMPTY_STR};
 
-pub(crate) const EMPTY_STR: &str = "";
-pub(crate) const DEFAULT_PAGE_SIZE: usize = 4096;
+include!(concat!(env!("OUT_DIR"), "/os_page_size.rs"));
 
-lazy_static! {
+/*lazy_static! {
     pub (crate) static ref OS_PAGE_SIZE: usize = getOsPageSize();
-}
+}*/
 
 fn getOsPageSize() -> usize {
     invokeLibcFn(|| { unsafe { libc::sysconf(libc::_SC_PAGESIZE) } }).map_or_else(
