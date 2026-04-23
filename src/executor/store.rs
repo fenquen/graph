@@ -252,58 +252,58 @@ impl<'session> CommandExecutor<'session> {
         }
 
         // 要得到表的全部的data
-       /* if dataKeys[0] == global::TOTAL_DATA_OF_TABLE {
-            for dataKey in dataKeys[1]..=dataKeys[2] {
-                processDataKey(dataKey, None)?;
-            }
-        } else {
-            unsafe {
-                const DATA_KEYS_PER_THREAD: usize = 1;
+        /* if dataKeys[0] == global::TOTAL_DATA_OF_TABLE {
+             for dataKey in dataKeys[1]..=dataKeys[2] {
+                 processDataKey(dataKey, None)?;
+             }
+         } else {
+             unsafe {
+                 const DATA_KEYS_PER_THREAD: usize = 1;
 
-                let count = dataKeys.len() / DATA_KEYS_PER_THREAD;
-                let tailLen = dataKeys.len() % DATA_KEYS_PER_THREAD;
+                 let count = dataKeys.len() / DATA_KEYS_PER_THREAD;
+                 let tailLen = dataKeys.len() % DATA_KEYS_PER_THREAD;
 
-                if count == 0 {
-                    // todo 使用rayon 遍历
-                    for dataKey in dataKeys {
-                        processDataKey(*dataKey, None)?;
-                    }
-                } else {
-                    rayon::scope(|scope| {
-                        let mut ptr = dataKeys.as_ptr();
+                 if count == 0 {
+                     // todo 使用rayon 遍历
+                     for dataKey in dataKeys {
+                         processDataKey(*dataKey, None)?;
+                     }
+                 } else {
+                     rayon::scope(|scope| {
+                         let mut ptr = dataKeys.as_ptr();
 
-                        let mut subSliceVec = if tailLen > 0 {
-                            Vec::with_capacity(count)
-                        } else {
-                            Vec::with_capacity(count + 1)
-                        };
+                         let mut subSliceVec = if tailLen > 0 {
+                             Vec::with_capacity(count)
+                         } else {
+                             Vec::with_capacity(count + 1)
+                         };
 
-                        for _ in 0..count {
-                            ptr = ptr.add(DATA_KEYS_PER_THREAD);
+                         for _ in 0..count {
+                             ptr = ptr.add(DATA_KEYS_PER_THREAD);
 
-                            // slice使用指针套路且分成多个小slice
-                            subSliceVec.push(slice::from_raw_parts(ptr, DATA_KEYS_PER_THREAD));
-                        }
+                             // slice使用指针套路且分成多个小slice
+                             subSliceVec.push(slice::from_raw_parts(ptr, DATA_KEYS_PER_THREAD));
+                         }
 
-                        if tailLen > 0 {
-                            subSliceVec.push(slice::from_raw_parts(ptr, tailLen));
-                        }
+                         if tailLen > 0 {
+                             subSliceVec.push(slice::from_raw_parts(ptr, tailLen));
+                         }
 
-                        let (sender, receiver) = mpsc::sync_channel(DATA_KEYS_PER_THREAD);
+                         let (sender, receiver) = mpsc::sync_channel(DATA_KEYS_PER_THREAD);
 
-                        for subSlice in subSliceVec {
-                            let sender = sender.clone();
+                         for subSlice in subSliceVec {
+                             let sender = sender.clone();
 
-                            scope.spawn(move |_| {
-                                for dataKey in subSlice {
-                                    processDataKey(*dataKey, Some(&sender));
-                                }
-                            })
-                        }
-                    });
-                }
-            }
-        }*/
+                             scope.spawn(move |_| {
+                                 for dataKey in subSlice {
+                                     processDataKey(*dataKey, Some(&sender));
+                                 }
+                             })
+                         }
+                     });
+                 }
+             }
+         }*/
 
         Ok(rowDatas)
     }
@@ -376,7 +376,12 @@ impl<'session> CommandExecutor<'session> {
                             orHasNonsense
                         } => {
                             // todo 实现 index 完成
-                            if let Some(mut indexSearch) = self.getMostSuitableIndex(&scanParams, tableFilterColName_opValueVecVec, isPureAnd, orHasNonsense)? {
+                            if let Some(mut indexSearch) =
+                                self.getMostSuitableIndex(
+                                    &scanParams,
+                                    tableFilterColName_opValueVecVec,
+                                    isPureAnd,
+                                    orHasNonsense)? {
                                 indexSearch.columnFamily = &columnFamily;
                                 indexSearch.tableMutationsCurrentTx = tableMutationsCurrentTx;
 
@@ -462,8 +467,12 @@ impl<'session> CommandExecutor<'session> {
 
                                         // 以下是lambda外部的共用的 通过ptr还原
                                         let commandExecutor: &CommandExecutor<'session> = mem::transmute(commandExecutorPointer as *const CommandExecutor);
-                                        let tableFilter: Option<&Expr> = tableFilterPointer.map(|tableFilterPointer| mem::transmute(tableFilterPointer as *const Expr));
-                                        let selectedColumnNames: Option<&Vec<String>> = selectedColumnNamesPointer.map(|selectedColumnNamesPointer| mem::transmute(selectedColumnNamesPointer as *const Vec<String>));
+                                        let tableFilter: Option<&Expr> = tableFilterPointer.map(
+                                            |tableFilterPointer| mem::transmute(tableFilterPointer as *const Expr)
+                                        );
+                                        let selectedColumnNames: Option<&Vec<String>> = selectedColumnNamesPointer.map(
+                                            |selectedColumnNamesPointer| mem::transmute(selectedColumnNamesPointer as *const Vec<String>)
+                                        );
                                         let scanHooks: &mut ScanHooks<A, B, C, D> = mem::transmute(scanHooksPointer as *mut ScanHooks<A, B, C, D>);
 
                                         // 以下是各个thread上单独的
@@ -684,7 +693,10 @@ impl<'session> CommandExecutor<'session> {
     }
 
     pub(super) fn readRowDataBinary(&self, rowBinary: &[Byte], scanParams: &ScanParams) -> Result<Option<RowData>> {
-        let columnNames = scanParams.table.columns.iter().map(|column| column.name.clone()).collect::<Vec<String>>();
+        let columnNames =
+            scanParams.table.columns.iter().map(
+                |column| column.name.clone()
+            ).collect::<Vec<String>>();
 
         // todo 原来使用ByteMut的话rowBinary要先copy到vec,再以vec构建ByteMut,如何减少这其实不必要的copy 完成
         let mut sliceWrapper = SliceWrapper::new(rowBinary);

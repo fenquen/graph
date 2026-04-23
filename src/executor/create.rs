@@ -139,7 +139,7 @@ impl<'session> CommandExecutor<'session> {
 
             indexKeyBuffer.put_slice(dataKey);
 
-            meta::STORE.dataStore.put_cf(&indexColumnFamily, indexKeyBuffer.as_ref(), global::EMPTY_BINARY.as_slice())?;
+            meta::STORE.put_cf(&indexColumnFamily, indexKeyBuffer.as_ref(), global::EMPTY_BINARY.as_slice())?;
 
             dbRawIteratorTable.next();
         }

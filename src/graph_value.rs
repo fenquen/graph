@@ -319,7 +319,7 @@ impl GraphValue {
                     }
                 }
                 (GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null, GraphValue::Pending(_)) => {
-                    return rightValue.calc0(op, &[self.clone()]);
+                    rightValue.calc0(op, &[self.clone()])
                 }
                 // 两边都是常量
                 (GraphValue::String(_) | GraphValue::Boolean(_) | GraphValue::Integer(_) | GraphValue::Decimal(_) | GraphValue::Null,

@@ -110,7 +110,7 @@ impl<'session> CommandExecutor<'session> {
                         valueBuffer.clear();
                         columnValuesNew.encode2ByteMut(&mut valueBuffer)?;
 
-                        meta::STORE.dataStore.put_cf(&columnFamily, key, valueBuffer.as_ref())?;
+                        meta::STORE.put_cf(&columnFamily, key, valueBuffer.as_ref())?;
                     }
                     (None, Some(_)) | (Some(_), None) => panic!("impossible"),
                     (None, None) => break,
@@ -184,7 +184,7 @@ impl<'session> CommandExecutor<'session> {
                     valueBuffer.put_slice(value);
                     valueBuffer.put_slice(bufferNewAddColumnValues.as_ref());
 
-                    meta::STORE.dataStore.put_cf(&columnFamily, key, valueBuffer.as_ref())?;
+                    meta::STORE.put_cf(&columnFamily, key, valueBuffer.as_ref())?;
                 }
                 (None, Some(_)) | (Some(_), None) => panic!("impossible"),
                 (None, None) => break,

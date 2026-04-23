@@ -33,8 +33,7 @@ use crate::utils::HashMapExt;
 pub struct Session {
     autoCommit: bool,
     txId: Option<TxId>,
-    dataStore: &'static DB,
-    metaStore: &'static DB,
+    db: &'static DB,
     pub dbObjectId_mutations: RwLock<HashMap<DBObjectId, TableMutations>>,
     snapshot: Option<Snapshot<'static>>,
     pub scanConcurrency: usize,
@@ -54,19 +53,19 @@ impl Session {
             return Ok(Vec::new());
         }
 
-       /* // todo set autocommit 是不需要tx的 如果sql只包含set如何应对
-        let mut needTx = false;
-        for command in &commands {
-            if command.needTx() {
-                needTx = true;
-                break;
-            }
-        }
+        /* // todo set autocommit 是不需要tx的 如果sql只包含set如何应对
+         let mut needTx = false;
+         for command in &commands {
+             if command.needTx() {
+                 needTx = true;
+                 break;
+             }
+         }
 
-        // 不要求是不是auto commit的 要不在tx那么生成1个tx
-        if self.notInTx() && needTx {
-            self.generateTx()?;
-        }*/
+         // 不要求是不是auto commit的 要不在tx那么生成1个tx
+         if self.notInTx() && needTx {
+             self.generateTx()?;
+         }*/
 
         // todo 要是执行的过程有报错 是不是应该rollback
         let selectResultToFront = CommandExecutor::new(self).execute(&mut commands)?;
@@ -112,7 +111,7 @@ impl Session {
                 // });
 
                 // todo 干掉columnFamily "tx_id" 老的txId 完成
-                self.dataStore.delete_range_cf(&cf, u64ToByteArrRef!(meta::TX_ID_INVALID), u64ToByteArrRef!(currentTxId))?;
+                self.db.delete_range_cf(&cf, u64ToByteArrRef!(meta::TX_ID_INVALID), u64ToByteArrRef!(currentTxId))?;
             }
 
             // todo lastest的txId要持久化 完成
@@ -120,7 +119,7 @@ impl Session {
             batch.put_cf(&cf, u64ToByteArrRef!(currentTxId), global::EMPTY_BINARY);
         }
 
-        self.dataStore.write(batch)?;
+        self.db.write(batch)?;
 
         meta::TX_UNDERGOING_COUNT.fetch_sub(1, Ordering::AcqRel);
 
@@ -157,7 +156,7 @@ impl Session {
             throw!("too many undergoing tx");
         }
         self.txId = Some(meta::TX_ID_COUNTER.fetch_add(1, Ordering::AcqRel));
-        self.snapshot = Some(self.dataStore.snapshot());
+        self.snapshot = Some(self.db.snapshot());
         self.dbObjectId_mutations.write().unwrap().clear();
 
         Ok(())
@@ -199,7 +198,7 @@ impl Session {
     // todo columnFamily的名字要使用id对应的string
     pub fn getColumnFamily(dbobjectId: DBObjectId) -> Result<ColumnFamily<'static>> {
         let columnFamilyName = dbobjectId.to_string();
-        match meta::STORE.dataStore.cf_handle(columnFamilyName.as_str()) {
+        match meta::STORE.cf_handle(columnFamilyName.as_str()) {
             Some(cf) => Ok(cf),
             None => throwFormat!("column family:{} not exist", columnFamilyName)
         }
@@ -207,7 +206,7 @@ impl Session {
 
     #[inline]
     pub fn createColFamily(&self, dbObjectId: DBObjectId) -> Result<()> {
-        Ok(self.dataStore.create_cf(dbObjectId.to_string(), &Options::default())?)
+        Ok(self.db.create_cf(dbObjectId.to_string(), &Options::default())?)
     }
 
     pub fn getSnapshot(&self) -> Result<&Snapshot> {
@@ -224,35 +223,41 @@ impl Session {
 
     #[inline]
     pub fn getDBRawIteratorWithoutSnapshot(&self, columnFamily: &ColumnFamily) -> Result<DBRawIterator> {
-        Ok(self.dataStore.raw_iterator_cf(columnFamily))
+        Ok(self.db.raw_iterator_cf(columnFamily))
     }
 
     #[inline]
     pub fn putUpdateMeta(&self, dbObjectId: DBObjectId, dbObject: &DBObject) -> Result<()> {
         let key = &dbObjectId.to_be_bytes()[..];
-        Ok(self.metaStore.put(key, serde_json::to_string(dbObject)?.as_bytes())?)
+        let columnFamilyMeta =
+            self.db.cf_handle(meta::COLUMN_FAMILY_NAME_META).unwrap();
+
+        Ok(self.db.put_cf(key, &columnFamilyMeta, serde_json::to_string(dbObject)?.as_bytes())?)
     }
 
     #[inline]
     pub fn dropColFamily(&self, dbObjectId: DBObjectId) -> Result<()> {
-        Ok(self.dataStore.drop_cf(dbObjectId.to_string().as_str())?)
+        Ok(self.db.drop_cf(dbObjectId.to_string().as_str())?)
     }
 
     #[inline]
     pub fn deleteMeta(&self, dbObjectId: DBObjectId) -> Result<()> {
         let key = &dbObjectId.to_be_bytes()[..];
-        Ok(self.metaStore.delete(key)?)
+        let columnFamilyMeta =
+            self.db.cf_handle(meta::COLUMN_FAMILY_NAME_META).unwrap();
+
+        Ok(self.db.delete_cf(&columnFamilyMeta, key)?)
     }
 
     /// 直接上手datastore
     #[inline]
     pub fn deleteWithoutSnapshot(&self, key: &[Byte], columnFamily: &ColumnFamily) -> Result<()> {
-        Ok(self.dataStore.delete_cf(columnFamily, key)?)
+        Ok(self.db.delete_cf(columnFamily, key)?)
     }
 
     #[inline]
     pub fn deleteRangeWithoutSnapshot(&self, columnFamily: &ColumnFamily, from: &[Byte], to: &[Byte]) -> Result<()> {
-        Ok(self.dataStore.delete_range_cf(columnFamily, from, to)?)
+        Ok(self.db.delete_range_cf(columnFamily, from, to)?)
     }
 
     pub fn getDBObjectByName(dbObjectName: &str) -> Result<Ref<String, DBObject>> {
@@ -426,8 +431,7 @@ impl Default for Session {
     fn default() -> Self {
         Session {
             autoCommit: true,
-            dataStore: &meta::STORE.dataStore,
-            metaStore: &meta::STORE.metaStore,
+            db: &meta::STORE,
             txId: None,
             dbObjectId_mutations: Default::default(),
             snapshot: None,

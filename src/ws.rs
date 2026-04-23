@@ -113,7 +113,8 @@ async fn processConn(tcpStream: TcpStream, remoteAddr: SocketAddr) -> Result<()>
     let wsStream = tokio_tungstenite::accept_hdr_async(tcpStream, callback).await?;
     log::info!("ws connection established from: {}", remoteAddr);
 
-    let (mut writeStream, mut readStream) = wsStream.split();
+    let (mut writeStream,
+        mut readStream) = wsStream.split();
 
     let mut session = Session::new();
 

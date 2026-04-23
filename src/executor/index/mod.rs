@@ -318,7 +318,7 @@ impl<'session> CommandExecutor<'session> {
         let mut indexFilterColTypes = Vec::with_capacity(indexFilteredColNames.len());
         for index in 0..indexFilteredColNames.len() {
             let columnNameFromIndexUsed = &indexFilteredColNames[index];
-            
+
             for indexFilterColumn in &scanParams.table.columns {
                 if indexFilterColumn.name.as_str() != columnNameFromIndexUsed {
                     continue;
@@ -423,7 +423,8 @@ impl<'session> CommandExecutor<'session> {
             };
 
         let process =
-            |rowDatas: SessionHashMap<DataKey, (DataKey, RowData)>, dataKeys: SessionHashSet<DataKey>| {
+            |rowDatas: SessionHashMap<DataKey, (DataKey, RowData)>,
+             dataKeys: SessionHashSet<DataKey>| {
                 if indexSearch.indexLocalSearch {
                     let rowDatas = rowDatas.into_values().collect::<Vec<(DataKey, RowData)>>();
                     return Result::<Vec<(DataKey, RowData)>>::Ok(rowDatas);

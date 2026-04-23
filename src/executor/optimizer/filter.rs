@@ -190,7 +190,7 @@ pub(in crate::executor) fn processTableFilter(tableFilter: &Expr) -> Result<Tabl
         }
     }
 
-    return Ok(
+    Ok(
         TableFilterProcResult::MaybeCanUseIndex {
             indexableTableFilterColName_opValueVecVec: tableFilterColName_opValueVecVec,
             isPureAnd,

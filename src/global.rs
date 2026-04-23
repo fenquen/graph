@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicU64;
 use dashmap::DashMap;
 use hashbrown::{DefaultHashBuilder, HashMap};
 use lazy_static::lazy_static;
+use rocksdb::Options;
 use tokio::fs::File;
 use tokio::sync::RwLock;
 use graph_independent::DummyAllocator;
@@ -111,3 +112,7 @@ pub const DUMMY_ROW_DATA: RowData = const {
         dummy: true,
     }
 };
+
+lazy_static! {
+    pub static ref DEFAULT_ROCKS_DB_OPTS: Options = Options::default();
+}

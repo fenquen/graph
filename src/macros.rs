@@ -73,37 +73,40 @@ macro_rules! file_goto_end {
 #[macro_export]
 macro_rules! u64ToByteArrRef {
     ($u64: expr) => {
-        &[
-            ($u64 >> 56) as u8,
-            ($u64 >> 48) as u8,
-            ($u64 >> 48) as u8,
-            ($u64 >> 32) as u8,
-            ($u64 >> 24) as u8,
-            ($u64 >> 16) as u8,
-            ($u64 >> 8) as u8,
-            $u64 as u8 ]
+        &u64::to_be_bytes($u64)
+        // &[
+        //     ($u64 >> 56) as u8,
+        //     ($u64 >> 48) as u8,
+        //     ($u64 >> 48) as u8,
+        //     ($u64 >> 32) as u8,
+        //     ($u64 >> 24) as u8,
+        //     ($u64 >> 16) as u8,
+        //     ($u64 >> 8) as u8,
+        //     $u64 as u8 ]
     };
 }
 
+/// 使用 u64::from_be_bytes(byteSlice)
 #[macro_export]
 macro_rules! byte_slice_to_u64 {
     ($slice: expr) => {
-        (($slice[0] as u64) << 56) |
-        (($slice[2] as u64) << 48) |
-        (($slice[3] as u64)<< 32)  |
-        (($slice[4] as u64)<< 24)  |
-        (($slice[5] as u64)<< 16)  |
-        (($slice[6] as u64)<< 8)   |
-        ($slice[7] as u64)
+        {
+            assert!($slice.len() >= 8, "slice需要至少8字节");
+            u64::from_be_bytes(unsafe { $slice.as_ptr().cast::<[u8; 8]>().read()})
+        }
     };
 }
 
 #[macro_export]
 macro_rules! byte_slice_to_u32 {
     ($slice: expr) => {
-        (($slice[0] as u32)<< 24)  |
-        (($slice[1] as u32)<< 16)  |
-        (($slice[2] as u32)<< 8)   |
-        ($slice[3] as u32)
+        {
+            assert!($slice.len() >= 4, "slice至少需要4字节");
+            // u32::from_be_bytes(unsafe { $slice.as_ptr().cast::<[u8; 4]>().read()})
+            (($slice[0] as u32)<< 24)  |
+            (($slice[1] as u32)<< 16)  |
+            (($slice[2] as u32)<< 8)   |
+            ($slice[3] as u32)
+        }
     };
 }

@@ -13,16 +13,16 @@ impl<'session> CommandExecutor<'session> {
     pub(super) fn committedDataVisible(&self,
                                        mvccKeyBuffer: &mut BytesMut,
                                        dbRawIterator: &mut DBRawIterator,
-                                       dataKey: DataKey,
+                                       dataKey: DataKey, // committedData的dataKey
                                        columnFamily: &ColumnFamily,
                                        table: &Table,
                                        tableMutations: Option<&TableMutations>) -> Result<bool> {
+        // 需要注意的是,返回false意味着dataKey已经在别的提交的tx中删掉了
         if self.committedDataVisibleWithoutTxMutations(mvccKeyBuffer, dbRawIterator, dataKey, columnFamily, table)? == false {
             return Ok(false);
         }
 
-        // 以上是全都在已落地的维度内的visibility check
-        // 还要结合当前事务上的尚未提交的mutations,看已落地的是不是应该干掉
+        // 在别的提交的tx中未删掉,瞧瞧是不是在本tx中删掉了
         self.committedDataVisibleWithTxMutations(tableMutations, mvccKeyBuffer, dataKey)
     }
 
@@ -52,19 +52,29 @@ impl<'session> CommandExecutor<'session> {
 
         let snapshot = self.session.getSnapshot()?;
 
-        // 应对多个tx对相同rowId的数据update而产生的多条新data
-        let originDataKeyKey = u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_ORIGIN_DATA_KEY, extractRowIdFromDataKey!(dataKey)));
-        let originDataKey = snapshot.get_cf(columnFamily, originDataKeyKey)?.unwrap();
-        let originDataKey = byte_slice_to_u64!(originDataKey);
-        // 说明本条data是通过update而来 老data的dataKey是originDataKey
+        let originDataKey = {
+            // 应对多个tx对相同rowId的数据update而产生的多条新data
+            // 指向originDataKey的key
+            let originDataKeyKey = u64ToByteArrRef!(
+                keyPrefixAddRowId!(
+                    meta::KEY_PREFIX_KEY_2_ORIGIN_DATA_KEY,
+                    extractRowIdFromDataKey!(dataKey)
+                )
+            );
+            let originDataKey = snapshot.get_cf(columnFamily, originDataKeyKey)?.unwrap();
+            byte_slice_to_u64!(originDataKey)
+        };
+
+        // 说明本条data是通过update而来,原来data的dataKey是originDataKey
         if meta::DATA_KEY_INVALID != originDataKey {
-            // 探寻originDataKey对应的mvcc xmax记录
+            // 探寻originDataKey对应的mvcc xmax记录(在当前txId的上限内)
             mvccKeyBuffer.writeDataMvccXmax(originDataKey, currentTxId);
             dbRawIterator.seek_for_prev(mvccKeyBuffer.as_ref());
 
             // 能确保会至少有xmax是0的 mvcc条目
-            // 得知本tx可视范围内该条老data是recently被哪个tx干掉的
+            // 得知本tx可视范围内该条原始data是recently被哪个tx干掉的
             let originDataXmax = extractTxIdFromMvccKey!( dbRawIterator.key().unwrap());
+
             // 要和本条data的xmin比较 如果不相等的话 该条因为update产生的data不是最新鲜的
             if xmin != originDataXmax {
                 // todo 还需要把这条因为update产生的多的new data 干掉 完成
@@ -96,6 +106,8 @@ impl<'session> CommandExecutor<'session> {
         Ok(tableMutations.get(mvccKeyBuffer.as_ref()).is_none())
     }
 
+    // -----------------------------------------------------------------------------------------------
+
     pub(super) fn uncommittedDataVisible(&self,
                                          tableMutations: &TableMutations,
                                          mvccKeyBuffer: &mut BytesMut,
@@ -108,6 +120,8 @@ impl<'session> CommandExecutor<'session> {
         // 说明这个当前tx上insert的data 后来又被当前tx的干掉了
         Ok(tableMutations.get(mvccKeyBuffer.as_ref()).is_none())
     }
+
+    // -----------------------------------------------------------------------------------------------
 
     // todo  pointerKey如何应对mvcc 完成
     /// 因为mvcc信息直接是在pointerKey上的 去看它的末尾的xmax
@@ -157,6 +171,8 @@ impl<'session> CommandExecutor<'session> {
         Ok(tableMutations.get(pointerKeyBuffer.as_ref()).is_none())
     }
 
+    // -----------------------------------------------------------------------------------------------
+
     pub(super) fn uncommittedPointerVisible(&self,
                                             tableMutations: &TableMutations,
                                             pointerKeyBuffer: &mut BytesMut,
@@ -199,8 +215,9 @@ impl<'session> CommandExecutor<'session> {
 
     pub(super) fn generateOrigin(&self, selfDataKey: DataKey, originDataKey: DataKey) -> KV {
         let selfRowId = extractRowIdFromDataKey!(selfDataKey);
+
         (
-            u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_ORIGIN_DATA_KEY, selfRowId)).to_vec(),
+            u64ToByteArrRef!(keyPrefixAddRowId!(meta::KEY_PREFIX_KEY_2_ORIGIN_DATA_KEY, selfRowId)).to_vec(),
             u64ToByteArrRef!(originDataKey).to_vec()
         )
     }
@@ -209,14 +226,24 @@ impl<'session> CommandExecutor<'session> {
     pub(super) fn generateAddPointerXminXmax(&self,
                                              pointerKeyBuffer: &mut BytesMut,
                                              selfDataKey: DataKey,
-                                             pointerKeyTag: KeyTag, tableId: DBObjectId, targetDatakey: DataKey) -> Result<(KV, KV)> {
+                                             pointerKeyTag: KeyTag, targetTableId: DBObjectId, targetDatakey: DataKey) -> Result<(KV, KV)> {
         let xmin = {
-            pointerKeyBuffer.writePointerKeyMvccXmin(selfDataKey, pointerKeyTag, tableId, targetDatakey, self.session.getTxId()?);
+            pointerKeyBuffer.writePointerKeyMvccXmin(
+                selfDataKey,
+                pointerKeyTag, targetTableId, targetDatakey,
+                self.session.getTxId()?,
+            );
+
             (pointerKeyBuffer.to_vec(), global::EMPTY_BINARY) as KV
         };
 
         let xmax = {
-            pointerKeyBuffer.writePointerKeyMvccXmax(selfDataKey, pointerKeyTag, tableId, targetDatakey, meta::TX_ID_INVALID);
+            pointerKeyBuffer.writePointerKeyMvccXmax(
+                selfDataKey,
+                pointerKeyTag, targetTableId, targetDatakey,
+                meta::TX_ID_INVALID,
+            );
+
             (pointerKeyBuffer.to_vec(), global::EMPTY_BINARY) as KV
         };
 
@@ -248,7 +275,11 @@ pub trait BytesMutExt {
                                selfDatakey: DataKey,
                                pointerKeyTag: KeyTag, targetTableId: DBObjectId, targetDataKey: DataKey,
                                txId: TxId) {
-        self.writePointerKey(selfDatakey, pointerKeyTag, targetTableId, targetDataKey, meta::MVCC_KEY_TAG_XMIN, txId)
+        self.writePointerKey(
+            selfDatakey,
+            pointerKeyTag, targetTableId, targetDataKey,
+            meta::MVCC_KEY_TAG_XMIN, txId,
+        )
     }
 
     fn writePointerKeyMvccXmax(&mut self,
@@ -321,6 +352,7 @@ impl BytesMutExt for BytesMut {
                        pointerMvccKeyTag: KeyTag, txId: TxId) {
         self.writePointerKeyLeadingPart(selfDatakey, pointerKeyTag, targetTableId);
         self.put_u64(targetDataKey);
+
         self.put_u8(pointerMvccKeyTag);
         self.put_u64(txId);
     }

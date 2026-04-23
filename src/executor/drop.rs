@@ -52,11 +52,16 @@ impl<'session> CommandExecutor<'session> {
                                     let directionKeyTag = extractDirectionKeyTagFromPointerKey!(pointerKey);
                                     let targetTableId = extractTargetDBObjectIdFromPointerKey!(pointerKey);
 
+                                    let columnFamilyMeta =
+                                        meta::STORE.cf_handle(meta::COLUMN_FAMILY_NAME_META).unwrap();
+
                                     // 需要通过targetTableId得到对应名字,目前效率的话只能去metastore
-                                    let targetTable = match meta::STORE.metaStore.get(targetTableId.to_be_bytes())? {
-                                        Some(tableJsonSlice) => serde_json::from_slice::<Table>(tableJsonSlice.as_slice())?,
-                                        None => panic!("impossible")
-                                    };
+                                    let targetTable =
+                                        match meta::STORE.get_cf(&columnFamilyMeta, targetTableId.to_be_bytes())? {
+                                            // todo 这里是不是写错了应该是DBObject
+                                            Some(tableJsonSlice) => serde_json::from_slice::<Table>(tableJsonSlice.as_slice())?,
+                                            None => panic!("impossible")
+                                        };
 
                                     let targetTableColumnFamily = Session::getColumnFamily(targetTable.id)?;
 

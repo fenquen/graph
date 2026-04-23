@@ -16,12 +16,12 @@ impl<'session> CommandExecutor<'session> {
 
         let nameDBObjectVec: Vec<RefMulti<String, DBObject>> = meta::NAME_DB_OBJ.iter().map(|pair| pair).collect();
 
-        let dataStore = &meta::STORE.dataStore;
+        let dataStore = &meta::STORE;
 
         for dbObject in nameDBObjectVec {
             let dbObject = dbObject.value();
 
-            let dbObjectColumnFamilyName = dbObject.getColumnFamilyName();
+            let dbObjectColumnFamilyName = dbObject.getCFName();
 
             if dbObjectColumnFamilyName == meta::COLUMN_FAMILY_NAME_TX_ID {
                 continue;
@@ -63,7 +63,7 @@ impl<'session> CommandExecutor<'session> {
 
                         // rowId对应的各个体系都需要干掉, dataKey mvccKey pointerKey originDataKeyKey
                         if thresholdTxIdInclude >= xmax && xmax != meta::TX_ID_INVALID {
-                            for keyPrefix in meta::KEY_PREFIX_DATA..=meta::KEY_PREFIX_ORIGIN_DATA_KEY {
+                            for keyPrefix in meta::KEY_PREFIX_DATA..=meta::KEY_PREFIX_KEY_2_ORIGIN_DATA_KEY {
                                 dataStore.delete_range_cf(&columnFamily,
                                                           u64ToByteArrRef!(keyPrefixAddRowId!(keyPrefix, rowId)),
                                                           u64ToByteArrRef!(keyPrefixAddRowId!(keyPrefix, rowId + 1)))?;
