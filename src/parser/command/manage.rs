@@ -1,4 +1,4 @@
-use std::thread;
+use std::{cmp, thread};
 use crate::parser::command::Command;
 use crate::parser::Parser;
 use anyhow::Result;
@@ -9,10 +9,12 @@ use crate::parser::element::Element;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Set {
-    SetAutoCommit(bool),
     SetScanConcurrency(usize),
     SetTxUndergoingMaxCount(usize),
     SetSessionMemorySize(usize),
+    /// 统1处理 set auto_commit/stream_mode true/false 这样的模式
+    /// 而不是单独使用  SetAutoCommit(bool) SetStreamMode(bool)
+    SetTrueFalse(String, bool),
 }
 
 // todo manage体系的命令要通过sql实现 完成
@@ -36,63 +38,77 @@ impl Parser {
     }
 
     pub(in crate::parser) fn parseSet(&mut self) -> Result<Command> {
-        let targetName = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase();
-        let targetName = targetName.as_str();
+        let targetNameString =
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral(global::EMPTY_STR)?
+                .to_lowercase();
+        
+        let targetName = targetNameString.as_str();
 
         match targetName {
-            "scanconcurrency" | "txundergoingmaxcount" | "sessionmemorysize" => {
-                if let Element::IntegerLiteral(value) = self.getCurrentElementAdvance()? {
-                    let value = *value;
-                    if value <= 0 {
-                        self.throwSyntaxErrorDetail("value should be positive")?;
+            "scan_concurrency" | "tx_undergoing_max_count" | "session_memorysize" => {
+                match self.getCurrentElementAdvance()? {
+                    Element::IntegerLiteral(value) => {
+                        let value = *value;
+                        if value <= 0 {
+                            self.throwSyntaxErrorDetail("value should be positive")?;
+                        }
+
+                        let mut value = value as usize;
+
+                        match targetName {
+                            "scan_concurrency" => {
+                                // 原来是使用num_cpus的 后来得知rust 1.81 也有 它们都是通过 cgroup sched_getaffinity taolu
+                                let cpuLogicalCoreCount = thread::available_parallelism()?.get();
+
+                                value = cmp::min(value, cpuLogicalCoreCount);
+
+                                Ok(Command::Set(Set::SetScanConcurrency(value)))
+                            }
+                            "tx_undergoing_max_count" => {
+                                if value < Config::FLYING_TX_MAX_COUNT_MIN {
+                                    value = Config::FLYING_TX_MAX_COUNT_MIN;
+                                }
+
+                                Ok(Command::Set(Set::SetTxUndergoingMaxCount(value)))
+                            }
+                            "session_memorysize" => {
+                                if value < Config::SESSION_MEMORY_SIZE_MIN {
+                                    value = Config::SESSION_MEMORY_SIZE_MIN;
+                                }
+
+                                Ok(Command::Set(Set::SetSessionMemorySize(value)))
+                            }
+                            _ => self.throwSyntaxErrorDetail(&format!("set {} not supported", targetName))?,
+                        }
                     }
-
-                    let mut value = value as usize;
-
-                    match targetName {
-                        "scanconcurrency" => {
-                            // 原来是使用num_cpus的 后来得知rust 1.81 也有 它们都是通过 cgroup sched_getaffinity taolu
-                            let cpuLogicalCoreCount = thread::available_parallelism()?.get();
-
-                            if value > cpuLogicalCoreCount {
-                                value = cpuLogicalCoreCount;
-                            }
-
-                            Ok(Command::Set(Set::SetScanConcurrency(value)))
-                        }
-                        "txundergoingmaxcount" => {
-                            if value < Config::MIN_TX_UNDERGOING_MAX_COUNT {
-                                value = Config::MIN_TX_UNDERGOING_MAX_COUNT;
-                            }
-
-                            Ok(Command::Set(Set::SetTxUndergoingMaxCount(value)))
-                        }
-                        "sessionmemorysize" => {
-                            if value < Config::MIN_SESSION_MEMORY_SIZE {
-                                value = Config::MIN_SESSION_MEMORY_SIZE;
-                            }
-
-                            Ok(Command::Set(Set::SetSessionMemorySize(value)))
-                        }
-                        _ => self.throwSyntaxErrorDetail(&format!("set {} not supported", targetName))?,
-                    }
-                } else {
-                    self.throwSyntaxErrorDetail("value should be integer")?
+                    _ => self.throwSyntaxErrorDetail("value should be integer")?,
                 }
             }
-            "autocommit" => {
-                match self.getCurrentElementAdvance()? {
-                    Element::Boolean(b) => Ok(Command::Set(Set::SetAutoCommit(*b))),
-                    Element::IntegerLiteral(n) => Ok(Command::Set(Set::SetAutoCommit(*n != 0))),
-                    Element::TextLiteral(s) => {
-                        match s.to_lowercase().as_str() {
-                            "on" => Ok(Command::Set(Set::SetAutoCommit(true))),
-                            "off" => Ok(Command::Set(Set::SetAutoCommit(false))),
-                            _ => self.throwSyntaxErrorDetail("set autocommit should use on/off")?,
+            "auto_commit" | "stream_mode" => {
+                let r =
+                    match self.getCurrentElementAdvance()? {
+                        Element::Boolean(b) => Ok(Command::Set(Set::SetTrueFalse(targetNameString, *b))),
+                        Element::IntegerLiteral(n) => Ok(Command::Set(Set::SetTrueFalse(targetNameString, *n != 0))),
+                        Element::TextLiteral(s) => {
+                            let b =
+                                match s.to_lowercase().as_str() {
+                                    "on" => true,
+                                    "off" => false,
+                                    _ => self.throwSyntaxErrorDetail("set auto_commit should use on/off")?,
+                                };
+
+                            Ok(Command::Set(Set::SetTrueFalse(targetNameString, b)))
                         }
-                    }
-                    _ => self.throwSyntaxErrorDetail("set autocommit should use true/false ,0/not 0, on/off")?,
+                        _ => self.throwSyntaxErrorDetail("set auto_commit should use true/false ,0/not 0, on/off")?,
+                    };
+
+                // 例如 set auto_commit true aa,后边还有多余的
+                if self.getCurrentElementOption().is_some() {
+                    self.throwSyntaxErrorDetail("has redundant tail")?
                 }
+
+                r
             }
             _ => self.throwSyntaxErrorDetail(&format!("set {} not supported", targetName))?,
         }

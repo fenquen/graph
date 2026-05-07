@@ -20,11 +20,15 @@ impl Parser {
     pub(in crate::parser) fn parseUpdate(&mut self) -> anyhow::Result<Command> {
         let mut update = Update::default();
 
-        update.tableName = self.getCurrentElementAdvance()?.expectTextLiteral("update should followed by table name")?;
+        update.tableName =
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral("update should followed by table name")?;
 
         // []中的set values
         {
-            self.getCurrentElementAdvance()?.expectTextLiteralContent(global::方括号_STR)?;
+            self.getCurrentElementAdvance()?
+                .expectTextLiteralContent(global::方括号_STR)?;
+
             enum State {
                 ReadName,
                 ReadEual,

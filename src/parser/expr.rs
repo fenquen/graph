@@ -90,7 +90,12 @@ impl Parser {
                                         expr = Expr::BiDirection {
                                             leftExpr: left,
                                             op,
-                                            rightExprs: self.parseInExprs()?.into_iter().map(|expr| { Box::new(expr) }).collect(),
+                                            rightExprs:
+                                            self
+                                                .parseInExprs()?
+                                                .into_iter()
+                                                .map(|expr| { Box::new(expr) })
+                                                .collect(),
                                         }
                                     } else {
                                         self.throwSyntaxError()?;
@@ -163,7 +168,9 @@ impl Parser {
                                     }
 
                                     // getCurrentElement()其实已是下个了
-                                    let nextElementIs括号 = self.getCurrentElement()?.expectTextLiteralContentBool(global::圆括号_STR);
+                                    let nextElementIs括号 =
+                                        self.getCurrentElement()?
+                                            .expectTextLiteralContentBool(global::圆括号_STR);
 
                                     expr = Expr::BiDirection {
                                         leftExpr: Box::new(expr),

@@ -49,7 +49,7 @@ pub enum Command { //  todo 实现 order by
 
     ShowTables,
     ShowRelations,
-    /// Option<(DBObject)> 意思是要找的index是在那个table还是relaiton上边
+    /// Option<(DBObject)> 意思是在那个table维度找index的
     ShowIndice(Option<(DBObject)>),
 }
 

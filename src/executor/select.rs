@@ -1,15 +1,16 @@
 use std::cell::RefCell;
+use std::fs::OpenOptions;
 use hashbrown::{HashMap, HashSet};
 use std::ops::{Bound, RangeFrom};
+use std::os::fd::RawFd;
 use bytes::BytesMut;
 use serde_json::{json, Value};
 use crate::executor::{CommandExecResult, CommandExecutor, IterationCmd};
-use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED,
-            meta, suffix_plus_plus, byte_slice_to_u64, types, utils, throw, prefix_minus_minus};
+use crate::{extractTargetDataKeyFromPointerKey, JSON_ENUM_UNTAGGED, meta, suffix_plus_plus, byte_slice_to_u64, types, utils, throw, prefix_minus_minus, config};
 use crate::executor::mvcc::BytesMutExt;
 use crate::graph_value::{GraphValue};
 use crate::meta::{DBObject, Table};
-use crate::types::{Byte, ColumnFamily, DataKey, KeyTag, RowData, DBRawIterator, TableMutations, RelationDepth};
+use crate::types::{Byte, ColumnFamily, DataKey, KeyTag, RowData, DBRawIterator, TableMutations, RelationDepth, TxId, HashMapExt};
 use crate::global;
 use crate::parser::command::select::{EndPointType, RelDesc, Select, SelectRel, SelectTable, SelectTableUnderRels};
 use anyhow::{anyhow, Result};
@@ -120,7 +121,11 @@ impl<'session> CommandExecutor<'session> {
                 let gatherTargetDatas =
                     |pointerKeyTag: KeyTag, targetTable: &Table, targetFilter: Option<&Expr>| {
                         // todo selectRels时候如何应对pointerKey的mvcc 完成
-                        let targetDatas = self.searchDataByPointerKeyPrefix(relation, relationDataKey, pointerKeyTag, targetTable, targetFilter)?;
+                        let targetDatas =
+                            self.searchDataByPointerKeyPrefix(relation,
+                                                              relationDataKey,
+                                                              pointerKeyTag,
+                                                              targetTable, targetFilter)?;
 
                         // todo 不知道要不要dedup
                         Result::<Vec<(DataKey, RowData)>>::Ok(targetDatas)
@@ -128,7 +133,10 @@ impl<'session> CommandExecutor<'session> {
 
                 // 收罗该rel上的全部的src的dataKey
                 let mut srcRowDatas = {
-                    let srcRowDatas = gatherTargetDatas(meta::POINTER_KEY_TAG_SRC_TABLE_ID, srcTable, selectRel.srcFilter.as_ref())?;
+                    let srcRowDatas =
+                        gatherTargetDatas(meta::POINTER_KEY_TAG_SRC_TABLE_ID,
+                                          srcTable,
+                                          selectRel.srcFilter.as_ref())?;
 
                     if srcRowDatas.is_empty() {
                         continue 'loopRelationData;
@@ -141,7 +149,9 @@ impl<'session> CommandExecutor<'session> {
                 let mut destRowDatas =
                     if selectRel.relationDepth.is_none() {
                         let destRowDatas =
-                            gatherTargetDatas(meta::POINTER_KEY_TAG_DEST_TABLE_ID, destTable, selectRel.destFilter.as_ref())?;
+                            gatherTargetDatas(meta::POINTER_KEY_TAG_DEST_TABLE_ID,
+                                              destTable,
+                                              selectRel.destFilter.as_ref())?;
 
                         if destRowDatas.is_empty() {
                             continue 'loopRelationData;
@@ -160,7 +170,13 @@ impl<'session> CommandExecutor<'session> {
 
                                 // 上轮的全部的各个条目里边的destDataKeys 和 当前条目的srcDataKeys的交集
                                 let intersectDataKeys: Vec<DataKey> =
-                                    destDataKeysInPrevSelect.iter().filter(|&&destDataKeyPrevSelect| srcDataKeys.contains(&destDataKeyPrevSelect)).map(|destDataKeyInPrevSelect| *destDataKeyInPrevSelect).collect();
+                                    destDataKeysInPrevSelect.iter()
+                                        .filter(
+                                            |&&destDataKeyPrevSelect| srcDataKeys.contains(&destDataKeyPrevSelect)
+                                        )
+                                        .map(
+                                            |destDataKeyInPrevSelect| *destDataKeyInPrevSelect
+                                        ).collect();
 
                                 // 说明 当前的这个relation的src和上轮的dest没有重合的
                                 if intersectDataKeys.is_empty() {
@@ -172,11 +188,15 @@ impl<'session> CommandExecutor<'session> {
                                     // 遍历上轮的各个result的dest,把intersect之外的去掉
                                     for prevSelectResult in &mut *prevSelectResultVec {
                                         // https://blog.csdn.net/u011528645/article/details/123117829
-                                        prevSelectResult.destRowDatas.retain(|(dataKey, _)| intersectDataKeys.contains(dataKey));
+                                        prevSelectResult.destRowDatas.retain(
+                                            |(dataKey, _)| intersectDataKeys.contains(dataKey)
+                                        );
                                     }
 
                                     // destRowDatas是空的话那么把selectResult去掉
-                                    prevSelectResultVec.retain(|prevSelectResult| prevSelectResult.destRowDatas.len() > 0);
+                                    prevSelectResultVec.retain(
+                                        |prevSelectResult| prevSelectResult.destRowDatas.len() > 0
+                                    );
 
                                     // 连线断掉
                                     if prevSelectResultVec.is_empty() {
@@ -310,8 +330,15 @@ impl<'session> CommandExecutor<'session> {
                 let mut json = json!({});
 
                 // 把tuple的position干掉
-                let srcRowDatas: Vec<&RowData> = selectResult.srcRowDatas.iter().map(|(_, rownData)| rownData).collect();
-                let destRowDatas: Vec<&RowData> = selectResult.destRowDatas.iter().map(|(_, rowData)| rowData).collect();
+                let srcRowDatas: Vec<&RowData> =
+                    selectResult.srcRowDatas.iter().map(
+                        |(_, rownData)| rownData
+                    ).collect();
+
+                let destRowDatas: Vec<&RowData> =
+                    selectResult.destRowDatas.iter().map(
+                        |(_, rowData)| rowData
+                    ).collect();
 
                 // 对json::Value来说需要注意的是serialize的调用发生在这边 而不是serde_json::to_string()
                 json[selectResult.srcName.as_str()] = json!(srcRowDatas);
@@ -389,7 +416,9 @@ impl<'session> CommandExecutor<'session> {
                         scanParams.selectedColumnNames = None;
 
                         // relation数据是不是满足relationFliter
-                        if self.getRowDatasByDataKeys(&[targetRelationDataKey], &scanParams, &mut ScanHooks::default())?.len() > 0 {
+                        if self.getRowDatasByDataKeys(&[targetRelationDataKey],
+                                                      &scanParams, 
+                                                      &mut ScanHooks::default())?.len() > 0 {
                             found = true;
                             return Result::<IterationCmd>::Ok(IterationCmd::Return);
                         }
@@ -549,6 +578,10 @@ impl<'session> CommandExecutor<'session> {
 
     #[inline]
     fn processRowDatasToDisplay(&self, rowDatas: Vec<(DataKey, RowData)>) -> Vec<Value> {
-        JSON_ENUM_UNTAGGED!(rowDatas.into_iter().map(|(dataKey,rowData)| serde_json::to_value(&rowData).unwrap()).collect())
+        JSON_ENUM_UNTAGGED!(
+            rowDatas.into_iter().map(
+                |(_,rowData)| serde_json::to_value(&rowData).unwrap()
+            ).collect()
+        )
     }
 }

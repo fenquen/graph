@@ -64,7 +64,7 @@ impl<A: Allocator> HashMapExt for HashMap<String, GraphValue, DefaultHashBuilder
         if self.dummy {
             return 0;
         }
-        
+
         let mut size: usize = 0;
 
         self.values().for_each(|graphValue| {
@@ -82,3 +82,6 @@ pub type SessionHashMap<'a, K, V> = HashMap<K, V, DefaultHashBuilder, &'a Bump>;
 pub type SessionHashSet<'a, T> = HashSet<T, DefaultHashBuilder, &'a Bump>;
 
 pub type ElementType = u8;
+
+pub type StdOpenOptions = std::fs::OpenOptions;
+pub type StdFile = std::fs::File;

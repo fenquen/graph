@@ -588,9 +588,9 @@ impl DBObjectTrait for Index {
 
 /// 数据库的table等本身的元数据保存在另外1个单独的rocksdb
 pub fn init() -> Result<()> {
-    let dbDataDir = CONFIG.dataDir.as_str();
+    std::fs::create_dir_all(CONFIG.tempFileDir.as_str())?;
 
-    let rocksDbOpts = || -> Options{
+    let rocksDbOpts = {
         let mut dataStoreOption = Options::default();
 
         // 默认日志保留的数量1000 太多
@@ -600,7 +600,9 @@ pub fn init() -> Result<()> {
         dataStoreOption.create_if_missing(true);
 
         dataStoreOption
-    }();
+    };
+
+    let dbDataDir = CONFIG.dataDir.as_str();
 
     // rocksdb对应的数据目录尚未创建
     if std::fs::exists(dbDataDir)? == false {
@@ -617,10 +619,13 @@ pub fn init() -> Result<()> {
 
         log::info!("column family: {COLUMN_FAMILY_NAME_META}, {COLUMN_FAMILY_NAME_TX_ID} created");
 
+        STORE.set(db);
+
         return Ok(());
     }
 
     // 数据目录已然存在,需要知道db当前已有的columnFamilyNames
+    // 这个函数的原理是读取manifest文件,不用 open db
     let existingCFNames = DB::list_cf(&*global::DEFAULT_ROCKS_DB_OPTS, dbDataDir)?;
 
     let cfDescs =

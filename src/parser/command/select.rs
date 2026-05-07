@@ -125,7 +125,10 @@ impl Parser {
             let mut columnNames = Vec::default();
 
             loop {
-                let text = parser.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+                let text =
+                    parser
+                        .getCurrentElementAdvance()?
+                        .expectTextLiteral(global::EMPTY_STR)?;
 
                 match text.as_str() {
                     global::逗号_STR => continue,
@@ -156,7 +159,9 @@ impl Parser {
                     }
 
                     // 尝试读取后边的offset
-                    if parser.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCaseBool("offset") {
+                    if parser
+                        .getCurrentElementAdvance()?
+                        .expectTextLiteralContentIgnoreCaseBool("offset") {
                         let offset = parser.getCurrentElementAdvance()?.expectIntegerLiteral()?;
                         if 0 > offset {
                             parser.throwSyntaxErrorDetail("offset should not be negtive")?;
@@ -236,7 +241,11 @@ impl Parser {
                 }
                 State::ReadSrcAlias => {
                     if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
-                        selectRel.srcAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by src alias")?);
+                        selectRel.srcAlias = Some(
+                            self
+                                .getCurrentElementAdvance()?
+                                .expectTextLiteral("as should followed by src alias")?
+                        );
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -258,7 +267,10 @@ impl Parser {
                 }
                 State::ReadRelationName => {
                     if let Element::Op(Op::MathCalcOp(MathCalcOp::Minus)) = currentElement {
-                        selectRel.relationName = self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?;
+                        selectRel.relationName =
+                            self
+                                .getCurrentElementAdvance()?
+                                .expectTextLiteral("expect a relation name")?;
                     } else { // 未写 realition 那么后边的全部都不会有了
                         break;
                     }
@@ -328,7 +340,10 @@ impl Parser {
                 }
                 State::ReadRelationAlias => {
                     if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
-                        selectRel.relationAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by relation alias")?);
+                        selectRel.relationAlias = Some(
+                            self.getCurrentElementAdvance()?
+                                .expectTextLiteral("as should followed by relation alias")?
+                        );
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -338,7 +353,9 @@ impl Parser {
                 }
                 State::ReadDestName => {
                     if let Element::Arrow2Right = currentElement {
-                        selectRel.destTableName = self.getCurrentElementAdvance()?.expectTextLiteral("expect a relation name")?;
+                        selectRel.destTableName =
+                            self.getCurrentElementAdvance()?
+                                .expectTextLiteral("expect a relation name")?;
 
                         // 如果对relation使用recursive的话 起点和终点都要是相同的table
                         if let Some(_) = selectRel.relationDepth {
@@ -376,7 +393,10 @@ impl Parser {
                 }
                 State::ReadDestAlias => {
                     if currentElement.expectTextLiteralContentIgnoreCaseBool("as") {
-                        selectRel.destAlias = Some(self.getCurrentElementAdvance()?.expectTextLiteral("as should followed by dest alias")?);
+                        selectRel.destAlias = Some(
+                            self.getCurrentElementAdvance()?
+                                .expectTextLiteral("as should followed by dest alias")?
+                        );
                     } else {
                         self.skipElement(-1)?;
                     }
@@ -487,7 +507,8 @@ impl Parser {
         selectTableUnderRels.selectTable = selectTable;
 
         // 开始的时候 当前的element应该是"," 先消耗
-        self.getCurrentElementAdvance()?.expectTextLiteralContent(global::逗号_STR)?;
+        self.getCurrentElementAdvance()?
+            .expectTextLiteralContent(global::逗号_STR)?;
 
         enum State {
             ReadEndPointType,
@@ -503,11 +524,14 @@ impl Parser {
                 let mut relDesc = RelDesc::default();
 
                 loop {
-                    let currentElement = self.getCurrentElementAdvanceOption();
-                    if let None = currentElement {
-                        return Ok(Command::Select(Select::SelectTableUnderRels(selectTableUnderRels)));
-                    }
-                    let currentElement = currentElement.unwrap().clone();
+                    let currentElement = {
+                        let currentElement = self.getCurrentElementAdvanceOption();
+                        if let None = currentElement {
+                            return Ok(Command::Select(Select::SelectTableUnderRels(selectTableUnderRels)));
+                        }
+
+                        currentElement.unwrap().clone()
+                    };
 
                     match state {
                         State::ReadEndPointType => {
@@ -600,7 +624,9 @@ impl Parser {
                                             // 之前读的都是数字 需要收集
                                             if let Some(true) = readingNumber {
                                                 if pendingChars.is_empty() == false {
-                                                    elementVec.push(Element::IntegerLiteral(pendingChars.iter().collect::<String>().as_str().parse::<i64>()?));
+                                                    elementVec.push(Element::IntegerLiteral(
+                                                        pendingChars.iter().collect::<String>().as_str().parse::<i64>()?
+                                                    ));
                                                     pendingChars.clear();
                                                 }
                                             }
@@ -614,7 +640,9 @@ impl Parser {
                                     if let Some(readingNumber) = readingNumber {
                                         if pendingChars.is_empty() == false {
                                             if readingNumber {
-                                                elementVec.push(Element::IntegerLiteral(pendingChars.iter().collect::<String>().as_str().parse::<i64>()?));
+                                                elementVec.push(Element::IntegerLiteral(
+                                                    pendingChars.iter().collect::<String>().as_str().parse::<i64>()?
+                                                ));
                                             } else {
                                                 elementVec.push(Element::TextLiteral(pendingChars.iter().collect::<String>()));
                                             }
@@ -667,7 +695,9 @@ impl Parser {
         };
 
         // 后边要是2个的dot
-        self.getCurrentElementAdvance()?.expectTextLiteralContent("..")?;
+        self
+            .getCurrentElementAdvance()?
+            .expectTextLiteralContent("..")?;
 
         let endBound = {
             let endDepth =

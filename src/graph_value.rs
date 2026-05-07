@@ -67,7 +67,8 @@ impl<'a> BinaryCodec<'a> for GraphValue {
         Ok(())
     }
 
-    fn decodeFromSliceWrapper<'b: 'a>(srcSliceWrapper: &mut SliceWrapper, _: Option<&'b CommandExecutor>) -> Result<Self::OutputType> {
+    fn decodeFromSliceWrapper<'b: 'a>(srcSliceWrapper: &mut SliceWrapper,
+                                      _: Option<&'b CommandExecutor>) -> Result<Self::OutputType> {
         // 读取type标识
         let typeTag = srcSliceWrapper.get_u8();
 
@@ -511,9 +512,9 @@ impl GraphValue {
     pub fn size(&self) -> Option<usize> {
         let selfByteLen = match self {
             GraphValue::String(s) => Self::LEN_BYTE_LEN + s.len(),
-            GraphValue::Boolean(_) => mem::size_of::<Byte>(),
-            GraphValue::Integer(_) => mem::size_of::<i64>(),
-            GraphValue::Decimal(_) => mem::size_of::<f64>(),
+            GraphValue::Boolean(_) => size_of::<Byte>(),
+            GraphValue::Integer(_) => size_of::<i64>(),
+            GraphValue::Decimal(_) => size_of::<f64>(),
             GraphValue::Null => 0,
             _ => return None
         };

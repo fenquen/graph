@@ -34,9 +34,15 @@ impl Parser {
         let alter =
             match self.getCurrentElementAdvance()?.expectTextLiteralSilent()?.to_lowercase().as_str() {
                 "table" => {
-                    let tableName = self.getCurrentElementAdvance()?.expectTextLiteralSilent()?;
+                    let tableName =
+                        self
+                            .getCurrentElementAdvance()?
+                            .expectTextLiteralSilent()?;
 
-                    match self.getCurrentElementAdvance()?.expectTextLiteralSilent()?.to_lowercase().as_str() {
+                    match self
+                        .getCurrentElementAdvance()?
+                        .expectTextLiteralSilent()?.to_lowercase()
+                        .as_str() {
                         "add" => {
                             match self.getCurrentElementAdvance()?.expectTextLiteralSilent()?.to_lowercase().as_str() {
                                 // alter table car add columns (id integer not null default 0,name string)
@@ -50,7 +56,9 @@ impl Parser {
                         "drop" => {
                             match self.getCurrentElementAdvance()?.expectTextLiteralSilent()?.to_lowercase().as_str() {
                                 "columns" => { // alter table car drop columns (id ,name)
-                                    let cascade = self.getCurrentElement()?.expectTextLiteralContentIgnoreCaseBool("cascade");
+                                    let cascade =
+                                        self.getCurrentElement()?
+                                            .expectTextLiteralContentIgnoreCaseBool("cascade");
 
                                     if cascade {
                                         self.skipElement(1)?;
@@ -66,8 +74,15 @@ impl Parser {
                             }
                         }
                         "rename" => { // alter table a rename to b
-                            self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCaseSilent("to")?;
-                            let newName = self.getCurrentElementAdvance()?.expectTextLiteralSilent()?;
+                            self
+                                .getCurrentElementAdvance()?
+                                .expectTextLiteralContentIgnoreCaseSilent("to")?;
+
+                            let newName =
+                                self
+                                    .getCurrentElementAdvance()?
+                                    .expectTextLiteralSilent()?;
+
                             Alter::AlterTable(AlterTable::Rename {
                                 oldName: tableName,
                                 newName,

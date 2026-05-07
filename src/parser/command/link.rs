@@ -72,7 +72,10 @@ impl Parser {
         let mut parseSrcDestState = ParseSrcDestState::ParseSrcTableName;
 
         loop {
-            let text = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+            let text = 
+                self.getCurrentElementAdvance()?
+                    .expectTextLiteral(global::EMPTY_STR)?;
+            
             match (parseSrcDestState, text.to_uppercase().as_str()) {
                 (ParseSrcDestState::ParseSrcTableName, _) => {
                     linkToStyle.srcTableName = text;
@@ -91,7 +94,10 @@ impl Parser {
                     parseSrcDestState = ParseSrcDestState::ParseDestTableName;
                 }
                 (ParseSrcDestState::ParseDestTableName, "TO") => {
-                    linkToStyle.destTableName = self.getCurrentElementAdvance()?.expectTextLiteral("to should followed by dest table name when use link sql")?;
+                    linkToStyle.destTableName = 
+                        self.getCurrentElementAdvance()?
+                            .expectTextLiteral("to should followed by dest table name when use link sql")?;
+                    
                     parseSrcDestState = ParseSrcDestState::ParseDestTableCondition;
                 }
                 (ParseSrcDestState::ParseDestTableCondition, global::圆括号_STR) => {
@@ -103,9 +109,12 @@ impl Parser {
             }
         }
 
-        self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("by", "missing 'by'")?;
+        self.getCurrentElementAdvance()?
+            .expectTextLiteralContentIgnoreCase("by", "missing 'by'")?;
 
-        linkToStyle.relationName = self.getCurrentElementAdvance()?.expectTextLiteral("relation name")?;
+        linkToStyle.relationName = 
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral("relation name")?;
 
         // 如果是true的话是用在unlink上,relation名字后边的括号是对relation的筛选条件而不是用来set的value
         if regardLastPartAsFilter {

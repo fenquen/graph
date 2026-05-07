@@ -3,7 +3,7 @@ use crate::executor::{CommandExecResult, CommandExecutor};
 use anyhow::Result;
 use bumpalo::Bump;
 use crate::parser::command::manage::Set;
-use crate::{config, throw};
+use crate::{config, meta, throw};
 
 impl<'session> CommandExecutor<'session> {
     pub(in crate::executor) fn commit(&mut self) -> Result<CommandExecResult> {
@@ -18,16 +18,30 @@ impl<'session> CommandExecutor<'session> {
 
     pub(in crate::executor) fn set(&mut self, set: &Set) -> Result<CommandExecResult> {
         match set {
-            Set::SetAutoCommit(b) => self.session.setAutoCommit(*b)?,
-            Set::SetScanConcurrency(scanConcurrency) => self.session.scanConcurrency = *scanConcurrency,
+            Set::SetScanConcurrency(scanConcurrency) =>
+                self.session.scanConcurrency = *scanConcurrency,
             Set::SetTxUndergoingMaxCount(txUndergoingMaxCount) => {
                 assert!(0 < *txUndergoingMaxCount);
-                config::CONFIG.txUndergoingMaxCount.store(*txUndergoingMaxCount, Ordering::Release);
+                config::CONFIG.flyingTxMaxCount.store(*txUndergoingMaxCount, Ordering::Release);
             }
-            Set::SetSessionMemorySize(sessionMemorySize) => {
-                self.session.bump = Bump::with_capacity(*sessionMemorySize);
+            Set::SetSessionMemorySize(sessionMemorySize) =>
+                self.session.bump = Bump::with_capacity(*sessionMemorySize),
+            Set::SetTrueFalse(s, b) => {
+                match s.as_str() {
+                    "auto_commit" => self.session.setAutoCommit(*b)?,
+                    "stream_mode" => {
+                        self.session.streamMode = *b;
+
+                        if self.session.streamMode {
+                            self.session.lastDataKey = Some(meta::DATA_KEY_INVALID);
+                        } else {
+                            self.session.lastDataKey = None;
+                        }
+                    }
+                    _ => throw!(&format!("{:?} not supported", set))
+                }
             }
-            // _ => throw!(&format!("{:?} not supported", set))
+            _ => throw!(&format!("{:?} not supported", set))
         }
 
         Ok(CommandExecResult::None)

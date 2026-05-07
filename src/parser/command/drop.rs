@@ -6,8 +6,14 @@ use crate::parser::command::Command;
 
 impl Parser {
     pub(in crate::parser) fn parseDrop(&mut self) -> Result<Command> {
-        let dbObjectType = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase();
-        let dbObjectName = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+        let dbObjectType =
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral(global::EMPTY_STR)?
+                .to_lowercase();
+
+        let dbObjectName =
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral(global::EMPTY_STR)?;
 
         match dbObjectType.as_str() {
             DBObject::INDEX => Ok(Command::DropIndex(dbObjectName)),

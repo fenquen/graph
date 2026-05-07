@@ -17,23 +17,22 @@ lazy_static! {
 pub struct Config {
     pub log4RsYamlPath: String,
     pub wsAddr: String,
-
-    pub metaDir: String,
     pub dataDir: String,
-
-    /// in byte
-    pub sessionMemotySize: usize,
-    pub txUndergoingMaxCount: AtomicUsize,
+    pub flyingTxMaxCount: AtomicUsize,
+    pub tempFileDir: String,
 }
 
 impl Config {
-    pub const DEFAULT_SESSION_MEMORY_SIZE: usize = 2048 * 1024 * 1024;
-    pub const MIN_SESSION_MEMORY_SIZE: usize = 1024 * 1024 * 1024;
+    /// 2GB
+    pub const SESSION_MEMORY_SIZE_DEFAULT: usize = 2048 * 1024 * 1024;
+    /// 1GB
+    pub const SESSION_MEMORY_SIZE_MIN: usize = 1024 * 1024 * 1024;
 
-    pub const DEFAULT_TX_UNDERGOING_MAX_COUNT: usize = 10000;
-    pub const MIN_TX_UNDERGOING_MAX_COUNT: usize = 1000;
+    pub const FLYING_TX_MAX_COUNT_DEFAULT: usize = 10000;
+    pub const FLYING_TX_MAX_COUNT_MIN: usize = 1000;
 
-    pub const DEFAULT_WORKING_MEMORY_SIZE: usize = 2048 * 1024 * 1024;
+    // 2MB
+    pub const DEFAULT_WORKING_MEMORY_SIZE: usize = 2 * 1024 * 1024;
 }
 
 impl Default for Config {
@@ -41,10 +40,9 @@ impl Default for Config {
         Self {
             log4RsYamlPath: "log4rs.yaml".to_string(),
             wsAddr: "127.0.0.1:9673".to_string(),
-            metaDir: "graph_meta".to_string(),
             dataDir: "graph_data".to_string(),
-            sessionMemotySize: Config::DEFAULT_SESSION_MEMORY_SIZE,
-            txUndergoingMaxCount: AtomicUsize::new(Config::DEFAULT_TX_UNDERGOING_MAX_COUNT),
+            flyingTxMaxCount: AtomicUsize::new(Self::FLYING_TX_MAX_COUNT_DEFAULT),
+            tempFileDir: "temp".to_string(),
         }
     }
 }
@@ -58,24 +56,27 @@ pub fn load() -> Config {
 
     let configFilePath = commandLine.configFilePath.as_ref().unwrap();
 
-    let mut configJsonFile = match File::open(configFilePath) {
-        Ok(f) => f,
-        Err(e) => {
-            log::info!("config file:{} not exist, {}", configFilePath, e);
-            process::exit(1);
-        }
+    let mut configJsonFile =
+        match File::open(configFilePath) {
+            Ok(f) => f,
+            Err(e) => {
+                log::info!("config file:{} not exist, {}", configFilePath, e);
+                process::exit(1);
+            }
+        };
+
+    let configJsonFileContent = {
+        let mut configJsonFileContent = String::new();
+        configJsonFile.read_to_string(&mut configJsonFileContent).unwrap();
+
+        configJsonFileContent
     };
 
-    let mut configJsonFileContent = String::new();
-    configJsonFile.read_to_string(&mut configJsonFileContent).unwrap();
-
-    let config: Config = match serde_json::from_str(&configJsonFileContent) {
+    match serde_json::from_str(&configJsonFileContent) {
         Ok(config) => config,
         Err(e) => {
             log::info!("reading config file:{} error, {}", configFilePath, e);
             process::exit(1);
         }
-    };
-
-    config
+    }
 }

@@ -4,7 +4,10 @@ use hashbrown::{HashMap, HashSet};
 use std::collections::{BTreeMap};
 use std::ops::{Range, RangeFrom};
 use std::sync::atomic::Ordering;
-use std::{cmp, mem, thread};
+use std::{cmp, hint, mem, ptr, thread};
+use std::io::{IoSlice, Write};
+use std::os::fd::RawFd;
+use std::os::unix::fs::FileExt;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
@@ -12,7 +15,7 @@ use bytes::{Bytes, BytesMut};
 use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode};
 use crate::executor::{CommandExecutor, index, IterationCmd};
 use crate::expr::Expr;
-use crate::{byte_slice_to_u64, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey};
+use crate::{byte_slice_to_u32, byte_slice_to_u64, config, extractPrefixFromKeySlice, extractTargetDataKeyFromPointerKey};
 use crate::{keyPrefixAddRowId, suffix_plus_plus, throw, u64ToByteArrRef, prefix_plus_plus, throwFormat};
 use crate::{global, meta, types, utils};
 use crate::codec::{BinaryCodec, MyBytes, SliceWrapper};
@@ -20,11 +23,15 @@ use crate::graph_value::GraphValue;
 use crate::meta::{Column, DBObject, Table};
 use crate::parser::command::insert::Insert;
 use crate::parser::element::Element;
-use crate::types::{Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations, KeyTag, RowId, Pointer, SessionVec, DBObjectId};
+use crate::types::{
+    Byte, ColumnFamily, DataKey, DBRawIterator, RowData, TableMutations,
+    KeyTag, RowId, Pointer, SessionVec, DBObjectId, HashMapExt, StdFile, StdOpenOptions,
+};
 use crate::types::{CommittedPreProcessor, CommittedPostProcessor, UncommittedPreProcessor, UncommittedPostProcessor};
 use anyhow::Result;
 use bumpalo::Bump;
 use dashmap::mapref::one::Ref;
+use futures_util::StreamExt;
 use lazy_static::lazy_static;
 use crate::executor::index::{IndexSearch};
 use crate::executor::mvcc::BytesMutExt;
@@ -122,7 +129,10 @@ where
     pub(super) uncommittedPointerKeyProcessor: Option<B>,
 }
 
-impl Default for SearchPointerKeyHooks<Box<dyn CommittedPointerKeyProcessor>, Box<dyn UncommittedPointerKeyProcessor>> {
+impl Default for SearchPointerKeyHooks<
+    Box<dyn CommittedPointerKeyProcessor>,
+    Box<dyn UncommittedPointerKeyProcessor>
+> {
     fn default() -> Self {
         SearchPointerKeyHooks {
             committedPointerKeyProcessor: None,
@@ -202,8 +212,10 @@ impl<'session> CommandExecutor<'session> {
                         }
 
                         // 是不是不会是none
-                        if let Some(addedValueBinary) = tableMutations.get(u64ToByteArrRef!(dataKey).as_ref()) {
-                            if let Some(rowData) = self.readRowDataBinary(addedValueBinary.as_slice(), scanParams)? {
+                        if let Some(addedValueBinary) =
+                            tableMutations.get(u64ToByteArrRef!(dataKey).as_ref()) {
+                            if let Some(rowData) =
+                                self.readRowDataBinary(addedValueBinary.as_slice(), scanParams)? {
                                 if scanHooks.postProcessUncommitted(tableMutations, dataKey, &rowData)? == false {
                                     return Ok(());
                                 }
@@ -424,32 +436,44 @@ impl<'session> CommandExecutor<'session> {
 
                         // range的两边都是闭区间
                         // 以下是给各个thread使用itetate的range
-                        let mut ranges: Vec<(DataKey, DataKey)> = Vec::with_capacity(concurrency as usize + 1);
-                        let mut lastRoundEnd = meta::ROW_ID_INVALID;
-                        for _ in 0..concurrency {
-                            let start: RowId = lastRoundEnd + 1;
-                            let end: RowId = start + rowCountPerThread;
+                        let ranges = {
+                            let mut ranges: Vec<(DataKey, DataKey)> = Vec::with_capacity(concurrency as usize + 1);
+                            let mut lastRoundEnd = meta::ROW_ID_INVALID;
 
-                            ranges.push((keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, start), keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, end)));
+                            for _ in 0..concurrency {
+                                let start: RowId = lastRoundEnd + 1;
+                                let end: RowId = start + rowCountPerThread;
 
-                            lastRoundEnd = end;
-                        }
-                        // 不要忘了到末尾的tail
-                        ranges.push((keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, lastRoundEnd + 1), keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, meta::ROW_ID_MAX)));
+                                ranges.push((
+                                    keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, start),
+                                    keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, end)
+                                ));
+
+                                lastRoundEnd = end;
+                            }
+
+                            // 不要忘了到末尾的tail
+                            ranges.push((
+                                keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, lastRoundEnd + 1),
+                                keyPrefixAddRowId!(meta::KEY_PREFIX_DATA, meta::ROW_ID_MAX)
+                            ));
+
+                            ranges
+                        };
 
                         // let mut threadList = Vec::with_capacity(ranges.len());
 
                         // 以下是相当危险的,rust的引用直接转换成指针对应的数字,然后跨thread传递
                         // 能这么干的原因是,知道concurrent scan的涉及范围 会限制在当前函数之内 不会逃逸 因为后边要等待它们都结束
                         // 然而编译器是不知道这么细的细节的 只能1棒杀掉报错
-                        let commandExecutorPointer = self as *const CommandExecutor as u64;
-                        let scanHooksPointer = &mut scanHooks as *mut ScanHooks<A, B, C, D> as u64;
-                        let tableFilterPointer =
+                        let commandExecutorPtr = self as *const CommandExecutor as u64;
+                        let scanHooksPtr = &mut scanHooks as *mut ScanHooks<A, B, C, D> as u64;
+                        let tableFilterPtr =
                             match scanParams.tableFilter {
                                 Some(expr) => Some(expr as *const Expr as u64),
                                 None => None
                             };
-                        let selectedColumnNamesPointer =
+                        let selectedColumnNamesPtr =
                             match scanParams.selectedColumnNames {
                                 Some(selectedColumnNames) => Some(selectedColumnNames as *const Vec<String> as u64),
                                 None => None
@@ -466,14 +490,16 @@ impl<'session> CommandExecutor<'session> {
                                         let tableName = scanParams.table.name.clone();
 
                                         // 以下是lambda外部的共用的 通过ptr还原
-                                        let commandExecutor: &CommandExecutor<'session> = mem::transmute(commandExecutorPointer as *const CommandExecutor);
-                                        let tableFilter: Option<&Expr> = tableFilterPointer.map(
-                                            |tableFilterPointer| mem::transmute(tableFilterPointer as *const Expr)
-                                        );
-                                        let selectedColumnNames: Option<&Vec<String>> = selectedColumnNamesPointer.map(
-                                            |selectedColumnNamesPointer| mem::transmute(selectedColumnNamesPointer as *const Vec<String>)
-                                        );
-                                        let scanHooks: &mut ScanHooks<A, B, C, D> = mem::transmute(scanHooksPointer as *mut ScanHooks<A, B, C, D>);
+                                        let commandExecutor: &CommandExecutor<'session> = mem::transmute(commandExecutorPtr as *const CommandExecutor);
+                                        let tableFilter: Option<&Expr> =
+                                            tableFilterPtr.map(
+                                                |tableFilterPointer| mem::transmute(tableFilterPointer as *const Expr)
+                                            );
+                                        let selectedColumnNames: Option<&Vec<String>> =
+                                            selectedColumnNamesPtr.map(
+                                                |selectedColumnNamesPointer| mem::transmute(selectedColumnNamesPointer as *const Vec<String>)
+                                            );
+                                        let scanHooks: &mut ScanHooks<A, B, C, D> = mem::transmute(scanHooksPtr as *mut ScanHooks<A, B, C, D>);
 
                                         // 以下是各个thread上单独的
                                         let table = Session::getDBObjectByName(tableName.as_str())?;
@@ -491,7 +517,8 @@ impl<'session> CommandExecutor<'session> {
 
                                         let mut readCount = 0usize;
 
-                                        for iterResult in snapshot.iterator_cf(&columnFamily, IteratorMode::From(u64ToByteArrRef!(dataKeyStart), Direction::Forward)) {
+                                        let iteratorMode = IteratorMode::From(u64ToByteArrRef!(dataKeyStart), Direction::Forward);
+                                        for iterResult in snapshot.iterator_cf(&columnFamily, iteratorMode) {
                                             let (dataKeyBinary, rowDataBinary) = iterResult?;
 
                                             let dataKey: DataKey = byte_slice_to_u64!(&*dataKeyBinary);
@@ -519,24 +546,27 @@ impl<'session> CommandExecutor<'session> {
                                                 ..Default::default()
                                             };
 
-                                            if let Some(rowData) = commandExecutor.readRowDataBinary(&*rowDataBinary, &scanParams)? {
-                                                // committed post
-                                                if scanHooks.postProcessCommitted(&columnFamily, dataKey, &rowData)? == false {
-                                                    continue;
-                                                }
-
-                                                // concurrent scan 当前不知如何应对offset 只能应对limit
-                                                // 而且limit不能分割平分到各个thread上,需要各个thread都要收集的数量都要满足limit
-                                                // 因可能这块没有 那块有
-                                                if let Some(limit) = scanParams.limit {
-                                                    if readCount >= limit {
-                                                        break;
+                                            match commandExecutor.readRowDataBinary(&*rowDataBinary, &scanParams)? {
+                                                Some(rowData) => {
+                                                    // committed post
+                                                    if scanHooks.postProcessCommitted(&columnFamily, dataKey, &rowData)? == false {
+                                                        continue;
                                                     }
+
+                                                    // concurrent scan 当前不知如何应对offset 只能应对limit
+                                                    // 而且limit不能分割平分到各个thread上,需要各个thread都要收集的数量都要满足limit
+                                                    // 因可能这块没有 那块有
+                                                    if let Some(limit) = scanParams.limit {
+                                                        if readCount >= limit {
+                                                            break;
+                                                        }
+                                                    }
+
+                                                    sender.send(Result::<(DataKey, RowData)>::Ok((dataKey, rowData))).expect("impossible");
+
+                                                    suffix_plus_plus!(readCount);
                                                 }
-
-                                                sender.send(Result::<(DataKey, RowData)>::Ok((dataKey, rowData))).expect("impossible");
-
-                                                suffix_plus_plus!(readCount);
+                                                _ => {}
                                             }
                                         }
 
@@ -632,7 +662,7 @@ impl<'session> CommandExecutor<'session> {
                 }
 
                 satisfiedRows
-            } else { // 说明是link 且尚未写filter
+            } else { // 说明是link 且尚未写filter,用来获取这个table的全部data然后挨个的去的
                 let mut rawIterator: DBRawIterator = self.session.getSnapshot()?.raw_iterator_cf(&columnFamily);
                 rawIterator.seek(meta::DATA_KEY_PATTERN);
 
@@ -669,7 +699,9 @@ impl<'session> CommandExecutor<'session> {
             for (addedDataKeyBinaryCurrentTx, addRowDataBinaryCurrentTx) in addedDataCurrentTxRange {
                 let addedDataKeyCurrentTx: DataKey = byte_slice_to_u64!(addedDataKeyBinaryCurrentTx);
 
-                if self.uncommittedDataVisible(tableMutationsCurrentTx, &mut mvccKeyBuffer, addedDataKeyCurrentTx)? == false {
+                if self.uncommittedDataVisible(tableMutationsCurrentTx,
+                                               &mut mvccKeyBuffer,
+                                               addedDataKeyCurrentTx)? == false {
                     continue;
                 }
 
@@ -680,7 +712,9 @@ impl<'session> CommandExecutor<'session> {
 
                 if let Some(rowData) = self.readRowDataBinary(addRowDataBinaryCurrentTx, &scanParams)? {
                     // postProcessUncommitted
-                    if scanHooks.postProcessUncommitted(tableMutationsCurrentTx, addedDataKeyCurrentTx, &rowData)? == false {
+                    if scanHooks.postProcessUncommitted(tableMutationsCurrentTx,
+                                                        addedDataKeyCurrentTx,
+                                                        &rowData)? == false {
                         continue;
                     }
 
@@ -692,7 +726,9 @@ impl<'session> CommandExecutor<'session> {
         Ok(satisfiedRows)
     }
 
-    pub(super) fn readRowDataBinary(&self, rowBinary: &[Byte], scanParams: &ScanParams) -> Result<Option<RowData>> {
+    pub(super) fn readRowDataBinary(&self,
+                                    rowBinary: &[Byte],
+                                    scanParams: &ScanParams) -> Result<Option<RowData>> {
         let columnNames =
             scanParams.table.columns.iter().map(
                 |column| column.name.clone()
@@ -702,11 +738,10 @@ impl<'session> CommandExecutor<'session> {
         let mut sliceWrapper = SliceWrapper::new(rowBinary);
         let columnValues = Vec::<GraphValue>::decodeFromSliceWrapper(&mut sliceWrapper, Some(self))?;
 
-        if columnNames.len() != columnValues.len() {
-            panic!("column names count does not match column values");
-        }
+        assert_eq!(columnNames.len(), columnValues.len(),
+                   "column names count does not match column values");
 
-        let mut rowData: RowData = HashMap::with_capacity(columnNames.len());
+        let mut rowData = HashMap::with_capacity(columnNames.len());
 
         for (columnName, columnValue) in columnNames.into_iter().zip(columnValues) {
             rowData.insert(columnName, columnValue);
@@ -717,18 +752,19 @@ impl<'session> CommandExecutor<'session> {
         }
 
         // todo  select user[id](name like 'tom') 因为未选取name 使得name过滤的时候报错 不能提前prune 完成
-        if let GraphValue::Boolean(satisfy) = scanParams.tableFilter.unwrap().calc(Some(&rowData))? {
-            if satisfy {
-                if scanParams.needRowData {
-                    Ok(Some(pruneRowData(rowData, scanParams.selectedColumnNames)?))
-                } else {
-                    Ok(Some(global::DUMMY_ROW_DATA))
+        match scanParams.tableFilter.unwrap().calc(Some(&rowData))? {
+            GraphValue::Boolean(satisfy) => {
+                if satisfy {
+                    if scanParams.needRowData {
+                        return Ok(Some(pruneRowData(rowData, scanParams.selectedColumnNames)?));
+                    }
+
+                    return Ok(Some(global::DUMMY_ROW_DATA));
                 }
-            } else {
+
                 Ok(None)
             }
-        } else {
-            throw!("table filter should get a boolean")
+            _ => throw!("table filter should get a boolean"),
         }
     }
 
@@ -809,6 +845,7 @@ impl<'session> CommandExecutor<'session> {
 
             for columnExprVec in &insert.columnExprVecVec {
                 let mut columnName_columnExpr = HashMap::with_capacity(insert.columnNames.len());
+
                 for (columnName, columnExpr) in insert.columnNames.iter().zip(columnExprVec.iter()) {
                     columnName_columnExpr.insert(columnName, columnExpr);
                 }
@@ -845,7 +882,9 @@ impl<'session> CommandExecutor<'session> {
 
     /// 当前对relation本身的数据的筛选是通过注入闭包实现的
     // todo 如何去应对重复的pointerKey
-    pub(super) fn searchPointerKeyByPrefix<A, B>(&self, dbObjectId: DBObjectId, prefix: &[Byte],
+    pub(super) fn searchPointerKeyByPrefix<A, B>(&self,
+                                                 dbObjectId: DBObjectId,
+                                                 prefix: &[Byte],
                                                  mut searchPointerKeyHooks: SearchPointerKeyHooks<A, B>) -> Result<Vec<Box<[Byte]>>>
     where
         A: CommittedPointerKeyProcessor,
@@ -901,7 +940,8 @@ impl<'session> CommandExecutor<'session> {
         // todo pointerKey应该同时到committed和uncommitted去搜索 完成
         // 应对uncommitted
         if let Some(tableMutations) = tableMutations {
-            let addedPointerKeyRange = tableMutations.range::<Vec<Byte>, RangeFrom<&Vec<Byte>>>(&prefix.to_vec()..);
+            let addedPointerKeyRange =
+                tableMutations.range::<Vec<Byte>, RangeFrom<&Vec<Byte>>>(&prefix.to_vec()..);
 
             for (addedPointerKey, _) in addedPointerKeyRange {
                 // 因为右边的是未限制的 需要手动
@@ -970,12 +1010,18 @@ impl<'session> CommandExecutor<'session> {
             ..Default::default()
         };
 
-        let relationDatas = self.getRowDatasByDataKeys(targetRelationDataKeys.as_slice(), &scanParams, &mut ScanHooks::default())?;
+        let relationDatas =
+            self.getRowDatasByDataKeys(
+                targetRelationDataKeys.as_slice(),
+                &scanParams,
+                &mut ScanHooks::default(),
+            )?;
 
         Ok(relationDatas)
     }
 }
 
+// todo 2026 pruneRowData 是不是可以在原始的rowData直接动手的
 pub(super) fn pruneRowData(mut rowData: RowData, selectedColName: Option<&Vec<String>>) -> Result<RowData> {
     let mut prunedRowData: RowData = HashMap::with_capacity(rowData.len());
 
@@ -997,4 +1043,236 @@ pub(super) fn pruneRowData(mut rowData: RowData, selectedColName: Option<&Vec<St
     }
 
     Ok(prunedRowData)
+}
+
+/// 替换 Vec<(DataKey, RowData)>
+pub(super) struct ResultContainer<'a> {
+    session: &'a Session,
+
+    /// 在内存部分的结果
+    memoryData: Vec<(DataKey, RowData)>,
+    memoryDataSize: usize,
+
+    /// 结果太大后超出的部分保存在了临时文件 temp_data_tx_id_{txId}
+    diskDataFile: Option<StdFile>,
+}
+
+impl<'a> ResultContainer<'a> {
+    pub(super) fn new(session: &'a Session) -> Result<Self> {
+        Ok(Self {
+            session,
+            memoryDataSize: 0,
+            memoryData: Vec::new(),
+            diskDataFile: None,
+        })
+    }
+
+    pub(super) fn add(&mut self, dataKey: DataKey, rowData: RowData) -> Result<()> {
+        // 放到内存中
+        if self.session.workingMemorySize >= self.memoryDataSize {
+            self.memoryDataSize += rowData.getRowSize();
+            self.memoryData.push((dataKey, rowData));
+
+            return Ok(());
+        }
+
+        // 放到临时的文件文件
+        if hint::unlikely(self.diskDataFile.is_none()) {
+            let diskDataFile = {
+                let mut openOptions = StdOpenOptions::new();
+                openOptions.read(true).write(true).create_new(true).truncate(true);
+
+                openOptions.open(&config::CONFIG.tempFileDir)?
+            };
+
+            self.diskDataFile.replace(diskDataFile);
+        }
+
+        let dataKeySlice = &dataKey.to_be_bytes();
+
+        // rowData 序列化
+        let rowDataJson = serde_json::to_value(&rowData)?.to_string();
+        let rowDataBinaryLenSlice = &(rowDataJson.len() as u32).to_be_bytes();
+
+        let mut ioSlices = [
+            IoSlice::new(dataKeySlice),
+            IoSlice::new(rowDataBinaryLenSlice),
+            IoSlice::new(rowDataJson.as_bytes()),
+        ];
+
+        let mut ioSlices = ioSlices.as_mut_slice();
+
+        let totalLen = {
+            let mut totalLen = 0usize;
+            for ioSlice in &*ioSlices {
+                totalLen += ioSlice.len();
+            }
+            totalLen
+        };
+
+        let mut totalWrittenCount = 0usize;
+
+        loop {
+            let writtenCount =
+                self.diskDataFile.as_mut().unwrap().write_vectored(&*ioSlices)?;
+
+            if writtenCount == 0 {
+                break;
+            }
+
+            totalWrittenCount += writtenCount;
+
+            if totalWrittenCount == totalLen {
+                break;
+            }
+
+            IoSlice::advance_slices(&mut ioSlices, writtenCount);
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    pub(super) fn isEmpty(&self) -> bool {
+        self.memoryData.is_empty() && self.diskDataFile.is_none()
+    }
+
+    #[inline]
+    pub(super) fn isNotEmpty(&self) -> bool {
+        self.isEmpty() == false
+    }
+}
+
+impl<'a> IntoIterator for ResultContainer<'a> {
+    type Item = Result<(DataKey, RowData)>;
+    type IntoIter = ResultContainerIterator;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let memoryDataPtr = self.memoryData.as_ptr();
+        let memoryDataLen = self.memoryData.len();
+
+        mem::forget(self.memoryData);
+
+        ResultContainerIterator {
+            memoryDataPtr,
+            memoryDataLen, // 直接的记录len减少后续的调用消耗
+            memoryDataIndex: 0,
+            diskDataFile: self.diskDataFile,
+            diskDataPos: 0,
+            diskDataBuf: {
+                let len = size_of::<DataKey>() + size_of::<u32>();
+                let mut diskDataBuf = BytesMut::with_capacity(len);
+
+                // 有cap后len还是0,变为slice后是空的,要将len撑满
+                diskDataBuf.resize(len, 0);
+
+                diskDataBuf
+            },
+        }
+    }
+}
+
+pub(super) struct ResultContainerIterator {
+    memoryDataPtr: *const (DataKey, RowData),
+    memoryDataLen: usize,
+    memoryDataIndex: usize,
+
+    diskDataFile: Option<StdFile>,
+    diskDataPos: u64,
+    // cap是固定的(dataKey+4字节长度)
+    diskDataBuf: BytesMut,
+}
+
+impl Iterator for ResultContainerIterator {
+    type Item = Result<(DataKey, RowData)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // memoryData 还有内容的
+        if self.memoryDataLen > self.memoryDataIndex {
+            // 直接指针读取对应的index的data,这样可以绕过RowData的clone直接得到非引用的(dataKey,rowData)
+            // memoryData.remove(index)也是可以得到,然而会使得vec内部的元素迁移成本不小的
+            // 使用指针的话可以确保memoryData保持原样,然而需要在drop的时候特殊处理
+            let entry = unsafe {
+                // 不能使用"*"取指针的内容,报错"cannot move out of a raw pointer,需要实现copy"
+                ptr::read(self.memoryDataPtr.add(self.memoryDataIndex))
+            };
+
+            suffix_plus_plus!(self.memoryDataIndex);
+
+            return Some(Ok(entry));
+        }
+
+        if self.diskDataFile.is_none() {
+            return None;
+        }
+
+        let diskDataFile = self.diskDataFile.as_mut().unwrap();
+
+        let (dataKey, rowDataLen) = {
+            let diskDataBuf = self.diskDataBuf.as_mut();
+
+            if let Err(e) = diskDataFile.read_exact_at(
+                diskDataBuf.as_mut(), self.diskDataPos,
+            ) {
+                return Some(Err(anyhow::Error::new(e)));
+            }
+
+            let (dataKeySlice, lenSlice) = diskDataBuf.split_at(size_of::<DataKey>());
+
+            let dataKey = byte_slice_to_u64!(dataKeySlice);
+            let rowDataLen = byte_slice_to_u32!(lenSlice);
+
+            if rowDataLen == 0 {
+                return Some(Ok((dataKey, global::DUMMY_ROW_DATA)));
+            }
+
+            (dataKey, rowDataLen)
+        };
+
+
+        todo!()
+    }
+}
+
+impl Drop for ResultContainerIterator {
+    fn drop(&mut self) {
+        // memoryData清理
+        let memoryDataPtrCurrent = unsafe {
+            self.memoryDataPtr.add(self.memoryDataIndex)
+        };
+
+        // 已经使用的部分当成纯数字(u8)清理
+        {
+            let len = memoryDataPtrCurrent as usize - self.memoryDataPtr as usize;
+
+            if len > 0 {
+                let vec = unsafe {
+                    Vec::from_raw_parts(
+                        self.memoryDataPtr as *mut u8,
+                        len,
+                        len,
+                    )
+                };
+
+                drop(vec);
+            }
+        }
+
+        // 未使用的部分依然当成(dataKey,rowData)清理
+        {
+            let len = self.memoryDataLen - self.memoryDataIndex;
+
+            if len > 0 {
+                let vec = unsafe {
+                    Vec::from_raw_parts(
+                        unsafe { memoryDataPtrCurrent as *mut (DataKey, RowData) },
+                        len,
+                        len,
+                    )
+                };
+
+                drop(vec);
+            }
+        }
+    }
 }

@@ -3,6 +3,7 @@
 #![feature(trait_alias)]
 #![feature(allocator_api)]
 #![feature(iter_collect_into)]
+#![feature(likely_unlikely)]
 #![allow(unused)]
 
 mod config;

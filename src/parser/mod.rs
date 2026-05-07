@@ -59,7 +59,10 @@ impl Parser {
 
         loop {
             let command =
-                match self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase().as_str() {
+                match self
+                    .getCurrentElementAdvance()?
+                    .expectTextLiteral(global::EMPTY_STR)?
+                    .to_lowercase().as_str() {
                     "create" => self.parseCreate()?,
                     "drop" => self.parseDrop()?,
                     "insert" => self.parseInsert()?,

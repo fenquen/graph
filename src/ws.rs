@@ -88,8 +88,13 @@ pub async fn init() -> Result<()> {
 
     log::info!("server started, ws listen on: {}",config::CONFIG.wsAddr);
 
-    while let Ok((tcpStream, remoteAddr)) = listener.accept().await {
-        tokio::spawn(processConn(tcpStream, remoteAddr));
+    loop {
+        match listener.accept().await {
+            Ok((tcpStream, remoteAddr)) => {
+                tokio::spawn(processConn(tcpStream, remoteAddr));
+            }
+            _ => break,
+        }
     }
 
     Ok(())
@@ -160,32 +165,34 @@ async fn processGraphWsRequest(writeStream: &mut SplitSink<WebSocketStream<TcpSt
 
     match graphWsRequest.requestType {
         RequestType::ExecuteSql => {
-            if let None = graphWsRequest.sql {
-                return Ok(());
-            }
+            match graphWsRequest.sql {
+                Some(sql) => {
+                    if sql.is_empty() || sql.starts_with("--") {
+                        return Ok(());
+                    }
 
-            let sql = graphWsRequest.sql.unwrap();
-            if sql.is_empty() || sql.starts_with("--") {
-                return Ok(());
+                    selectResultToFront.replace(
+                        tokio::task::block_in_place(|| session.executeSql(&sql))?
+                    );
+                }
+                None => return Ok(()),
             }
-
-            selectResultToFront.replace(tokio::task::block_in_place(|| session.executeSql(&sql))?);
         }
         RequestType::TestParser => {
             if remoteAddr.ip().is_loopback() == false {
                 throw!("test parser request can only be from localhost");
             }
 
-            if let None = graphWsRequest.sql {
-                return Ok(());
-            }
+            match graphWsRequest.sql {
+                Some(sql) => {
+                    if sql.is_empty() || sql.starts_with("--") {
+                        return Ok(());
+                    }
 
-            let sql = graphWsRequest.sql.unwrap();
-            if sql.is_empty() || sql.starts_with("--") {
-                return Ok(());
+                    parser::parse(&sql)?;
+                }
+                None => return Ok(()),
             }
-
-            parser::parse(&sql)?;
         }
         _ => {}
     }

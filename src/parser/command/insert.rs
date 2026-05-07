@@ -26,10 +26,16 @@ impl Parser {
 
         let mut insertValues = Insert::default();
 
-        insertValues.tableName = self.getCurrentElementAdvance()?.expectTextLiteral("table name should not pure number")?.to_string();
+        insertValues.tableName = 
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral("table name should not pure number")?.to_string();
 
         loop { // loop 对应下边说的猥琐套路
-            let currentText = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase();
+            let currentText = 
+                self.getCurrentElementAdvance()?
+                    .expectTextLiteral(global::EMPTY_STR)?
+                    .to_lowercase();
+            
             match currentText.as_str() {
                 global::圆括号_STR => { // 各column名
                     insertValues.useExplicitColumnNames = true;
@@ -96,13 +102,17 @@ impl Parser {
 
     /// 读取 insert into test (column1) values ('a') 中 (column1) 部分
     pub(super) fn parseInsertColumnNames(&mut self) -> Result<Vec<String>> {
-        self.getCurrentElementAdvance()?.expectTextLiteralContent(global::圆括号_STR)?;
+        self.getCurrentElementAdvance()?
+            .expectTextLiteralContent(global::圆括号_STR)?;
 
         let mut columnNames = Vec::new();
 
         loop {
             // columnName都要是TextLiteral 而不是StringContent
-            let text = self.getCurrentElementAdvance()?.expectTextLiteralSilent()?;
+            let text = 
+                self.getCurrentElementAdvance()?
+                    .expectTextLiteralSilent()?;
+            
             match text.as_str() {
                 global::逗号_STR => continue,
                 // columnName读取结束了 下边应该是values

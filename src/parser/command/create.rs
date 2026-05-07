@@ -8,7 +8,11 @@ use crate::graph_value::GraphValue;
 
 impl Parser {
     pub(in crate::parser) fn parseCreate(&mut self) -> Result<Command> {
-        let dbObjectType = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase();
+        let dbObjectType =
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral(global::EMPTY_STR)?
+                .to_lowercase();
+
         match dbObjectType.as_str() {
             DBObject::RELATION | DBObject::TABLE => self.parseCreateTable(dbObjectType.as_str()),
             DBObject::INDEX => self.parseCreateIndex(),
@@ -30,13 +34,16 @@ impl Parser {
                 Element::Not => {}
                 _ => self.throwSyntaxErrorDetail(errMessage)?
             }
-            self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("exist", errMessage)?;
+            self.getCurrentElementAdvance()?
+                .expectTextLiteralContentIgnoreCase("exist", errMessage)?;
 
             table.createIfNotExist = true;
         }
 
         // 读取table name
-        table.name = self.getCurrentElementAdvance()?.expectTextLiteral("table name can not be pure number")?;
+        table.name =
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral("table name can not be pure number")?;
 
         // table名不能胡乱
         self.checkDbObjectName(&table.name)?;
@@ -54,7 +61,8 @@ impl Parser {
         let mut columns = Vec::new();
 
         // 应该是"("
-        self.getCurrentElementAdvance()?.expectTextLiteralContent(global::圆括号_STR)?;
+        self.getCurrentElementAdvance()?
+            .expectTextLiteralContent(global::圆括号_STR)?;
 
         // 循环读取 column
         enum ReadColumnState {
@@ -105,7 +113,9 @@ impl Parser {
                                 let currentElement = self.getCurrentElementAdvance()?;
 
                                 if expectElementTypeVec.is_empty() == false {
-                                    if expectElementTypeVec.iter().any(|elementType| elementType == &currentElement.getType()) == false {
+                                    if expectElementTypeVec.iter().any(
+                                        |elementType| elementType == &currentElement.getType()
+                                    ) == false {
                                         return self.throwSyntaxError()?;
                                     }
                                 }
@@ -170,7 +180,8 @@ impl Parser {
 
         if utils::hasDup(&mut columns,
                          |prev, next| prev.name.cmp(&next.name),
-                         |prev, next| prev.name == next.name) {
+                         |prev, next| prev.name == next.name,
+        ) {
             throw!("has duplicated column names");
         }
 
@@ -181,18 +192,27 @@ impl Parser {
     fn parseCreateIndex(&mut self) -> Result<Command> {
         let mut index = Index::default();
 
-        index.name = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+        index.name =
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral(global::EMPTY_STR)?;
 
         // 读取 on
-        self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("on", "index name should followed by on")?;
+        self.getCurrentElementAdvance()?
+            .expectTextLiteralContentIgnoreCase("on", "index name should followed by on")?;
 
-        index.tableName = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+        index.tableName =
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral(global::EMPTY_STR)?;
 
         // 读取[
-        self.getCurrentElementAdvance()?.expectTextLiteral(global::方括号_STR)?;
+        self.getCurrentElementAdvance()?
+            .expectTextLiteral(global::方括号_STR)?;
 
         loop {
-            let columnName = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+            let columnName =
+                self.getCurrentElementAdvance()?
+                    .expectTextLiteral(global::EMPTY_STR)?;
+
             match columnName.as_str() {
                 global::逗号_STR => continue,
                 global::方括号1_STR => break,

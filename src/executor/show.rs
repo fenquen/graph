@@ -18,22 +18,56 @@ impl<'session> CommandExecutor<'session> {
                     _ => throw!("only table and relation have indice")
                 };
 
-                Ok(CommandExecResult::SelectResult(table.indexNames.iter().map(|indexName| json!(indexName)).collect()))
+                Ok(CommandExecResult::SelectResult(
+                    table.indexNames.iter().map(
+                        |indexName| json!(indexName)
+                    ).collect()
+                ))
             }
             None => {
-                let indexNames: Vec<String> = meta::NAME_DB_OBJ.iter().filter_map(|dbObject| dbObject.asIndexOption().map(|index| index.name.clone())).collect();
-                Ok(CommandExecResult::SelectResult(indexNames.iter().map(|indexName| json!(indexName)).collect()))
+                let indexNames: Vec<String> =
+                    meta::NAME_DB_OBJ.iter().filter_map(
+                        |dbObject| dbObject.asIndexOption().map(
+                            |index| index.name.clone()
+                        )
+                    ).collect();
+
+                Ok(CommandExecResult::SelectResult(
+                    indexNames.iter().map(
+                        |indexName| json!(indexName)
+                    ).collect()
+                ))
             }
         }
     }
 
     pub(super) fn showRelations(&self) -> Result<CommandExecResult> {
-        let relationNames: Vec<String> = meta::NAME_DB_OBJ.iter().filter_map(|dbObject| dbObject.asRelationOption().map(|relation| relation.name.clone())).collect();
-        Ok(CommandExecResult::SelectResult(relationNames.iter().map(|indexName| json!(indexName)).collect()))
+        let relationNames: Vec<String> =
+            meta::NAME_DB_OBJ.iter().filter_map(
+                |dbObject| dbObject.asRelationOption().map(
+                    |relation| relation.name.clone()
+                )
+            ).collect();
+
+        Ok(CommandExecResult::SelectResult(
+            relationNames.iter().map(
+                |indexName| json!(indexName)
+            ).collect()
+        ))
     }
 
     pub(super) fn showTables(&self) -> Result<CommandExecResult> {
-        let tableNames: Vec<String> = meta::NAME_DB_OBJ.iter().filter_map(|dbObject| dbObject.asTableOption().map(|table| table.name.clone())).collect();
-        Ok(CommandExecResult::SelectResult(tableNames.iter().map(|indexName| json!(indexName)).collect()))
+        let tableNames: Vec<String> =
+            meta::NAME_DB_OBJ.iter().filter_map(
+                |dbObject| dbObject.asTableOption().map(
+                    |table| table.name.clone()
+                )
+            ).collect();
+
+        Ok(CommandExecResult::SelectResult(
+            tableNames.iter().map(
+                |indexName| json!(indexName)
+            ).collect()
+        ))
     }
 }

@@ -6,17 +6,25 @@ use crate::parser::command::Command;
 
 impl Parser {
     pub(in crate::parser) fn parseShow(&mut self) -> Result<Command> {
-        match self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase().as_str() {
+        match self
+            .getCurrentElementAdvance()?
+            .expectTextLiteral(global::EMPTY_STR)?.to_lowercase()
+            .as_str() {
             "indice" => {
                 if self.getCurrentElementOption().is_some() {
-                    self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("on", global::EMPTY_STR)?;
+                    self.getCurrentElementAdvance()?
+                        .expectTextLiteralContentIgnoreCase("on", global::EMPTY_STR)?;
 
-                    let dbObjectTypeString = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?.to_lowercase();
+                    let dbObjectTypeString =
+                        self.getCurrentElementAdvance()?
+                            .expectTextLiteral(global::EMPTY_STR)?.to_lowercase();
 
                     match dbObjectTypeString.as_str() {
                         DBObject::TABLE | DBObject::RELATION => {
                             let mut table = Table::default();
-                            table.name = self.getCurrentElementAdvance()?.expectTextLiteral(global::EMPTY_STR)?;
+                            table.name = 
+                                self.getCurrentElementAdvance()?
+                                    .expectTextLiteral(global::EMPTY_STR)?;
 
                             match dbObjectTypeString.as_str() {
                                 DBObject::TABLE => Ok(Command::ShowIndice(Some(DBObject::Table(table)))),

@@ -412,10 +412,17 @@ impl<'session> CommandExecutor<'session> {
         // todo 如果是indexLocal的话 还是要应对重复数据 不像应对datakey那样容易 使用hashMap去掉重复的dataKey 完成
         let mut processWhenPrefixFollowing1stColSatisfied =
             |indexKey: &[Byte], beginPosition: usize| {
-                if let Some(indexSearchResult) = self.further::<A, B, C, D>(beginPosition + 1, indexKey, &indexSearch)? {
+                if let Some(indexSearchResult) =
+                    self.further::<A, B, C, D>(beginPosition + 1,
+                                               indexKey,
+                                               &indexSearch)? {
                     match indexSearchResult {
-                        IndexSearchResult::Direct((dataKey, rowData)) => { rowDatas.insert(dataKey, (dataKey, rowData)); }
-                        IndexSearchResult::Redirect(dataKey) => { dataKeys.insert(dataKey); }
+                        IndexSearchResult::Direct((dataKey, rowData)) => {
+                            rowDatas.insert(dataKey, (dataKey, rowData));
+                        }
+                        IndexSearchResult::Redirect(dataKey) => {
+                            dataKeys.insert(dataKey);
+                        }
                     };
                 }
 

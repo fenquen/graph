@@ -12,11 +12,17 @@ pub struct Delete {
 impl Parser {
     /// delete from user(a=1)
     pub(in crate::parser) fn parseDelete(&mut self) -> anyhow::Result<Command> {
-        self.getCurrentElementAdvance()?.expectTextLiteralContentIgnoreCase("from", "delete should followed by from")?;
+        self.getCurrentElementAdvance()?
+            .expectTextLiteralContentIgnoreCase(
+                "from",
+                "delete should followed by from",
+            )?;
 
         let mut delete = Delete::default();
 
-        delete.tableName = self.getCurrentElementAdvance()?.expectTextLiteral("expect a table after from")?;
+        delete.tableName =
+            self.getCurrentElementAdvance()?
+                .expectTextLiteral("expect a table after from")?;
 
         if self.getCurrentElementOption().is_some() {
             delete.filterExpr = Some(self.parseExpr(false)?);

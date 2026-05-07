@@ -58,7 +58,6 @@ impl Element {
             None
         }
     }
-
     pub(super) fn expectTextLiteral(&self, errorStr: &str) -> Result<String> {
         if let Some(text) = self.expectTextLiteralOpt() {
             Ok(text.to_string())
@@ -122,7 +121,6 @@ impl Element {
             None
         }
     }
-
     pub(super) fn expectIntegerLiteral(&self) -> Result<i64> {
         if let Some(number) = self.expectIntegerLiteralOpt() {
             Ok(number)
@@ -157,11 +155,11 @@ impl Debug for Element {
 }
 
 impl Parser {
-    pub(super) fn parseElement(&mut self) -> anyhow::Result<()> {
+    pub(super) fn parseElement(&mut self) -> Result<()> {
         let mut currentElementVec: Vec<Element> = Vec::new();
 
-        let mut 括号数量: usize = 0;
-        let mut 括号1数量: usize = 0;
+        let mut 括号数量 = 0usize;
+        let mut 括号1数量 = 0usize;
 
         let ascInvisibleCodeRange = char::from(0u8)..=char::from(31);
 
@@ -556,24 +554,13 @@ impl Parser {
 
     /// 返回None的话说明当前已经是overflow了 和之前遍历char时候不同的是 当不能advance时候index是在最后的index还要向后1个的
     pub(super) fn getCurrentElementAdvanceOption(&mut self) -> Option<&Element> {
-        let option = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex);
-        if option.is_some() {
-            suffix_plus_plus!(self.currentElementIndex);
-        }
-        option
+        self.elementVecVec
+            .get(self.currentElementVecIndex).unwrap()
+            .get(self.currentElementIndex)
+            .inspect(|_| { suffix_plus_plus!(self.currentElementIndex); })
     }
-
     /// getCurrentElementAdvance, 得到current element 然后 advance
     pub(super) fn getCurrentElementAdvance(&mut self) -> Result<&Element> {
-        if let Some(element) = self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex) {
-            suffix_plus_plus!(self.currentElementIndex);
-            Ok(element)
-        } else {
-            self.throwSyntaxErrorDetail("unexpected end of sql")?
-        }
-    }
-
-    pub(super) fn getCurrentElement(&self) -> Result<&Element> {
         if let Some(element) = self.getCurrentElementOption() {
             Ok(element)
         } else {
@@ -582,32 +569,43 @@ impl Parser {
     }
 
     pub(super) fn getCurrentElementOption(&self) -> Option<&Element> {
-        self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex)
+        self.elementVecVec
+            .get(self.currentElementVecIndex).unwrap()
+            .get(self.currentElementIndex)
+    }
+    pub(super) fn getCurrentElement(&self) -> Result<&Element> {
+        self.getCurrentElementOption()
+            .map_or_else(
+                || self.throwSyntaxErrorDetail("unexpected end of sql")?,
+                |element| Ok(element),
+            )
     }
 
     /// 和 peekNextElement 不同的是 得到的是 Option 不是 result
     pub(super) fn peekPrevElementOpt(&self) -> Option<&Element> {
-        self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex - 1)
+        self.elementVecVec
+            .get(self.currentElementVecIndex).unwrap()
+            .get(self.currentElementIndex - 1)
     }
-
     pub(super) fn peekPrevElement(&self) -> Result<&Element> {
-        if let Some(previousElement) = self.peekPrevElementOpt() {
-            Ok(previousElement)
-        } else {
-            self.throwSyntaxError()?
-        }
+        self.peekPrevElementOpt()
+            .map_or_else(
+                || self.throwSyntaxError()?,
+                |element| Ok(element),
+            )
     }
 
     pub(super) fn peekNextElementOpt(&self) -> Option<&Element> {
-        self.elementVecVec.get(self.currentElementVecIndex).unwrap().get(self.currentElementIndex + 1)
+        self.elementVecVec
+            .get(self.currentElementVecIndex).unwrap()
+            .get(self.currentElementIndex + 1)
     }
-
     pub(super) fn peekNextElement(&self) -> Result<&Element> {
-        if let Some(nextElement) = self.peekNextElementOpt() {
-            Ok(nextElement)
-        } else {
-            self.throwSyntaxErrorDetail("unexpected end of sql")?
-        }
+        self.peekNextElementOpt()
+            .map_or_else(
+                || self.throwSyntaxErrorDetail("unexpected end of sql")?,
+                |element| Ok(element),
+            )
     }
 
     /// 和parse toke 遍历char不同的是 要是越界了 index会是边界的后边1个 以符合当前的体系

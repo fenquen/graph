@@ -27,17 +27,29 @@ use crate::config::{Config, CONFIG};
 use crate::executor::CommandExecutor;
 use crate::meta::{DBObject, DBObjectTrait};
 use crate::parser::command::Command;
-use crate::types::{Byte, ColumnFamily, DBObjectId, DBRawIterator, KV, SelectResultToFront, SessionHashMap, SessionHashSet, SessionVec, Snapshot, TableMutations, TxId};
+use crate::types::{Byte, ColumnFamily, DBObjectId, DBRawIterator, KV, SelectResultToFront, SessionHashMap, SessionHashSet, SessionVec, Snapshot, TableMutations, TxId, DataKey};
 use crate::utils::HashMapExt;
 
 pub struct Session {
-    autoCommit: bool,
-    txId: Option<TxId>,
     db: &'static DB,
+
+    txId: Option<TxId>,
     pub dbObjectId_mutations: RwLock<HashMap<DBObjectId, TableMutations>>,
     snapshot: Option<Snapshot<'static>>,
-    pub scanConcurrency: usize,
+
     pub bump: Bump,
+
+    autoCommit: bool,
+    pub scanConcurrency: usize,
+
+    /// in byte
+    pub workingMemorySize: usize,
+
+    /// 不是stream的话,select时候会将全部的data全部返回的
+    pub streamMode: bool,
+    /// 上1趟读到的最后的key
+    /// 当streamMode时候,如果是none说明读取应结束了
+    pub lastDataKey: Option<DataKey>,
 }
 
 impl Session {
@@ -101,7 +113,7 @@ impl Session {
             // cf需要现用现取 内部使用的是read 而create cf会用到write
             let cf = Session::getColumnFamily(meta::COLUMN_FAMILY_NAME_TX_ID.parse::<DBObjectId>()?)?;
 
-            let txUndergoingMaxCount = CONFIG.txUndergoingMaxCount.load(Ordering::Acquire) as u64;
+            let txUndergoingMaxCount = CONFIG.flyingTxMaxCount.load(Ordering::Acquire) as u64;
 
             if (currentTxId - *meta::TX_ID_START_UP.getRef()) % txUndergoingMaxCount == 0 {
                 // TX_CONCURRENCY_MAX
@@ -232,7 +244,7 @@ impl Session {
         let columnFamilyMeta =
             self.db.cf_handle(meta::COLUMN_FAMILY_NAME_META).unwrap();
 
-        Ok(self.db.put_cf(key, &columnFamilyMeta, serde_json::to_string(dbObject)?.as_bytes())?)
+        Ok(self.db.put_cf(&columnFamilyMeta, key, serde_json::to_string(dbObject)?.as_bytes())?)
     }
 
     #[inline]
@@ -432,11 +444,14 @@ impl Default for Session {
         Session {
             autoCommit: true,
             db: &meta::STORE,
-            txId: None,
-            dbObjectId_mutations: Default::default(),
-            snapshot: None,
             scanConcurrency: 1,
-            bump: Bump::with_capacity(config::CONFIG.sessionMemotySize),
+            bump: Bump::with_capacity(Config::SESSION_MEMORY_SIZE_DEFAULT),
+            txId: None,
+            snapshot: None,
+            dbObjectId_mutations: Default::default(),
+            workingMemorySize: Config::DEFAULT_WORKING_MEMORY_SIZE,
+            streamMode: false,
+            lastDataKey: None,
         }
     }
 }
